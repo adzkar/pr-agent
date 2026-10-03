@@ -36,7 +36,7 @@
 #   PR_AGENT_MODE         devin --permission-mode (default dangerous)
 #   PR_AGENT_SANDBOX      1 = pass --sandbox to devin (default 0)
 #   PR_AGENT_AUTHOR       Comma list; only react to these logins (default: anyone but you)
-#   PR_AGENT_BOTS         Comma list of [bot] logins to react to (default elyoraa[bot]);
+#   PR_AGENT_BOTS         Comma list of [bot] logins to react to (default: none);
 #                         other bots are ignored unless listed in PR_AGENT_AUTHOR
 #   PR_AGENT_TRIGGER      Prefix that turns your own comment into feedback (default /agent)
 #   PR_AGENT_MAX_FAILS    Consecutive failed runs per round before giving up (default 3)
@@ -53,7 +53,8 @@
 #                         (default ^Review failed:)
 #   PR_AGENT_RETRY_MSG    Ping comment template; {reviewer} becomes the bot's handle
 #   PR_AGENT_SKIP_RE      Regex; feedback bodies matching it are ignored
-#                         (default: HTML "in-progress" markers, e.g. elyoraa's placeholder)
+#                         (default: HTML "in-progress" markers, e.g. a review bot's
+#                          placeholder)
 #   PR_AGENT_SETUP        Command run inside a newly created worktree instead of the
 #                         built-in setup (env files + node_modules/bun)
 #   PR_AGENT_MAIN_SYNC    1 = each poll also auto-syncs open PRs whose branch falls behind
@@ -119,7 +120,7 @@ INTERVAL="${PR_AGENT_INTERVAL:-${CFG_INTERVAL:-120}}"
 PERM_MODE="${PR_AGENT_MODE:-${CFG_PERM_MODE:-dangerous}}"
 SANDBOX="${PR_AGENT_SANDBOX:-${CFG_SANDBOX:-0}}"
 AUTHOR_FILTER="${PR_AGENT_AUTHOR:-${CFG_AUTHOR_FILTER:-}}"
-BOTS="${PR_AGENT_BOTS:-${CFG_BOTS:-elyoraa[bot]}}"
+BOTS="${PR_AGENT_BOTS:-${CFG_BOTS:-}}"
 TRIGGER="${PR_AGENT_TRIGGER:-${CFG_TRIGGER:-/agent}}"
 MAX_FAILS="${PR_AGENT_MAX_FAILS:-${CFG_MAX_FAILS:-3}}"
 MAX_ROUNDS="${PR_AGENT_MAX_ROUNDS:-${CFG_MAX_ROUNDS:-10}}"
@@ -322,13 +323,13 @@ pending_feedback() { # pr -> new items (jsonl); non-zero if GitHub can't be reac
 }
 
 # --- failed review runs ---------------------------------------------------------
-# The review bot (elyoraa[bot]) posts a placeholder comment on request and edits it
-# into "Review failed: Devin review run failed." when its run crashes — the
-# <!-- elyoraa-in-progress --> marker stays in the body, so SKIP_RE keeps it away
-# from the agent. Instead of waking an agent for it, the script pings the bot to
-# retry. retry_cutoff (first start of this version) protects the existing backlog:
-# only failures newer than the cutoff are auto-pinged; older ones need
-# 'pr-agent retry N'.
+# A review bot (any login in BOTS) typically posts a placeholder comment on
+# request and edits it into e.g. "Review failed: Devin review run failed." when
+# its run crashes — a <!-- bot-in-progress --> marker stays in the body, so
+# SKIP_RE keeps it away from the agent. Instead of waking an agent for it, the
+# script pings the bot to retry. retry_cutoff (first start of this version)
+# protects the existing backlog: only failures newer than the cutoff are
+# auto-pinged; older ones need 'pr-agent retry N'.
 
 retry_cutoff() { # -> ISO timestamp stored in $STATE_DIR/retry_cutoff (created once)
   local f="$STATE_DIR/retry_cutoff"
@@ -1478,7 +1479,7 @@ render_status() { # ttl [term-rows] -> status screen; with term-rows the PR tabl
   fi
   t="$(cat "$STATE_DIR/targets" 2>/dev/null || echo all)"
   if [ "$t" = "all" ] || [ -z "$t" ]; then t="all open PRs"; else t="$(hash_list "$t")"; fi
-  if [ -n "$AUTHOR_FILTER" ]; then reacts="$AUTHOR_FILTER"; else reacts="humans + $BOTS"; fi
+  if [ -n "$AUTHOR_FILTER" ]; then reacts="$AUTHOR_FILTER"; else reacts="humans"; [ -n "$BOTS" ] && reacts+=" + $BOTS"; fi
   [ "$SANDBOX" = "1" ] && extras+=" · sandbox"
   [ "$CI_TRIGGER" = "1" ] && extras+=" · CI"
   [ "$CONFLICT_TRIGGER" = "1" ] && extras+=" · conflicts"

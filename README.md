@@ -62,7 +62,7 @@ it live on the terminal's alt screen.
 
 ```
 pr-agent  ● watching (pid 10391)   owner/repo
-watching all open PRs · every 2m · mode dangerous · conflicts · 2 parallel · max 10 rounds · reacts to humans + elyoraa[bot] · next poll in 34s
+watching all open PRs · every 2m · mode dangerous · conflicts · 2 parallel · max 10 rounds · reacts to humans + review-bot[bot] · next poll in 34s
 
 ┌───────┬────────────┬────────────────┬────────────────────────┬────────┬──────────┐
 │ PR    │ TITLE      │ REVIEW         │ AGENT STATE            │ ROUNDS │ LAST RUN │
@@ -96,8 +96,9 @@ recent activity  (full log: pr-agent logs · agent transcript: pr-agent logs N)
 - Submitted reviews and line-level review comments
 - Issue comments on the PR — including review-bot notices
 - **Your own comments starting with `/agent`** (configurable via `PR_AGENT_TRIGGER`)
-- Bot logins listed in `PR_AGENT_BOTS` (default `elyoraa[bot]`); other bots are
-  ignored unless listed in `PR_AGENT_AUTHOR`
+- Bot logins listed in `PR_AGENT_BOTS` (empty by default — set it to your review
+  bot's login, e.g. `PR_AGENT_BOTS=review-bot[bot]`); other bots are ignored
+  unless listed in `PR_AGENT_AUTHOR`
 - Optionally: failing CI checks (`PR_AGENT_CI=1`) and merge conflicts
   (`PR_AGENT_CONFLICTS=1`)
 - Review-bot failure notices (`Review failed: …`) are handled by the script
@@ -114,7 +115,7 @@ Env vars always win over the per-repo config saved by `pr-agent on`
 | `PR_AGENT_MODE` | `dangerous` | `devin --permission-mode` |
 | `PR_AGENT_SANDBOX` | `0` | Pass `--sandbox` to devin |
 | `PR_AGENT_AUTHOR` | anyone but you | Comma list; only react to these logins |
-| `PR_AGENT_BOTS` | `elyoraa[bot]` | Comma list of `[bot]` logins to react to |
+| `PR_AGENT_BOTS` | — | Comma list of `[bot]` logins to react to (e.g. your review bot) |
 | `PR_AGENT_TRIGGER` | `/agent` | Prefix that turns your own comment into feedback |
 | `PR_AGENT_MAX_FAILS` | `3` | Consecutive failed runs before giving up |
 | `PR_AGENT_MAX_ROUNDS` | `10` | Stop auto-runs after this many rounds (`0` = off) |
