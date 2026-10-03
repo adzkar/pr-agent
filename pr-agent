@@ -1,0 +1,1638 @@
+#!/usr/bin/env bash
+# pr-agent — watch GitHub PRs for new review feedback and address it with a
+# persistent Devin CLI session per PR.
+#
+# Unlike a spawn-per-event watcher, each PR gets its own long-lived Devin
+# session stored in a map (pr -> session_id + worktree). New feedback resumes
+# that session (`devin -r`) so the agent keeps context across review rounds.
+#
+# Usage:
+#   pr-agent on [--launchd] [all | N...]  Start watching (default: all open non-draft PRs)
+#                                         --launchd: run under launchd (survives reboot/crash)
+#   pr-agent off [--now]            Stop the watcher (--now also kills running agents)
+#   pr-agent status [-w [SECS]]     Dashboard (-w: live refresh, default 5s)
+#   pr-agent logs [N] [-f]          Event log, or PR N's latest agent transcript (-f follow)
+#   pr-agent add | rm N...          Add/remove PR numbers from an explicit watch list
+#   pr-agent run N [--force]        Process PR N now in the foreground (--force: redo last round)
+#   pr-agent tell N "message"       Send your own instruction to PR N's session (background)
+#   pr-agent attach N               Open PR N's session interactively in its worktree
+#   pr-agent peek N                 Show unprocessed feedback for PR N (no action)
+#   pr-agent mark-seen N            Mark current feedback as handled (no action)
+#   pr-agent pause | resume N       Stop/restart automatic runs for one PR
+#   pr-agent retry N [--dry-run]    Ping the review bot if its latest review run failed
+#   pr-agent reset N                Forget PR N's session (next round starts fresh)
+#   pr-agent gc [--yes]             Clean up worktrees/branches/state of merged & closed PRs
+#   pr-agent sync [--apply [N]]     Report open PRs whose branch is behind their base;
+#                                   --apply merges the base into them via their agent
+#                                   sessions. Optional N: only PRs whose 'do not review'
+#                                   banner depends on merged PR N.
+#   pr-agent config                 Show effective settings
+#   pr-agent map                    Show the raw PR → session/worktree map
+#
+# A PR comment by you that starts with "/agent" is treated as feedback.
+#
+# Env (saved per repo by `pr-agent on`, env always wins):
+#   PR_AGENT_INTERVAL     Poll seconds (default 120)
+#   PR_AGENT_MODE         devin --permission-mode (default dangerous)
+#   PR_AGENT_SANDBOX      1 = pass --sandbox to devin (default 0)
+#   PR_AGENT_AUTHOR       Comma list; only react to these logins (default: anyone but you)
+#   PR_AGENT_BOTS         Comma list of [bot] logins to react to (default elyoraa[bot]);
+#                         other bots are ignored unless listed in PR_AGENT_AUTHOR
+#   PR_AGENT_TRIGGER      Prefix that turns your own comment into feedback (default /agent)
+#   PR_AGENT_MAX_FAILS    Consecutive failed runs per round before giving up (default 3)
+#   PR_AGENT_MAX_ROUNDS   Stop auto-runs on a PR after this many rounds (default 10, 0 = off)
+#   PR_AGENT_STOP_ON_APPROVE  1 = stop auto-runs once the PR is approved (default 1)
+#   PR_AGENT_CONCURRENCY  Parallel agent runs across PRs (default 2)
+#   PR_AGENT_CI           1 = treat failing CI checks as feedback (default 0)
+#   PR_AGENT_CONFLICTS    1 = treat merge conflicts as feedback (default 0)
+#   PR_AGENT_NOTIFY       1 = macOS notifications (default 1)
+#   PR_AGENT_RETRY        1 = ping the review bot when it reports a failed review run
+#                         (default 1; handled by the script — no agent session needed)
+#   PR_AGENT_RETRY_MAX    Consecutive retry pings per PR before giving up (default 3)
+#   PR_AGENT_RETRY_RE     jq regex on bot comment bodies that marks a failed run
+#                         (default ^Review failed:)
+#   PR_AGENT_RETRY_MSG    Ping comment template; {reviewer} becomes the bot's handle
+#   PR_AGENT_SKIP_RE      Regex; feedback bodies matching it are ignored
+#                         (default: HTML "in-progress" markers, e.g. elyoraa's placeholder)
+#   PR_AGENT_SETUP        Command run inside a newly created worktree instead of the
+#                         built-in setup (env files + node_modules/bun)
+#   PR_AGENT_MAIN_SYNC    1 = each poll also auto-syncs open PRs whose branch falls behind
+#                         the default base — includes drafts & approved PRs that the
+#                         review watcher skips. After a verified sync push, dep-gated
+#                         drafts ('do not review before #N' banner, all N merged) are
+#                         marked ready and unbannered. (default 0)
+#   PR_AGENT_REPO         owner/name to act on when not inside the repo
+#   PR_AGENT_STATE_DIR    State root (default ~/.local/state/pr-agent)
+#   DEVIN_BIN             Devin CLI binary (default devin)
+
+set -euo pipefail
+
+STATE_ROOT="${PR_AGENT_STATE_DIR:-$HOME/.local/state/pr-agent}"
+DEVIN_BIN="${DEVIN_BIN:-devin}"
+SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
+mkdir -p "$STATE_ROOT/repos"
+
+die() { echo "pr-agent: $*" >&2; exit 1; }
+
+# --- per-repo state -------------------------------------------------------------
+# State lives in $STATE_ROOT/repos/<owner>__<name>. Commands run inside a repo act
+# on that repo; elsewhere they act on the repo last started with `pr-agent on`.
+
+slug_of() { echo "$1" | sed 's#/#__#'; }
+
+git_repo_name() { # -> owner/name from the current dir's origin remote (no network)
+  local url; url="$(git remote get-url origin 2>/dev/null)" || return 1
+  echo "$url" | sed -nE 's#^.*github\.com[:/]([^/]+/[^/]+)$#\1#p' | sed 's/\.git$//' | grep . 
+}
+
+migrate_legacy_state() { # move the pre-per-repo flat layout into repos/<slug>
+  [ -f "$STATE_ROOT/map.json" ] && [ -f "$STATE_ROOT/repo" ] || return 0
+  local slug dest f; slug="$(slug_of "$(cat "$STATE_ROOT/repo")")"; dest="$STATE_ROOT/repos/$slug"
+  mkdir -p "$dest"
+  for f in map.json repo repo_dir me targets watch.log last_cycle config status_cache status_error locks running; do
+    [ -e "$STATE_ROOT/$f" ] && mv "$STATE_ROOT/$f" "$dest/" 2>/dev/null || true
+  done
+  rm -f "$STATE_ROOT/pid" "$STATE_ROOT/cycle_active"
+  [ -f "$STATE_ROOT/current" ] || echo "$slug" >"$STATE_ROOT/current"
+}
+migrate_legacy_state
+
+resolve_repo_slug() {
+  local name
+  if [ -n "${PR_AGENT_REPO:-}" ]; then slug_of "$PR_AGENT_REPO"; return; fi
+  if name="$(git_repo_name 2>/dev/null)"; then slug_of "$name"; return; fi
+  cat "$STATE_ROOT/current" 2>/dev/null || echo "_none"
+}
+
+REPO_SLUG="$(resolve_repo_slug)"
+STATE_DIR="$STATE_ROOT/repos/$REPO_SLUG"
+PID_FILE="$STATE_DIR/pid"
+MAP_FILE="$STATE_DIR/map.json"
+LOG_FILE="$STATE_DIR/watch.log"
+PRS_CACHE="$STATE_DIR/prs.jsonl"
+mkdir -p "$STATE_DIR"/{locks,running,seen,feedback,logs}
+
+# --- settings: env > saved per-repo config > default ----------------------------
+
+if [ -f "$STATE_DIR/config" ]; then . "$STATE_DIR/config"; fi
+INTERVAL="${PR_AGENT_INTERVAL:-${CFG_INTERVAL:-120}}"
+PERM_MODE="${PR_AGENT_MODE:-${CFG_PERM_MODE:-dangerous}}"
+SANDBOX="${PR_AGENT_SANDBOX:-${CFG_SANDBOX:-0}}"
+AUTHOR_FILTER="${PR_AGENT_AUTHOR:-${CFG_AUTHOR_FILTER:-}}"
+BOTS="${PR_AGENT_BOTS:-${CFG_BOTS:-elyoraa[bot]}}"
+TRIGGER="${PR_AGENT_TRIGGER:-${CFG_TRIGGER:-/agent}}"
+MAX_FAILS="${PR_AGENT_MAX_FAILS:-${CFG_MAX_FAILS:-3}}"
+MAX_ROUNDS="${PR_AGENT_MAX_ROUNDS:-${CFG_MAX_ROUNDS:-10}}"
+STOP_ON_APPROVE="${PR_AGENT_STOP_ON_APPROVE:-${CFG_STOP_ON_APPROVE:-1}}"
+CONCURRENCY="${PR_AGENT_CONCURRENCY:-${CFG_CONCURRENCY:-2}}"
+CI_TRIGGER="${PR_AGENT_CI:-${CFG_CI_TRIGGER:-0}}"
+CONFLICT_TRIGGER="${PR_AGENT_CONFLICTS:-${CFG_CONFLICT_TRIGGER:-0}}"
+NOTIFY="${PR_AGENT_NOTIFY:-${CFG_NOTIFY:-1}}"
+SKIP_RE="${PR_AGENT_SKIP_RE:-${CFG_SKIP_RE:-in-progress -->}}"
+SETUP_CMD="${PR_AGENT_SETUP:-${CFG_SETUP_CMD:-}}"
+MAIN_SYNC="${PR_AGENT_MAIN_SYNC:-${CFG_MAIN_SYNC:-0}}"               # 1 = poll also syncs PR branches that fall behind the base
+RETRY="${PR_AGENT_RETRY:-${CFG_RETRY:-1}}"                        # 1 = ping the review bot when its review run fails
+RETRY_MAX="${PR_AGENT_RETRY_MAX:-${CFG_RETRY_MAX:-3}}"            # consecutive pings per PR before giving up
+RETRY_RE="${PR_AGENT_RETRY_RE:-${CFG_RETRY_RE:-^Review failed:}}" # jq regex matching a failed-run notice
+RETRY_MSG="${PR_AGENT_RETRY_MSG:-${CFG_RETRY_MSG:-}}"
+[ -n "$RETRY_MSG" ] || RETRY_MSG='@{reviewer} the review run failed — please retry.'   # {reviewer} -> bot handle
+FULL_CHECK_EVERY=10   # cycles; forces a full feedback fetch even if nothing looks changed
+
+SETTINGS="INTERVAL PERM_MODE SANDBOX AUTHOR_FILTER BOTS TRIGGER MAX_FAILS MAX_ROUNDS STOP_ON_APPROVE CONCURRENCY CI_TRIGGER CONFLICT_TRIGGER NOTIFY RETRY RETRY_MAX RETRY_RE RETRY_MSG SKIP_RE SETUP_CMD MAIN_SYNC"
+
+save_config() {
+  local k; : >"$STATE_DIR/config"
+  for k in $SETTINGS; do printf 'CFG_%s=%q\n' "$k" "${!k}" >>"$STATE_DIR/config"; done
+}
+
+log() {
+  local msg="[$(date '+%Y-%m-%d %H:%M:%S')] $*"
+  echo "$msg" >>"$LOG_FILE"
+  echo "$msg"
+}
+
+notify() { # subtitle message -> macOS notification (best effort)
+  [ "$NOTIFY" = "1" ] && command -v osascript >/dev/null || return 0
+  local sub="${1//\"/\'}" msg="${2//\"/\'}"
+  osascript -e "display notification \"$msg\" with title \"pr-agent\" subtitle \"$sub\"" >/dev/null 2>&1 &
+}
+
+# --- repo context -------------------------------------------------------------------
+
+repo()      { cat "$STATE_DIR/repo" 2>/dev/null; }
+repo_dir()  { cat "$STATE_DIR/repo_dir" 2>/dev/null; }
+me()        { cat "$STATE_DIR/me" 2>/dev/null; }
+
+need_repo() {
+  repo >/dev/null || die "no repo recorded — run 'pr-agent on' from inside the repo first"
+}
+
+detect_repo() {
+  local dir name
+  dir="$(git rev-parse --show-toplevel 2>/dev/null)" || die "not inside a git repo"
+  dir="$(dirname "$(git -C "$dir" rev-parse --path-format=absolute --git-common-dir)")"   # main checkout, even from a worktree
+  name="$(gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null)" \
+    || die "cannot resolve GitHub repo (gh auth ok?)"
+  echo "$name" >"$STATE_DIR/repo"
+  echo "$dir" >"$STATE_DIR/repo_dir"
+  gh api user -q .login >"$STATE_DIR/me"
+  gh repo view "$name" --json defaultBranchRef -q .defaultBranchRef.name >"$STATE_DIR/base" 2>/dev/null || true
+  echo "$REPO_SLUG" >"$STATE_ROOT/current"
+}
+
+# --- map (JSON, jq-managed, lock-protected for concurrent runs) -----------------------
+
+map_init() { [ -f "$MAP_FILE" ] || echo '{"prs":{}}' >"$MAP_FILE"; }
+
+with_map_lock() { # cmd... -> run cmd while holding the map lock (stale locks broken after ~10s)
+  local l="$STATE_DIR/map.lock" i=0 rc=0
+  until mkdir "$l" 2>/dev/null; do
+    sleep 0.1; i=$(( i + 1 ))
+    if [ "$i" -gt 100 ]; then rmdir "$l" 2>/dev/null || true; i=0; fi
+  done
+  "$@" || rc=$?
+  rmdir "$l" 2>/dev/null || true
+  return "$rc"
+}
+
+map_get() { # pr key -> value or empty
+  map_init
+  jq -r --arg pr "$1" --arg k "$2" '.prs[$pr][$k] // empty' "$MAP_FILE"
+}
+
+_map_jq() { # jq-filter args... -> apply to the map atomically
+  local f="$1" tmp; shift; tmp="$(mktemp)"
+  jq "$@" "$f" "$MAP_FILE" >"$tmp" && mv "$tmp" "$MAP_FILE"
+}
+map_set() { map_init; with_map_lock _map_jq '.prs[$pr][$k] = $v' --arg pr "$1" --arg k "$2" --arg v "$3"; }
+map_del() { map_init; with_map_lock _map_jq 'del(.prs[$pr][$k])' --arg pr "$1" --arg k "$2"; }
+map_rm()  { map_init; with_map_lock _map_jq 'del(.prs[$pr])' --arg pr "$1"; }
+map_num() { local v; v="$(map_get "$1" "$2")"; echo "${v:-0}"; }
+
+# --- PR list (one gh call per cycle, shared with status) --------------------------------
+# prs.jsonl: one compact object per PR: number title state draft review updated head base
+#            mergeable ci (pass|fail|pending|none) ci_failed [{name,url}]
+
+refresh_prs() { # ttl -> refresh prs.jsonl unless younger than ttl seconds; 1 on GitHub failure
+  local ttl="$1" tmp
+  if [ -f "$PRS_CACHE" ] && [ $(( $(date +%s) - $(stat -f %m "$PRS_CACHE") )) -lt "$ttl" ]; then return 0; fi
+  tmp="$(mktemp)"
+  if ! gh pr list --repo "$(repo)" --state all --limit 100 \
+      --json number,title,state,isDraft,reviewDecision,updatedAt,headRefName,headRefOid,baseRefName,mergeable,statusCheckRollup,body,isCrossRepository \
+      --jq '.[] | ([.statusCheckRollup[]? | {name: (.name // .context), url: (.detailsUrl // .targetUrl // ""),
+                    bad: ((.conclusion // .state // "") | test("FAILURE|TIMED_OUT|CANCELLED|ACTION_REQUIRED|ERROR")),
+                    wait: ((.status // .state // "") | test("IN_PROGRESS|QUEUED|PENDING|EXPECTED|WAITING"))}]) as $c
+            | {number, title, state, draft: .isDraft, review: (.reviewDecision // ""), updated: .updatedAt,
+               branch: .headRefName, head: .headRefOid, base: .baseRefName, mergeable,
+               body, cross: .isCrossRepository,
+               ci: (if ($c|length) == 0 then "none" elif any($c[]; .wait) then "pending"
+                    elif any($c[]; .bad) then "fail" else "pass" end),
+               ci_failed: [$c[] | select(.bad) | {name, url}]} | tojson' >"$tmp" 2>/dev/null; then
+    rm -f "$tmp"; touch "$STATE_DIR/gh_error"; return 1
+  fi
+  rm -f "$STATE_DIR/gh_error"
+  mv "$tmp" "$PRS_CACHE"
+}
+
+pr_info() { # pr [field] -> the PR's cached object (or one field of it)
+  [ -f "$PRS_CACHE" ] || return 0
+  jq -r --argjson n "$1" --arg f "${2:-}" 'select(.number == $n) | if $f == "" then tojson else (.[$f] // "" | tostring) end' "$PRS_CACHE" | head -1
+}
+
+targets() { # -> PR numbers to watch (from prs.jsonl)
+  local t; t="$(cat "$STATE_DIR/targets" 2>/dev/null || true)"
+  if [ "$t" = "all" ] || [ -z "$t" ]; then
+    jq -r 'select(.state == "OPEN" and (.draft | not)) | .number' "$PRS_CACHE" 2>/dev/null | tr '\n' ' '
+  else
+    echo "$t"
+  fi
+}
+
+# --- feedback collection ------------------------------------------------------------------
+# Items are JSON lines: {key, ts, kind, author, body, url, ...}. `key` changes when an item
+# is edited, so an edited review/comment (e.g. a placeholder turned into a real review) is
+# picked up again. Handled keys are stored in seen/<pr>.
+
+fetch_feedback() { # pr -> all feedback items as jsonl; non-zero if GitHub can't be reached
+  local pr="$1" r; r="$(repo)"
+  gh api --paginate "repos/$r/pulls/$pr/reviews" --jq '.[]
+      | select((.state == "CHANGES_REQUESTED" or .state == "COMMENTED") and ((.body // "") | length > 0))
+      | {key: "r:\(.id):\(.body | length)", ts: .submitted_at, kind: "review", state, id,
+         author: .user.login, body, url: .html_url} | tojson' || return 1
+  gh api --paginate "repos/$r/pulls/$pr/comments" --jq '.[]
+      | {key: "c:\(.id):\(.updated_at)", ts: .created_at, kind: "line", id, author: .user.login, body,
+         url: .html_url, path, line: (.line // .original_line), reply_to: .in_reply_to_id, hunk: .diff_hunk} | tojson' || return 1
+  gh api --paginate "repos/$r/issues/$pr/comments" --jq '.[]
+      | {key: "i:\(.id):\(.updated_at)", ts: .created_at, updated: .updated_at, kind: "comment", id,
+         author: .user.login, body, url: .html_url} | tojson' || return 1
+  synthetic_feedback "$pr"
+}
+
+synthetic_feedback() { # pr -> CI-failure / merge-conflict items (opt-in) from the PR list cache
+  local info; info="$(pr_info "$1")"; [ -n "$info" ] || return 0
+  echo "$info" | jq -c --arg ci "$CI_TRIGGER" --arg cf "$CONFLICT_TRIGGER" --arg now "$(date -u +%FT%TZ)" '
+    (if $ci == "1" and .ci == "fail" then
+      {key: "ci:\(.head)", ts: $now, kind: "ci", author: "pr-agent", synthetic: true, url: "",
+       body: ("Failing checks on \(.head[0:8]):\n" + ([.ci_failed[] | "- \(.name) \(.url)"] | join("\n")))}
+     else empty end),
+    (if $cf == "1" and .mergeable == "CONFLICTING" then
+      {key: "conflict:\(.head):\(.base)", ts: $now, kind: "conflict", author: "pr-agent", synthetic: true, url: "",
+       body: "This branch has merge conflicts with `\(.base)`. Merge `origin/\(.base)` into the branch, resolve, verify, push."}
+     else empty end)'
+}
+
+seed_seen() { # pr all_file -> create seen/<pr> on first sight, honouring the legacy timestamp cutoff
+  local seen="$STATE_DIR/seen/$1" cutoff
+  [ -f "$seen" ] && return 0
+  cutoff="$(map_get "$1" last_seen_ts)"
+  if [ -n "$cutoff" ]; then
+    jq -r --arg c "$cutoff" 'select(.ts <= $c) | .key' "$2" >"$seen"
+  else
+    : >"$seen"
+  fi
+}
+
+filter_feedback() { # pr all_file -> new, actionable items (jsonl, oldest first)
+  local seen="$STATE_DIR/seen/$1"; [ -f "$seen" ] || seen=/dev/null
+  jq -c -s --arg me "$(me)" --arg only "$AUTHOR_FILTER" --arg bots "$BOTS" --arg skip "$SKIP_RE" \
+      --arg retry_re "$RETRY_RE" --arg trig "$TRIGGER" --rawfile seen "$seen" '
+    ($seen | split("\n") | map(select(length > 0) | {(.): true}) | add // {}) as $S
+    | ($only | split(",") | map(gsub("^ +| +$"; "")) | map(select(length > 0))) as $O
+    | ($bots | split(",") | map(gsub("^ +| +$"; ""))) as $B
+    | map(select(
+        ($S[.key] | not)
+        and ($skip == "" or ((.body // "") | test($skip) | not))
+        and ($retry_re == "" or ((.author as $a | $B | map(. == $a) | any)
+                                 and ((.body // "") | test($retry_re))) | not)
+        and (.synthetic == true
+             or (.author == $me and $trig != "" and ((.body // "") | ltrimstr(" ") | startswith($trig)))
+             or (.author != $me and (.author as $a |
+                   if ($O | length) > 0 then ($O | map(. == $a) | any)
+                   elif ($a | endswith("[bot]")) then ($B | map(. == $a) | any)
+                   else true end)))))
+    | sort_by(.ts) | .[]' "$2"
+}
+
+pending_feedback() { # pr -> new items (jsonl); non-zero if GitHub can't be reached
+  local all; all="$(mktemp)"
+  if ! fetch_feedback "$1" >"$all"; then rm -f "$all"; return 1; fi
+  seed_seen "$1" "$all"
+  filter_feedback "$1" "$all"
+  rm -f "$all"
+}
+
+# --- failed review runs ---------------------------------------------------------
+# The review bot (elyoraa[bot]) posts a placeholder comment on request and edits it
+# into "Review failed: Devin review run failed." when its run crashes — the
+# <!-- elyoraa-in-progress --> marker stays in the body, so SKIP_RE keeps it away
+# from the agent. Instead of waking an agent for it, the script pings the bot to
+# retry. retry_cutoff (first start of this version) protects the existing backlog:
+# only failures newer than the cutoff are auto-pinged; older ones need
+# 'pr-agent retry N'.
+
+retry_cutoff() { # -> ISO timestamp stored in $STATE_DIR/retry_cutoff (created once)
+  local f="$STATE_DIR/retry_cutoff"
+  [ -f "$f" ] || date -u +%FT%TZ >"$f"
+  cat "$f"
+}
+
+review_failure_plan() { # pr all_file -> {key,url,updated,reviewer,stale[],reason} for the latest bot failure notice, or nothing
+  local seen="$STATE_DIR/seen/$1"; [ -f "$seen" ] || seen=/dev/null
+  jq -c -s --arg me "$(me)" --arg bots "$BOTS" --arg re "$RETRY_RE" --rawfile seen "$seen" '
+    ($seen | split("\n") | map(select(length > 0) | {(.): true}) | add // {}) as $S
+    | ($bots | split(",") | map(gsub("^ +| +$"; ""))) as $B
+    | . as $all
+    | [ $all[] | select(.kind == "comment" and (.author as $a | $B | map(. == $a) | any)
+                        and ((.body // "") | test($re))) ] as $F
+    | if ($F | length) == 0 then empty else
+        ($F | max_by(.updated // .ts)) as $L
+        | ($L.updated // $L.ts) as $t
+        | ($L.author | sub("\\[bot\\]$"; "")) as $who
+        | { key: $L.key, url: $L.url, updated: $t, reviewer: $who,
+            stale: [ $F[] | select(.key != $L.key and ($S[.key] | not)) | .key ],
+            reason: (
+              if $S[$L.key] then "seen"
+              elif any($all[]; .author == $L.author and .key != $L.key and .ts > $t
+                       and (.kind != "comment" or ((.body // "") | test($re) | not))) then "bot-active"
+              elif any($all[]; .author == $me and .kind == "comment" and .ts > $t
+                       and ((.body // "") | contains("@" + $who))) then "already-pinged"
+              else "" end) }
+      end' "$2"
+}
+
+retry_reset_if_reviewed() { # pr all_file -> clear retry state when the bot produced a real review since the last ping
+  [ "$(map_num "$1" retry_count)" -gt 0 ] || return 0
+  local last; last="$(map_get "$1" retry_last_ping_ts)"; last="${last:-0000-00-00T00:00:00Z}"
+  if jq -e -s --arg bots "$BOTS" --arg last "$last" '
+       ($bots | split(",") | map(gsub("^ +| +$"; ""))) as $B
+       | any(.[]; (.author as $a | $B | map(. == $a) | any)
+             and (.kind == "review" or .kind == "line") and .ts > $last)' "$2" >/dev/null; then
+    map_set "$1" retry_count 0; map_del "$1" retry_gave_up
+    log "PR #$1: bot reviewed again — retry counter reset"
+  fi
+}
+
+handle_review_failure() { # pr all_file mode(watch|manual|dry) has_other(0|1) -> ping the bot when its latest review run failed
+  [ "$RETRY" = "1" ] || return 0
+  local pr="$1" all="$2" mode="$3" has_other="$4" plan
+  plan="$(review_failure_plan "$pr" "$all")" || return 0
+  [ -n "$plan" ] || return 0
+  local key url updated reviewer stale reason n ts msg
+  key="$(jq -r .key <<<"$plan")"; url="$(jq -r .url <<<"$plan")"
+  updated="$(jq -r .updated <<<"$plan")"; reviewer="$(jq -r .reviewer <<<"$plan")"
+  stale="$(jq -r '.stale[]' <<<"$plan")"; reason="$(jq -r .reason <<<"$plan")"
+
+  if [ "$mode" != "dry" ]; then
+    local k; for k in $stale; do echo "$k" >>"$STATE_DIR/seen/$pr"; done   # older failures made obsolete by the latest
+  fi
+  case "$reason" in
+    seen)
+      if [ "$mode" != "manual" ]; then
+        [ "$mode" = "dry" ] && echo "PR #$pr: latest review-run failure already handled (seen)"
+        return 0
+      fi ;;   # an explicit 'pr-agent retry N' re-pings a failure that was already handled
+    bot-active|already-pinged)
+      if [ "$mode" = "dry" ]; then
+        echo "PR #$pr: latest review-run failure already handled ($reason)"
+      else
+        echo "$key" >>"$STATE_DIR/seen/$pr"
+        log "PR #$pr: review-run failure already handled ($reason)"
+      fi
+      return 0 ;;
+  esac
+  if [ "$has_other" = "1" ]; then
+    # real feedback is going to the agent this round; its step-6 re-review comment pings the bot anyway
+    if [ "$mode" = "dry" ]; then
+      echo "PR #$pr: review run failed ($url) — retry would be folded into the pending agent round"
+    else
+      echo "$key" >>"$STATE_DIR/seen/$pr"
+      log "PR #$pr: review run failed — retry folded into this agent round"
+    fi
+    return 0
+  fi
+  n="$(map_num "$pr" retry_count)"
+  if [ "$mode" = "watch" ] && [ "$updated" '<' "$(retry_cutoff)" ]; then
+    # pre-existing failure (backlog): watcher stays out of it; key NOT marked seen
+    if [ "$(map_get "$pr" retry_skip_logged)" != "$key" ]; then
+      map_set "$pr" retry_skip_logged "$key"
+      log "PR #$pr: pre-existing review-run failure ignored — run 'pr-agent retry $pr' to ping"
+    fi
+    return 0
+  fi
+  if [ "$mode" = "watch" ] && [ "$n" -ge "$RETRY_MAX" ]; then
+    echo "$key" >>"$STATE_DIR/seen/$pr"
+    map_set "$pr" retry_gave_up 1
+    log "PR #$pr: review run failed $RETRY_MAX times in a row — stopped pinging @$reviewer, needs you"
+    notify "PR #$pr" "Review run failed ${RETRY_MAX}x in a row — needs you"
+    return 0
+  fi
+  msg="${RETRY_MSG//\{reviewer\}/$reviewer}"
+  if [ "$mode" = "dry" ]; then
+    echo "PR #$pr: would ping @$reviewer ($msg) — failure $url, count $n/$RETRY_MAX"
+    return 0
+  fi
+  if ts="$(gh api -X POST "repos/$(repo)/issues/$pr/comments" -f body="$msg" --jq .created_at 2>>"$LOG_FILE")"; then
+    echo "$key" >>"$STATE_DIR/seen/$pr"
+    map_set "$pr" retry_count $(( n + 1 )); map_set "$pr" retry_last_ping_ts "$ts"; map_del "$pr" retry_skip_logged
+    log "PR #$pr: review run failed — pinged @$reviewer to retry ($(( n + 1 ))/$RETRY_MAX)"
+    notify "PR #$pr" "Review run failed — pinged @$reviewer to retry"
+  else
+    log "PR #$pr: couldn't post the review-retry ping — will retry next poll"   # key NOT marked seen
+  fi
+}
+
+format_feedback() { # jsonl on stdin -> markdown for the agent prompt
+  jq -r -s --arg me "$(me)" '.[] |
+    "---\n" +
+    (if .kind == "line" then
+       "### Line comment on `\(.path):\(.line // "?")` by @\(.author) — comment id \(.reply_to // .id)\(if .reply_to then " (reply in that thread)" else "" end)\n\(.url)\n\n"
+       + (if .hunk then "```diff\n" + (.hunk | split("\n") | .[-12:] | join("\n")) + "\n```\n\n" else "" end)
+     elif .kind == "review"   then "### Review (\(.state)) by @\(.author)\n\(.url)\n\n"
+     elif .kind == "ci"       then "### Failing CI checks\n\n"
+     elif .kind == "conflict" then "### Merge conflict\n\n"
+     elif .author == $me      then "### Instruction from the PR owner (@\(.author))\n\(.url)\n\n"
+     else "### PR comment by @\(.author)\n\(.url)\n\n" end)
+    + (.body // "") + "\n"'
+}
+
+# --- worktree -----------------------------------------------------------------------
+
+setup_worktree() { # src wt -> copy gitignored env/config files and dependencies into a new worktree
+  local src="$1" wt="$2" f rel ws same=1 husky=''
+  if [ -n "$SETUP_CMD" ]; then (cd "$wt" && SRC="$src" bash -c "$SETUP_CMD") || true; return 0; fi
+  find "$src" -name node_modules -prune -o -name vendor -prune -o -name .git -prune -o \
+       -type f \( -name '.env' -o -name '.env.*' -o -name 'config.local.json' \) -print 2>/dev/null \
+    | { grep -vE '\.(example|sample|template)$' || true; } | while IFS= read -r f; do
+        rel="${f#"$src"/}"
+        [ -e "$wt/$rel" ] && continue
+        mkdir -p "$wt/$(dirname "$rel")"; cp "$f" "$wt/$rel"
+      done
+  [ -f "$wt/package.json" ] || return 0
+  local wss; wss=". $(jq -r '.workspaces // [] | if type == "object" then .packages else . end | .[] | select(test("[*]") | not)' "$wt/package.json" 2>/dev/null | tr '\n' ' ')"
+  [ -d "$src/node_modules" ] || same=0
+  for f in bun.lock package.json; do cmp -s "$src/$f" "$wt/$f" || same=0; done
+  for ws in $wss; do cmp -s "$src/$ws/package.json" "$wt/$ws/package.json" || same=0; done
+  if [ "$same" -eq 1 ]; then
+    for ws in $wss; do
+      if [ -d "$src/$ws/node_modules" ] && [ ! -e "$wt/$ws/node_modules" ]; then cp -R "$src/$ws/node_modules" "$wt/$ws/"; fi
+    done
+  elif command -v bun >/dev/null; then
+    (cd "$wt" && bun install --frozen-lockfile) || true
+  fi
+  for ws in $wss; do
+    if jq -e '.scripts.prepare // "" | test("husky")' "$wt/$ws/package.json" >/dev/null 2>&1; then husky="$ws"; break; fi
+  done
+  if [ -n "$husky" ] && command -v bun >/dev/null; then (cd "$wt/$husky" && bun run prepare) || true; fi
+}
+
+ensure_worktree() { # pr branch -> prints worktree abs path (never the main checkout)
+  local pr="$1" branch="$2" rd wt existing; rd="$(repo_dir)"
+  [ -n "$branch" ] || { echo "PR #$pr: unknown head branch" >&2; return 1; }
+  existing="$(map_get "$pr" worktree)"
+  if [ -n "$existing" ] && [ -d "$existing" ] && [ "$existing" != "$rd" ]; then echo "$existing"; return 0; fi
+
+  wt="$(git -C "$rd" worktree list --porcelain \
+        | awk -v b="refs/heads/$branch" '/^worktree /{w=substr($0, 10)} /^branch /{if ($2 == b) print w}')"
+  if [ "$wt" = "$rd" ]; then
+    echo "PR #$pr: branch $branch is checked out in the main checkout — refusing to run there; switch it to another branch" >&2
+    return 1
+  fi
+  if [ -n "$wt" ]; then echo "$wt"; return 0; fi
+
+  wt="$(dirname "$rd")/$(basename "$rd")-pr-$pr"
+  if [ ! -d "$wt" ]; then
+    git -C "$rd" fetch origin "$branch" >&2 2>/dev/null || git -C "$rd" fetch origin "pull/$pr/head:pr-$pr" >&2
+    if git -C "$rd" show-ref --verify --quiet "refs/heads/$branch"; then
+      git -C "$rd" worktree add "$wt" "$branch" >&2
+    elif git -C "$rd" show-ref --verify --quiet "refs/remotes/origin/$branch"; then
+      git -C "$rd" worktree add --track -b "$branch" "$wt" "origin/$branch" >&2
+    else
+      git -C "$rd" worktree add "$wt" "pr-$pr" >&2
+    fi
+    setup_worktree "$rd" "$wt" >&2
+  fi
+  [ -d "$wt" ] && echo "$wt"
+}
+
+sync_worktree() { # wt branch -> fast-forward to origin if the tree is clean (best effort)
+  [ -z "$(git -C "$1" status --porcelain 2>/dev/null)" ] || return 0
+  git -C "$1" fetch -q origin "$2" 2>/dev/null && git -C "$1" merge -q --ff-only "origin/$2" 2>/dev/null || true
+}
+
+# --- main-sync (post-merge catch-up) ----------------------------------------------------
+# A PR is "behind" when origin/<base> is not an ancestor of its head. The script detects
+# this and hands the merge to the PR's agent session (same session as review rounds);
+# unbanner + ready for dep-gated drafts is done by the script AFTER the push is verified,
+# tracked via the sync_unblock state machine so partial failures are resumable.
+
+default_base() { # -> the repo's default branch name (cached by detect_repo)
+  local b; b="$(cat "$STATE_DIR/base" 2>/dev/null)"
+  if [ -z "$b" ]; then
+    b="$(gh repo view "$(repo)" --json defaultBranchRef -q .defaultBranchRef.name 2>/dev/null)"
+    [ -n "$b" ] && echo "$b" >"$STATE_DIR/base"
+  fi
+  echo "${b:-main}"
+}
+
+fetch_base() { # base -> refresh origin/<base>; 1 on fetch failure
+  git -C "$(repo_dir)" fetch -q origin "$1" 2>/dev/null
+}
+
+base_sha() { # base -> current remote-tracking sha
+  git -C "$(repo_dir)" rev-parse --verify -q "origin/$1" 2>/dev/null
+}
+
+branch_head() { # pr -> remote head sha (from the prs cache, live gh fallback)
+  local h; h="$(pr_info "$1" head)"
+  [ -n "$h" ] || h="$(gh pr view "$1" --repo "$(repo)" --json headRefOid -q .headRefOid 2>/dev/null)"
+  echo "$h"
+}
+
+pr_behind_base() { # pr basesha -> 0 when the PR head exists and doesn't contain basesha
+  local pr="$1" head branch
+  head="$(branch_head "$pr")"; [ -n "$head" ] || return 1
+  if ! git -C "$(repo_dir)" cat-file -e "$head" 2>/dev/null; then
+    branch="$(pr_info "$pr" branch)"
+    [ -n "$branch" ] && git -C "$(repo_dir)" fetch -q origin "$branch" 2>/dev/null || true
+    git -C "$(repo_dir)" cat-file -e "$head" 2>/dev/null || return 1
+  fi
+  ! git -C "$(repo_dir)" merge-base --is-ancestor "$2" "$head" 2>/dev/null
+}
+
+sync_key() { echo "sync:$1:$2"; }   # head:base — a new base or head re-triggers sync
+
+dep_banner_numbers() { # body -> dep PR numbers named on 'do not review before' lines
+  printf '%s\n' "$1" | grep -iE 'do[[:space:]]+not[[:space:]]+review[[:space:]]+before' \
+    | grep -oE '#[0-9]+' | tr -d '#' | sort -un | xargs 2>/dev/null || true
+}
+
+depf_match() { # pr depN -> 0 when the PR's dep banner lists depN
+  local deps; deps="$(dep_banner_numbers "$(pr_info "$1" body)")"
+  [ -n "$deps" ] && printf ' %s ' "$deps" | grep -q " $2 "
+}
+
+unblock_pending() { # pr -> 0 when it's a draft whose banner deps are ALL merged (live check)
+  local deps d st
+  [ "$(pr_info "$1" draft)" = "true" ] || return 1
+  deps="$(dep_banner_numbers "$(pr_info "$1" body)")"; [ -n "$deps" ] || return 1
+  for d in $deps; do
+    st="$(gh pr view "$d" --repo "$(repo)" --json state -q .state 2>/dev/null)"
+    [ "$st" = "MERGED" ] || return 1
+  done
+  return 0
+}
+
+verify_synced() { # pr basesha -> 0 when the REMOTE branch now contains basesha
+  local branch; branch="$(pr_info "$1" branch)"; [ -n "$branch" ] || return 1
+  git -C "$(repo_dir)" fetch -q origin "$branch" 2>/dev/null || return 1
+  git -C "$(repo_dir)" merge-base --is-ancestor "$2" "origin/$branch" 2>/dev/null
+}
+
+apply_unblock() { # pr -> ready a dep-gated draft + strip its banner; resumable via sync_unblock
+  local st; st="$(map_get "$1" sync_unblock)"
+  [ -n "$st" ] && [ "$st" != "done" ] || return 0
+  local info; info="$(gh pr view "$1" --repo "$(repo)" --json state,isDraft,body 2>>"$LOG_FILE")" || return 1
+  [ "$(jq -r .state <<<"$info")" = "OPEN" ] || { map_del "$1" sync_unblock; return 0; }
+  if [ "$st" = "pending" ]; then
+    local deps d dst allm=1
+    deps="$(dep_banner_numbers "$(jq -r .body <<<"$info")")"
+    if [ -z "$deps" ]; then map_del "$1" sync_unblock; return 0; fi   # banner gone — nothing to do
+    for d in $deps; do
+      dst="$(gh pr view "$d" --repo "$(repo)" --json state -q .state 2>/dev/null)"
+      [ "$dst" = "MERGED" ] || allm=0
+    done
+    [ "$allm" = "1" ] || { map_del "$1" sync_unblock; return 0; }      # dep un-merged/reopened — drop intent
+    if [ "$(jq -r .isDraft <<<"$info")" != "true" ]; then
+      map_set "$1" sync_unblock ready                                 # already non-draft — go straight to strip
+    elif gh pr ready "$1" --repo "$(repo)" >>"$LOG_FILE" 2>&1; then
+      map_set "$1" sync_unblock ready
+      log "PR #$1: dependencies merged — marked ready for review"
+      notify "PR #$1" "Dependencies merged — marked ready for review"
+    else
+      log "PR #$1: 'gh pr ready' failed — will retry next poll"; return 1
+    fi
+  fi
+  if [ "$(map_get "$1" sync_unblock)" = "ready" ]; then
+    local nb bf; bf="$(mktemp)"
+    nb="$(jq -r .body <<<"$info" | grep -vEi 'do[[:space:]]+not[[:space:]]+review[[:space:]]+before' | sed -e '/./,$!d')"
+    if [ "$nb" = "$(jq -r .body <<<"$info")" ]; then
+      map_set "$1" sync_unblock done; rm -f "$bf"; return 0          # banner already gone
+    fi
+    printf '%s\n' "$nb" >"$bf"
+    if gh pr edit "$1" --repo "$(repo)" --body-file "$bf" >>"$LOG_FILE" 2>&1; then
+      map_set "$1" sync_unblock done; log "PR #$1: removed the do-not-review banner"
+    else
+      log "PR #$1: couldn't strip the banner — will retry next poll"   # stays 'ready', retried later
+    fi
+    rm -f "$bf"
+  fi
+}
+
+scan_sync_candidates() { # -> open same-repo PRs targeting the default base, within watch scope
+  local t p b; t="$(cat "$STATE_DIR/targets" 2>/dev/null || true)"; b="$(default_base)"
+  if [ "$t" = "all" ] || [ -z "$t" ]; then
+    jq -r --arg b "$b" 'select(.state=="OPEN" and .base==$b and (.cross // false | not)) | .number' "$PRS_CACHE" 2>/dev/null
+  else
+    for p in $t; do
+      [ "$(pr_info "$p" state)" = "OPEN" ] && [ "$(pr_info "$p" base)" = "$b" ] \
+        && [ "$(pr_info "$p" cross)" != "true" ] && echo "$p"
+    done
+  fi
+}
+
+build_sync_prompt() { # pr branch head basesha base -> prompt for the PR's agent session
+  local pr="$1" branch="$2" head="$3" bsha="$4" base="$5"
+  cat <<EOF
+Sync task for PR #$pr ($(repo), branch \`$branch\`, base \`$base\`). You are in the PR's worktree; earlier context is preserved.
+
+\`origin/$base\` moved ahead of this branch — it is missing commits up to $bsha. Bring the branch up to date:
+
+1. Run \`git status\` and \`git fetch origin\` first — abort and explain if the worktree is dirty or on a different branch.
+2. Merge with \`git merge origin/$base\` (a merge commit — do NOT rebase).
+3. Conflict policy:
+   - Translation files (*/assets/lang/*.json): union-merge — keep keys from both sides; for the same key keep the better translation; the result must be valid JSON with no duplicate keys.
+   - Generated files (e.g. routeTree.gen.ts): resolve the source conflicts first, then regenerate (backoffice: \`bun run generate:routes\`) — never hand-edit generated output.
+   - If the merge touched \`shared-ts/\` and you verify a consumer package, build shared-ts first (\`cd shared-ts && bun run build\`) so consumers typecheck against the new dist.
+   - Other files: keep both sides' changes where they coexist; if the right resolution needs a product decision, stop and explain instead of guessing.
+4. Verify per the affected subproject's AGENTS.md (e.g. backoffice: \`bun run lint\` and \`bun run build\`). Do NOT push if verification fails — report what failed and leave the state in the worktree.
+5. Before pushing, \`git fetch origin\` again: if \`origin/$base\` advanced past $bsha, merge it again and re-verify; if the remote branch moved past $head, stop and report instead of overwriting. Push with \`git push\` — never force-push.
+
+Do not edit the PR body, do not change draft/ready state, and do not request reviewers — the watcher handles unblocking after it verifies your push.
+EOF
+}
+
+check_sync() { # pr basesha base mode(watch|manual) -> merge the base into the PR branch via its agent session
+  local pr="$1" bsha="$2" base="$3" mode="${4:-watch}" lock="$STATE_DIR/locks/$1"
+  local head branch key pf rc=0 fails
+  if ! mkdir "$lock" 2>/dev/null; then
+    [ "$mode" = "manual" ] && echo "PR #$pr: busy — an agent run is in progress, try when it finishes"
+    return 0
+  fi
+  head="$(branch_head "$pr")"; branch="$(pr_info "$pr" branch)"; key="$(sync_key "$head" "$bsha")"
+  if [ -z "$head" ] || [ -z "$branch" ]; then
+    log "PR #$pr: sync skipped — can't resolve head branch/sha"; rmdir "$lock" 2>/dev/null || true; return 0
+  fi
+  if [ "$mode" != "manual" ] && [ "$key" = "$(map_get "$pr" sync_blocked_key)" ]; then
+    rmdir "$lock" 2>/dev/null || true; return 0    # this head:base state already failed MAX_FAILS times
+  fi
+  if [ "$key" = "$(map_get "$pr" sync_done_key)" ]; then
+    map_del "$pr" sync_pending; rmdir "$lock" 2>/dev/null || true; return 0
+  fi
+  if [ "$key" != "$(map_get "$pr" sync_fail_key)" ]; then map_set "$pr" sync_fail_key "$key"; map_set "$pr" sync_fails 0; fi
+  if unblock_pending "$pr"; then map_set "$pr" sync_unblock pending; else map_del "$pr" sync_unblock; fi
+  pf="$(mktemp)"; build_sync_prompt "$pr" "$branch" "$head" "$bsha" "$base" >"$pf"
+  log "PR #$pr: branch behind origin/$base — sync agent started"
+  run_agent "$pr" "$pf" || rc=$?
+  rm -f "$pf"
+  if [ "$rc" -eq 0 ] && verify_synced "$pr" "$bsha"; then
+    map_set "$pr" sync_done_key "$key"; map_set "$pr" sync_fails 0
+    map_del "$pr" sync_pending; map_del "$pr" sync_blocked_key; map_del "$pr" sync_blocked
+    map_set "$pr" sync_runs $(( $(map_num "$pr" sync_runs) + 1 )); map_set "$pr" last_run_at "$(date +%s)"
+    log "PR #$pr: synced with origin/$base ✓"; notify "PR #$pr" "Synced with $base"
+    apply_unblock "$pr" || true
+  elif [ "$rc" -eq 2 ] || [ "$rc" -eq 3 ]; then
+    log "PR #$pr: sync deferred — session busy or stopped"   # sync_pending stays set; retried next poll
+  else
+    fails=$(( $(map_num "$pr" sync_fails) + 1 )); map_set "$pr" sync_fails "$fails"
+    map_set "$pr" last_run_at "$(date +%s)"
+    if [ "$fails" -ge "$MAX_FAILS" ]; then
+      map_set "$pr" sync_blocked_key "$key"; map_set "$pr" sync_blocked 1; map_del "$pr" sync_pending
+      log "PR #$pr: main sync failed $MAX_FAILS times — giving up on this head/base state"
+      notify "PR #$pr" "Main sync failed ${MAX_FAILS}x — needs you"
+      gh pr comment "$pr" --repo "$(repo)" \
+        --body "pr-agent: couldn't sync this branch with \`$base\` after $MAX_FAILS attempts — needs manual attention." \
+        >>"$LOG_FILE" 2>&1 || true
+    else
+      log "PR #$pr: sync run didn't land the merge (attempt $fails/$MAX_FAILS) — will retry"
+    fi
+  fi
+  rm -f "$STATE_DIR/running/$pr"; rmdir "$lock" 2>/dev/null || true
+}
+
+sync_scan() { # mode(report|apply|watch) [dep-filter-pr] -> detect PRs behind base and act
+  local mode="$1" depf="${2:-}" rd pr head branch key bsha base shown=0 extra act
+  rd="$(repo_dir)"; [ -n "$rd" ] || { log "sync: no repo_dir — run 'pr-agent on' from the repo first"; return 1; }
+  base="$(default_base)"
+  fetch_base "$base" || { [ "$mode" != "watch" ] && echo "sync: can't fetch origin/$base" >&2; return 1; }
+  bsha="$(base_sha "$base")"; [ -n "$bsha" ] || return 1
+  for pr in $(scan_sync_candidates); do
+    if [ "$(map_get "$pr" paused)" = "1" ]; then map_del "$pr" sync_pending; continue; fi
+    [ -n "$depf" ] && { depf_match "$pr" "$depf" || continue; }
+    head="$(branch_head "$pr")"; branch="$(pr_info "$pr" branch)"; key="$(sync_key "$head" "$bsha")"
+    if pr_behind_base "$pr" "$bsha"; then
+      case "$mode" in
+        report)
+          shown=$(( shown + 1 )); extra=''
+          [ "$(pr_info "$pr" mergeable)" = "CONFLICTING" ] && extra="conflicting"
+          [ "$(pr_info "$pr" draft)" = "true" ] && extra="${extra:+$extra, }draft"
+          [ "$(pr_info "$pr" review)" = "APPROVED" ] && extra="${extra:+$extra, }approved"
+          if [ "$key" = "$(map_get "$pr" sync_blocked_key)" ]; then act="blocked after $MAX_FAILS failed syncs — --apply retries"
+          elif [ "$key" = "$(map_get "$pr" sync_done_key)" ]; then act="already synced this state"
+          else act="merge origin/$base + verify + push"; fi
+          if [ "$key" != "$(map_get "$pr" sync_done_key)" ] && unblock_pending "$pr"; then
+            act="$act → mark ready + remove dep banner"
+          fi
+          printf '#%-5s %-40s %-24s %s\n' "$pr" "${branch:-?}" "${extra:-—}" "$act" ;;
+        watch)
+          if [ "$key" != "$(map_get "$pr" sync_done_key)" ] && [ "$key" != "$(map_get "$pr" sync_blocked_key)" ]; then
+            map_set "$pr" sync_pending 1
+            while [ "$(jobs -rp | wc -l | tr -d ' ')" -ge "$CONCURRENCY" ]; do sleep 2; done
+            ( check_sync "$pr" "$bsha" "$base" watch ) &
+          fi ;;
+        apply)
+          if [ "$key" = "$(map_get "$pr" sync_done_key)" ]; then echo "PR #$pr: already synced with this base — skipping"; continue; fi
+          echo "── PR #$pr ($branch) — syncing with origin/$base"
+          check_sync "$pr" "$bsha" "$base" manual ;;
+      esac
+    else
+      if [ "$mode" != "report" ]; then
+        map_del "$pr" sync_pending
+        # not behind, but a draft banner may still be unblocked (or a partial unblock resumed)
+        if [ -z "$(map_get "$pr" sync_unblock)" ] && unblock_pending "$pr"; then map_set "$pr" sync_unblock pending; fi
+        case "$(map_get "$pr" sync_unblock)" in pending|ready) apply_unblock "$pr" || true ;; esac
+      elif unblock_pending "$pr"; then
+        shown=$(( shown + 1 ))
+        printf '#%-5s %-40s %-24s %s\n' "$pr" "${branch:-?}" "current" "deps merged — would mark ready + remove banner"
+      fi
+    fi
+  done
+  if [ "$mode" = "report" ] && [ "$shown" -eq 0 ]; then echo "all open PRs are current with origin/$base — nothing to sync"; fi
+}
+
+# --- agent -----------------------------------------------------------------------------
+
+build_prompt() { # pr branch feedback_jsonl -> full prompt text
+  local pr="$1" branch="$2" base; base="$(pr_info "$pr" base)"
+  cat <<EOF
+New feedback on PR #$pr ($(repo), branch \`$branch\`, base \`${base:-main}\`). You are working in the PR's worktree; your context from earlier rounds is preserved (this is round $(( $(map_num "$pr" rounds) + 1 ))).
+
+$(format_feedback <"$3")
+---
+
+Instructions:
+1. Run \`git status\` and \`git fetch origin\` first — the tree may have changed since your last turn. Re-read any file before editing it; do not rely on remembered contents.
+2. Address every finding (HIGH/MEDIUM/LOW). Do not dismiss a finding without attempting a fix. Instructions from the PR owner take priority.
+3. For failing CI: inspect with \`gh pr checks $pr\` and \`gh run view <run-id> --log-failed\`. For merge conflicts: merge \`origin/${base:-main}\`, resolve, re-verify.
+4. Run the project's verification (see AGENTS.md), commit per topic, and push.
+5. For each line comment, reply in its thread with a one-line summary of the fix:
+   \`gh api repos/$(repo)/pulls/$pr/comments/<comment id>/replies -f body='...'\`
+6. Post one PR comment listing each finding with what was done, confirm verification, and ask the reviewer to re-review.
+EOF
+}
+
+devin_flags() { # -> common devin CLI flags
+  printf '%s\n' --permission-mode "$PERM_MODE"
+  if [ "$SANDBOX" = "1" ]; then printf '%s\n' --sandbox; fi
+}
+
+session_ids() { # cwd -> known session ids in that directory
+  (cd "$1" && "$DEVIN_BIN" list --format json 2>/dev/null) | jq -r '.[].id' 2>/dev/null || true
+}
+
+new_session_id() { # cwd before_ids_file start_epoch -> id of the session created by our run
+  local ids mapped
+  mapped="$(jq -r '[.prs[].session_id // empty] | .[]' "$MAP_FILE")"
+  ids="$( (cd "$1" && "$DEVIN_BIN" list --format json 2>/dev/null) \
+    | jq -r --argjson since "$3" --rawfile before "$2" --arg mapped "$mapped" '
+        ($before | split("\n")) as $b | ($mapped | split("\n")) as $m
+        | map(select(.last_activity_at >= $since and ((.id as $i | $b | index([$i])) | not)
+                     and ((.id as $i | $m | index([$i])) | not)))
+        | sort_by(.last_activity_at) | last | .id // empty' 2>/dev/null || true)"
+  echo "$ids"
+}
+
+run_agent() { # pr prompt_file -> 0 ok, 1 fail, 2 session busy elsewhere, 3 stopped by user
+  local pr="$1" pf="$2" wt branch session out apid rc=0 flags before ids_before
+  branch="$(pr_info "$pr" branch)"
+  [ -n "$branch" ] || branch="$(gh pr view "$pr" --repo "$(repo)" --json headRefName -q .headRefName 2>/dev/null || true)"
+  if ! wt="$(ensure_worktree "$pr" "$branch" 2>>"$LOG_FILE")" || [ -z "$wt" ]; then
+    log "PR #$pr: couldn't prepare a worktree (see log)"; return 1
+  fi
+  map_set "$pr" worktree "$wt"; map_set "$pr" branch "$branch"
+  sync_worktree "$wt" "$branch"
+
+  mkdir -p "$STATE_DIR/logs/$pr"
+  out="$STATE_DIR/logs/$pr/$(date +%Y%m%d-%H%M%S).log"
+  ln -sf "$out" "$STATE_DIR/logs/$pr/latest.log"
+  ls -t "$STATE_DIR/logs/$pr"/2*.log 2>/dev/null | tail -n +21 | xargs rm -f 2>/dev/null || true
+  flags="$(devin_flags)"
+  session="$(map_get "$pr" session_id)"
+
+  if [ -n "$session" ]; then
+    log "PR #$pr: resuming session $session in $(basename "$wt")"
+    # shellcheck disable=SC2086
+    (cd "$wt" && exec "$DEVIN_BIN" $flags -r "$session" -p "$(cat "$pf")") >"$out" 2>&1 &
+    apid=$!
+    local t0; t0="$(date +%s)"
+    echo "$apid $t0 resume" >"$STATE_DIR/running/$pr"
+    wait "$apid" || rc=1
+    [ -f "$STATE_DIR/running/$pr" ] || { log "PR #$pr: agent run stopped by user"; return 3; }
+    [ "$rc" -eq 0 ] && return 0
+    rc=0
+    if grep -q "already open in another process" "$out"; then
+      log "PR #$pr: session $session is open in another process — will retry next poll"
+      return 2
+    fi
+    if [ $(( $(date +%s) - t0 )) -ge 30 ]; then
+      log "PR #$pr: resumed session $session failed mid-run (keeping it for the retry)"; return 1
+    fi
+    log "PR #$pr: couldn't resume $session; starting a fresh session"
+  fi
+
+  log "PR #$pr: starting new session in $(basename "$wt")"
+  before="$(date +%s)"; ids_before="$(mktemp)"; session_ids "$wt" >"$ids_before"
+  # shellcheck disable=SC2086
+  (cd "$wt" && exec "$DEVIN_BIN" $flags -p "$(cat "$pf")") >>"$out" 2>&1 &
+  apid=$!
+  echo "$apid $(date +%s) new" >"$STATE_DIR/running/$pr"
+  wait "$apid" || rc=1
+  if [ ! -f "$STATE_DIR/running/$pr" ]; then log "PR #$pr: agent run stopped by user"; rc=3; fi
+  sleep 1
+  local sid; sid="$(new_session_id "$wt" "$ids_before" "$before")"; rm -f "$ids_before"
+  if [ -n "$sid" ]; then
+    map_set "$pr" session_id "$sid"; log "PR #$pr: linked to session $sid"
+  else
+    log "PR #$pr: WARNING could not identify the new session (next round starts fresh)"
+  fi
+  return "$rc"
+}
+
+# --- per-PR check -----------------------------------------------------------------------
+
+check_pr() { # pr [sig] [force] [mode] -> processes new feedback for one PR (mode watch|manual; failure pings run regardless)
+  local pr="$1" sig="${2:-}" force="${3:-}" mode="${4:-watch}" lock="$STATE_DIR/locks/$1"
+  mkdir "$lock" 2>/dev/null || return 0   # another run in flight
+  local new pf all rc=0 count newest
+  new="$(mktemp)" pf="$(mktemp)" all="$(mktemp)"
+
+  if ! fetch_feedback "$pr" >"$all"; then
+    log "PR #$pr: couldn't fetch feedback from GitHub — will retry"
+    rm -f "$all" "$new" "$pf"; rmdir "$lock" 2>/dev/null || true; return 0
+  fi
+  seed_seen "$pr" "$all"
+  retry_reset_if_reviewed "$pr" "$all"
+  filter_feedback "$pr" "$all" >"$new"
+  [ -n "$sig" ] && map_set "$pr" sig "$sig"
+  if [ ! -s "$new" ] && [ -n "$force" ] && [ -s "$STATE_DIR/feedback/$pr.jsonl" ]; then
+    cp "$STATE_DIR/feedback/$pr.jsonl" "$new"; log "PR #$pr: re-running last round (--force)"
+  fi
+  handle_review_failure "$pr" "$all" "$mode" "$([ -s "$new" ] && echo 1 || echo 0)" || true
+  rm -f "$all"
+  if [ ! -s "$new" ]; then rm -f "$new" "$pf"; rmdir "$lock" 2>/dev/null || true; return 0; fi
+
+  count="$(wc -l <"$new" | tr -d ' ')"
+  newest="$(jq -r -s 'map(.ts) | max' "$new")"
+  log "PR #$pr: $count new item(s) from $(jq -r -s 'map(.author) | unique | join(", ")' "$new") — agent started"
+  cp "$new" "$STATE_DIR/feedback/$pr.jsonl"
+  build_prompt "$pr" "$(pr_info "$pr" branch)" "$new" >"$pf"
+
+  run_agent "$pr" "$pf" || rc=$?
+  if [ "$rc" -eq 2 ] || [ "$rc" -eq 3 ]; then
+    log "PR #$pr: feedback stays pending"
+  elif [ "$rc" -eq 0 ]; then
+    jq -r '.key' "$new" >>"$STATE_DIR/seen/$pr"
+    local rounds=$(( $(map_num "$pr" rounds) + 1 ))
+    map_set "$pr" rounds "$rounds"; map_set "$pr" fail_count 0; map_del "$pr" gave_up
+    map_set "$pr" last_seen_ts "$newest"
+    map_set "$pr" last_head_sha "$(git -C "$(map_get "$pr" worktree)" rev-parse HEAD 2>/dev/null || echo '?')"
+    log "PR #$pr: round $rounds finished ✓"
+    notify "PR #$pr" "Round $rounds finished — $count item(s) addressed"
+  else
+    local fc=$(( $(map_num "$pr" fail_count) + 1 ))
+    map_set "$pr" fail_count "$fc"
+    log "PR #$pr: agent run failed (attempt $fc/$MAX_FAILS)"
+    if [ "$fc" -ge "$MAX_FAILS" ]; then
+      jq -r '.key' "$new" >>"$STATE_DIR/seen/$pr"   # stop retrying this round
+      map_set "$pr" fail_count 0; map_set "$pr" gave_up 1
+      gh pr comment "$pr" --repo "$(repo)" \
+        --body "pr-agent: automated run failed $MAX_FAILS times for this feedback round — needs manual attention." \
+        >>"$LOG_FILE" 2>&1 || true
+      log "PR #$pr: gave up on this round after $MAX_FAILS failures; escalated on the PR"
+      notify "PR #$pr" "Gave up after $MAX_FAILS failed runs — needs you"
+    fi
+  fi
+
+  if [ "$rc" -le 1 ]; then map_set "$pr" last_run_at "$(date +%s)"; fi
+  rm -f "$new" "$pf" "$STATE_DIR/running/$pr"; rmdir "$lock" 2>/dev/null || true
+}
+
+skip_reason() { # pr -> why the watcher won't auto-run this PR (empty = eligible)
+  local pr="$1" state review
+  state="$(pr_info "$pr" state)"; review="$(pr_info "$pr" review)"
+  if [ -n "$state" ] && [ "$state" != "OPEN" ]; then echo "$state" | tr 'A-Z' 'a-z'; return; fi
+  if [ "$(map_get "$pr" paused)" = "1" ]; then echo "paused"; return; fi
+  if [ "$MAX_ROUNDS" -gt 0 ] && [ "$(map_num "$pr" rounds)" -ge "$MAX_ROUNDS" ]; then echo "round limit"; return; fi
+  if [ "$STOP_ON_APPROVE" = "1" ] && [ "$review" = "APPROVED" ]; then echo "approved"; return; fi
+  return 0
+}
+
+# --- watcher ---------------------------------------------------------------------------
+
+is_running() {
+  [ -f "$PID_FILE" ] || return 1
+  local pid; pid="$(cat "$PID_FILE")"
+  kill -0 "$pid" 2>/dev/null && ps -p "$pid" -o command= 2>/dev/null | grep -q "_loop"
+}
+
+pr_sig() { # pr -> change signature (updatedAt + head + CI + mergeability)
+  jq -r --argjson n "$1" 'select(.number == $n) | "\(.updated)|\(.head)|\(.ci)|\(.mergeable)"' "$PRS_CACHE" | head -1
+}
+
+watch_loop() {
+  rm -rf "$STATE_DIR"/locks/*/ "$STATE_DIR"/running/* 2>/dev/null || true   # drop markers orphaned by a previous dead loop
+  retry_cutoff >/dev/null   # set once on first start of this version; pre-existing failures stay manual-only
+  echo $$ >"$PID_FILE"
+  trap 'rm -f "$PID_FILE" "$STATE_DIR/cycle_active"; exit 0' TERM INT
+  log "watcher started (repo=$(repo), every ${INTERVAL}s, mode=$PERM_MODE, concurrency=$CONCURRENCY)"
+  local cycle=0 pr reason sig gh_down=0
+  while true; do
+    touch "$STATE_DIR/cycle_active"
+    if refresh_prs 0; then
+      [ "$gh_down" -eq 1 ] && log "GitHub reachable again"; gh_down=0
+      for pr in $(targets); do
+        reason="$(skip_reason "$pr")"
+        if [ -n "$reason" ]; then
+          if [ "$(map_get "$pr" skip_logged)" != "$reason" ]; then
+            map_set "$pr" skip_logged "$reason"
+            case "$reason" in
+              "round limit") log "PR #$pr: reached $MAX_ROUNDS rounds — auto-runs stopped (pr-agent run $pr to continue)"
+                             notify "PR #$pr" "Hit the $MAX_ROUNDS-round limit — needs you" ;;
+              approved)      log "PR #$pr: approved — auto-runs stopped"; notify "PR #$pr" "Approved 🎉" ;;
+              *)             log "PR #$pr: $reason — skipping" ;;
+            esac
+          fi
+          continue
+        fi
+        [ -n "$(map_get "$pr" skip_logged)" ] && map_del "$pr" skip_logged
+        sig="$(pr_sig "$pr")"
+        if [ -n "$sig" ] && [ "$sig" = "$(map_get "$pr" sig)" ] && [ "$(map_num "$pr" fail_count)" -eq 0 ] \
+           && [ $(( cycle % FULL_CHECK_EVERY )) -ne 0 ]; then
+          continue   # nothing changed on GitHub since the last check
+        fi
+        while [ "$(jobs -rp | wc -l | tr -d ' ')" -ge "$CONCURRENCY" ]; do sleep 2; done
+        ( check_pr "$pr" "$sig" || true ) &
+      done
+      if [ "$MAIN_SYNC" = "1" ]; then sync_scan watch || true; fi
+    elif [ "$gh_down" -eq 0 ]; then
+      gh_down=1; log "WARNING can't reach GitHub (gh auth status?) — retrying every ${INTERVAL}s"
+    fi
+    rm -f "$STATE_DIR/cycle_active"
+    date +%s >"$STATE_DIR/last_cycle"
+    cycle=$(( cycle + 1 ))
+    sleep "$INTERVAL" & wait $! || true
+  done
+}
+
+LAUNCHD_LABEL="dev.pr-agent.$REPO_SLUG"
+LAUNCHD_PLIST="$HOME/Library/LaunchAgents/$LAUNCHD_LABEL.plist"
+
+install_launchd() {
+  mkdir -p "$(dirname "$LAUNCHD_PLIST")"
+  cat >"$LAUNCHD_PLIST" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>$LAUNCHD_LABEL</string>
+  <key>ProgramArguments</key><array><string>$SELF</string><string>_loop</string></array>
+  <key>WorkingDirectory</key><string>$(repo_dir)</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key><string>$PATH</string>
+    <key>HOME</key><string>$HOME</string>
+    <key>PR_AGENT_REPO</key><string>$(repo)</string>
+    <key>PR_AGENT_STATE_DIR</key><string>$STATE_ROOT</string>
+    <key>DEVIN_BIN</key><string>$DEVIN_BIN</string>
+  </dict>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>ThrottleInterval</key><integer>30</integer>
+  <key>StandardOutPath</key><string>/dev/null</string>
+  <key>StandardErrorPath</key><string>$LOG_FILE</string>
+</dict>
+</plist>
+EOF
+  plutil -lint "$LAUNCHD_PLIST" >/dev/null || die "generated plist is invalid: $LAUNCHD_PLIST"
+  launchctl bootout "gui/$(id -u)/$LAUNCHD_LABEL" 2>/dev/null || true
+  launchctl bootstrap "gui/$(id -u)" "$LAUNCHD_PLIST"
+}
+
+cmd_on() {
+  local use_launchd=0
+  if [ "${1:-}" = "--launchd" ]; then use_launchd=1; shift; fi
+  is_running && die "already running (pid $(cat "$PID_FILE")) — 'pr-agent off' first"
+  detect_repo
+  map_init
+  if [ $# -eq 0 ] || [ "$1" = "all" ]; then echo "all" >"$STATE_DIR/targets"; else echo "$*" >"$STATE_DIR/targets"; fi
+  save_config
+  local what; what="$(cat "$STATE_DIR/targets")"
+  if [ "$what" = "all" ]; then what="all open PRs"; else what="$(hash_list "$what")"; fi
+  if [ "$use_launchd" -eq 1 ]; then
+    install_launchd
+    echo "watching $what on $(repo) via launchd ($LAUNCHD_LABEL, every $(fmt_dur "$INTERVAL")) — pr-agent status to follow"
+  else
+    # stdout goes to /dev/null — log() writes the file itself; stray stderr still lands in the log
+    nohup "$SELF" _loop >/dev/null 2>>"$LOG_FILE" &
+    echo $! >"$PID_FILE"
+    echo "watching $what on $(repo) (pid $!, every $(fmt_dur "$INTERVAL")) — pr-agent status to follow"
+  fi
+}
+
+kill_agents() { # -> terminate running agent processes for this repo
+  local m apid
+  for m in "$STATE_DIR"/running/*; do
+    [ -f "$m" ] || continue
+    read -r apid _ <"$m"
+    rm -f "$m"   # first: run_agent reads a missing marker as "stopped by user"
+    pkill -TERM -P "$apid" 2>/dev/null || true; kill "$apid" 2>/dev/null || true
+    echo "killed agent for PR #$(basename "$m") (pid $apid)"
+  done
+}
+
+cmd_off() {
+  local stopped=0
+  if [ -f "$LAUNCHD_PLIST" ]; then
+    launchctl bootout "gui/$(id -u)/$LAUNCHD_LABEL" 2>/dev/null || true
+    rm -f "$LAUNCHD_PLIST"; stopped=1; echo "removed launchd job $LAUNCHD_LABEL"
+  fi
+  if is_running; then
+    local pid; pid="$(cat "$PID_FILE")"; kill "$pid" 2>/dev/null || true
+    rm -f "$PID_FILE"; stopped=1; echo "stopped watcher (pid $pid)"
+  fi
+  if [ "${1:-}" = "--now" ]; then
+    [ -n "$(ls "$STATE_DIR/running" 2>/dev/null)" ] && stopped=1
+    kill_agents
+  elif [ -n "$(ls "$STATE_DIR/running" 2>/dev/null)" ]; then
+    echo "note: agents still running for $(ls "$STATE_DIR/running" | sed 's/^/#/' | tr '\n' ' ')— they'll finish their round ('pr-agent off --now' to kill)"
+  fi
+  [ "$stopped" -eq 1 ] || die "not running"
+}
+
+# --- manual per-PR commands ------------------------------------------------------------
+
+need_pr() { [[ "${1:-}" =~ ^[0-9]+$ ]] || die "expected a PR number"; }
+
+cmd_run() { # N [--force]
+  need_pr "${1:-}"; local force=''
+  [ "${2:-}" = "--force" ] && force=1
+  refresh_prs 0 || die "can't reach GitHub"
+  [ -d "$STATE_DIR/locks/$1" ] && die "PR #$1 is already being processed"
+  check_pr "$1" "" "$force" manual
+  if [ -e "$STATE_DIR/logs/$1/latest.log" ] && [ "$(map_get "$1" last_run_at)" -ge $(( $(date +%s) - 5 )) ] 2>/dev/null; then
+    echo; echo "── agent output ──"; cat "$STATE_DIR/logs/$1/latest.log"
+  fi
+}
+
+cmd_tell() { # N message... -> send an owner instruction to the PR's session in the background
+  need_pr "${1:-}"; local pr="$1"; shift
+  [ $# -gt 0 ] || die "usage: pr-agent tell N \"message\""
+  [ -d "$STATE_DIR/locks/$pr" ] && die "agent is busy on PR #$pr — try again when it finishes"
+  refresh_prs 60 || true
+  local pf="$STATE_DIR/feedback/$pr.tell.md"
+  cat >"$pf" <<EOF
+Instruction from the PR owner for PR #$pr ($(repo), branch \`$(pr_info "$pr" branch)\`). You are in the PR's worktree; earlier context is preserved.
+
+$*
+
+Run \`git status\` and \`git fetch origin\` first and re-read files before editing. If you change code: verify per AGENTS.md, commit per topic, push, and summarise what you did in a PR comment.
+EOF
+  nohup "$SELF" _tell "$pr" "$pf" >/dev/null 2>>"$LOG_FILE" &
+  echo "sent to PR #$pr's agent (pid $!) — follow with: pr-agent logs $pr -f"
+}
+
+_tell() { # N prompt_file (internal, background)
+  local pr="$1" lock="$STATE_DIR/locks/$1" rc=0
+  mkdir "$lock" 2>/dev/null || { log "PR #$pr: tell skipped — agent busy"; return 0; }
+  log "PR #$pr: owner instruction sent to agent"
+  run_agent "$pr" "$2" || rc=$?
+  if [ "$rc" -eq 0 ]; then log "PR #$pr: instruction handled ✓"; notify "PR #$pr" "Your instruction was handled"
+  elif [ "$rc" -eq 1 ]; then log "PR #$pr: instruction run failed (see pr-agent logs $pr)"; fi
+  map_set "$pr" last_run_at "$(date +%s)"
+  rm -f "$STATE_DIR/running/$pr"; rmdir "$lock" 2>/dev/null || true
+}
+
+cmd_attach() { # N -> interactive session in the PR's worktree
+  need_pr "${1:-}"
+  local wt sid; wt="$(map_get "$1" worktree)"; sid="$(map_get "$1" session_id)"
+  [ -n "$wt" ] && [ -d "$wt" ] || die "PR #$1 has no worktree yet — 'pr-agent run $1' first"
+  [ -d "$STATE_DIR/locks/$1" ] && echo "warning: an automated run is in progress on #$1 — the session may be busy" >&2
+  cd "$wt"
+  # shellcheck disable=SC2046
+  if [ -n "$sid" ]; then exec "$DEVIN_BIN" $(devin_flags) -r "$sid"; fi
+  echo "PR #$1 has no session yet — opening a new one in $wt" >&2
+  exec "$DEVIN_BIN" $(devin_flags)
+}
+
+cmd_retry() { # N [--dry-run] -> ping the review bot if its latest review run failed (ignores the backlog cutoff)
+  need_pr "${1:-}"; need_repo; map_init
+  local pr="$1" mode=manual lock="$STATE_DIR/locks/$1" all rc=0
+  [ "${2:-}" = "--dry-run" ] && mode=dry
+  mkdir "$lock" 2>/dev/null || die "PR #$pr is already being processed — try again when it finishes"
+  all="$(mktemp)"
+  if ! fetch_feedback "$pr" >"$all"; then rm -f "$all"; rmdir "$lock" 2>/dev/null || true; die "can't reach GitHub"; fi
+  if [ "$mode" != "dry" ]; then seed_seen "$pr" "$all"; retry_reset_if_reviewed "$pr" "$all"; fi
+  handle_review_failure "$pr" "$all" "$mode" 0 || rc=$?
+  if [ "$rc" -ne 0 ]; then echo "PR #$pr: retry check failed (see watch.log)" >&2
+  elif [ -z "$(review_failure_plan "$pr" "$all")" ]; then echo "PR #$pr: no failed review run found (nothing newer than the last failure by the review bot)"
+  fi
+  rm -f "$all"; rmdir "$lock" 2>/dev/null || true
+}
+
+cmd_peek() {
+  need_pr "${1:-}"; need_repo; refresh_prs 60 || true
+  local items plan reason
+  items="$(pending_feedback "$1")" || die "can't reach GitHub"
+  if [ -n "$RETRY" ] && [ "$RETRY" = "1" ]; then
+    local allf; allf="$(mktemp)"
+    if fetch_feedback "$1" >"$allf" && plan="$(review_failure_plan "$1" "$allf")" && [ -n "$plan" ]; then
+      reason="$(jq -r .reason <<<"$plan")"
+      case "$reason" in
+        "") if [ -f "$STATE_DIR/retry_cutoff" ] && [ "$(jq -r .updated <<<"$plan")" '<' "$(cat "$STATE_DIR/retry_cutoff")" ]; then
+              echo "review-run failure $(jq -r .updated <<<"$plan") ($(jq -r .url <<<"$plan")) — pre-cutoff, watcher won't ping; 'pr-agent retry $1'"
+            else
+              echo "review-run failure $(jq -r .updated <<<"$plan") ($(jq -r .url <<<"$plan")) — ping needed (watcher picks it up, or 'pr-agent retry $1')"
+            fi ;;
+        *)  echo "review-run failure $(jq -r .updated <<<"$plan") — already handled ($reason)" ;;
+      esac
+    fi
+    rm -f "$allf"
+  fi
+  [ -n "$items" ] || { echo "PR #$1: no unprocessed feedback"; return 0; }
+  echo "$items" | jq -r '"\(.ts)  \(.kind)\(if .path then " \(.path):\(.line)" else "" end)  @\(.author)\n    \((.body // "") | split("\n") | map(select(length > 0)) | .[0] // "" | .[0:140])\n    \(.url)"'
+}
+
+cmd_mark_seen() {
+  need_pr "${1:-}"; need_repo; refresh_prs 60 || true
+  local all n; all="$(mktemp)"
+  fetch_feedback "$1" >"$all" || die "can't reach GitHub"
+  jq -r '.key' "$all" >"$STATE_DIR/seen/$1"; n="$(wc -l <"$all" | tr -d ' ')"; rm -f "$all"
+  map_del "$1" gave_up; map_del "$1" retry_gave_up; map_set "$1" fail_count 0
+  echo "PR #$1: marked $n item(s) as handled — won't trigger a run"
+}
+
+cmd_gc() { # [--yes] -> remove worktrees/branches/state for merged & closed PRs
+  need_repo; refresh_prs 0 || die "can't reach GitHub"
+  local yes='' pr state wt branch rd planned=0; rd="$(repo_dir)"
+  [ "${1:-}" = "--yes" ] && yes=1
+  for pr in $(jq -r '.prs | keys[]' "$MAP_FILE"); do
+    state="$(pr_info "$pr" state)"
+    [ "$state" = "MERGED" ] || [ "$state" = "CLOSED" ] || continue
+    [ -d "$STATE_DIR/locks/$pr" ] && { echo "#$pr: busy, skipping"; continue; }
+    wt="$(map_get "$pr" worktree)"; branch="$(map_get "$pr" branch)"; planned=1
+    echo "#$pr ($state):"
+    if [ -n "$wt" ] && [ -d "$wt" ] && [ "$wt" != "$rd" ]; then
+      echo "  remove worktree $wt"
+      if [ -n "$yes" ] && ! git -C "$rd" worktree remove "$wt"; then
+        echo "  ! worktree has uncommitted changes — left in place (inspect: git -C $wt status)"; continue
+      fi
+    fi
+    if [ "$state" = "MERGED" ] && [ -n "$branch" ] && git -C "$rd" show-ref --verify --quiet "refs/heads/$branch"; then
+      echo "  delete local branch $branch"
+      [ -n "$yes" ] && { git -C "$rd" branch -D "$branch" >/dev/null || echo "  ! couldn't delete $branch"; }
+    fi
+    echo "  forget session/state"
+    if [ -n "$yes" ]; then map_rm "$pr"; rm -rf "$STATE_DIR/seen/$pr" "$STATE_DIR/feedback/$pr".* "$STATE_DIR/logs/$pr"; fi
+  done
+  [ -n "$yes" ] && git -C "$rd" worktree prune
+  if [ "$planned" -eq 0 ]; then echo "nothing to clean up"
+  elif [ -z "$yes" ]; then echo; echo "dry run — re-run with 'pr-agent gc --yes' to apply"; fi
+}
+
+cmd_sync() { # [--apply [merged-dep-pr]] — report-only by default
+  need_repo; map_init; refresh_prs 0 || die "can't reach GitHub"
+  local apply='' depf='' st
+  if [ "${1:-}" = "--apply" ]; then apply=1; shift; fi
+  depf="${1:-}"
+  if [ -n "$depf" ]; then
+    need_pr "$depf"
+    st="$(gh pr view "$depf" --repo "$(repo)" --json state -q .state 2>/dev/null)"
+    [ "$st" = "MERGED" ] || die "PR #$depf is not merged (state: ${st:-unknown}) — pass a merged PR number"
+  fi
+  if [ -n "$apply" ]; then
+    sync_scan apply "$depf"
+    echo; echo "done — transcripts: pr-agent logs N"
+  else
+    sync_scan report "$depf"
+    echo; echo "dry run — 'pr-agent sync --apply${depf:+ $depf}' to run it"
+  fi
+}
+
+cmd_config() {
+  local k
+  echo "repo:  $(repo 2>/dev/null || echo '—')   state: $STATE_DIR"
+  for k in $SETTINGS; do printf '  %-17s %s\n' "$k" "${!k}"; done
+  echo "(saved by 'pr-agent on'; override with PR_AGENT_* env vars)"
+}
+
+cmd_logs() { # [N] [-f]
+  need_repo
+  if [[ "${1:-}" =~ ^[0-9]+$ ]]; then
+    local f="$STATE_DIR/logs/$1/latest.log"
+    [ -e "$f" ] || die "no agent transcript for PR #$1 yet"
+    echo "── $(readlink "$f") ──"
+    if [ "${2:-}" = "-f" ]; then tail -n 50 -f "$f"; else cat "$f"; fi
+  elif [ "${1:-}" = "-f" ]; then tail -f "$LOG_FILE"
+  else tail -n 30 "$LOG_FILE"; fi
+}
+
+# --- status rendering -----------------------------------------------------------------
+
+fmt_ago() { # seconds -> 45s / 3m12s / 1h05m
+  local s=$1
+  if [ "$s" -lt 60 ]; then echo "${s}s"; elif [ "$s" -lt 3600 ]; then echo "$((s/60))m$((s%60))s"; else echo "$((s/3600))h$(((s%3600)/60))m"; fi
+}
+
+STATUS_PENDING="$STATE_DIR/status_pending"
+COL_W=() COLS='' NEXT_POLL='' CELL_T='' CELL_C=''
+H_PENDING='' H_FAILED='' H_GAVEUP='' H_DIED='' H_WORKING='' H_PAUSED='' H_LIMIT='' H_BOTFAIL='' H_SYNCFAIL=''
+
+setup_colors() { # enable ANSI styling only when stdout is a terminal and NO_COLOR is unset
+  if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
+    C_RESET=$'\033[0m' C_BOLD=$'\033[1m' C_DIM=$'\033[2m' C_RED=$'\033[31m'
+    C_GREEN=$'\033[32m' C_YELLOW=$'\033[33m' C_BLUE=$'\033[34m' C_CYAN=$'\033[36m'
+  else
+    C_RESET='' C_BOLD='' C_DIM='' C_RED='' C_GREEN='' C_YELLOW='' C_BLUE='' C_CYAN=''
+  fi
+}
+
+term_cols() { tput cols 2>/dev/null || echo 100; }
+
+trunc() { # text width -> text cut to width chars, ending in … when cut
+  local s="$1" w="$2"
+  [ "${#s}" -gt "$w" ] && s="${s:0:$((w-1))}…"
+  printf '%s' "$s"
+}
+
+pad() { # text width -> text truncated/right-padded to exactly width chars (unicode-aware)
+  local s; s="$(trunc "$1" "$2")"
+  printf '%s%*s' "$s" "$(( $2 - ${#s} ))" ''
+}
+
+rep() { # char count -> char repeated count times
+  local out='' i
+  for (( i = 0; i < $2; i++ )); do out+="$1"; done
+  printf '%s' "$out"
+}
+
+fmt_rel() { # epoch -> "just now" / "4m ago" / "3h ago" / "2d ago" (empty -> —)
+  [ -z "$1" ] && { echo "—"; return; }
+  local s=$(( $(date +%s) - $1 ))
+  if [ "$s" -lt 60 ]; then echo "just now"
+  elif [ "$s" -lt 3600 ]; then echo "$((s/60))m ago"
+  elif [ "$s" -lt 86400 ]; then echo "$((s/3600))h ago"
+  else echo "$((s/86400))d ago"; fi
+}
+
+fmt_dur() { # seconds -> "2m" for whole minutes, else fmt_ago style
+  if [ "$1" -ge 60 ] && [ $(( $1 % 60 )) -eq 0 ]; then echo "$(( $1 / 60 ))m"; else fmt_ago "$1"; fi
+}
+
+hash_list() { echo "$1" | sed -E 's/([0-9]+)/#\1/g; s/^ +//; s/ +$//; s/ +/, /g'; }
+first_of() { echo $1 | cut -d' ' -f1; }
+
+draw_rule() { # left mid right -> horizontal border sized to COL_W
+  local out="$1" i n=${#COL_W[@]}
+  for (( i = 0; i < n; i++ )); do
+    out+="$(rep ─ $(( COL_W[i] + 2 )))"
+    if [ "$i" -lt $(( n - 1 )) ]; then out+="$2"; else out+="$3"; fi
+  done
+  printf '%s%s%s\n' "$C_DIM" "$out" "$C_RESET"
+}
+
+draw_row() { # text1 style1 text2 style2 ... -> one bordered table row sized to COL_W
+  local out="${C_DIM}│${C_RESET}" i=0
+  while [ $# -gt 0 ]; do
+    out+=" $2$(pad "$1" "${COL_W[i]}")$C_RESET ${C_DIM}│${C_RESET}"
+    shift 2; i=$(( i + 1 ))
+  done
+  printf '%s\n' "$out"
+}
+
+status_prs() { # -> PR numbers shown in status: watch targets ∪ PRs with agent history
+  { targets | tr ' ' '\n'; jq -r '.prs | keys[]' "$MAP_FILE"; } | { grep -E '^[0-9]+$' || true; } | sort -un
+}
+
+refresh_status_pending() { # ttl -> recount unprocessed feedback per open PR unless younger than ttl
+  if [ -f "$STATUS_PENDING" ] && [ $(( $(date +%s) - $(stat -f %m "$STATUS_PENDING") )) -lt "$1" ]; then return 0; fi
+  local tmp pr n; tmp="$(mktemp)"
+  for pr in $(status_prs); do
+    [ "$(pr_info "$pr" state)" = "CLOSED" ] || [ "$(pr_info "$pr" state)" = "MERGED" ] && continue
+    n="$(pending_feedback "$pr" 2>/dev/null | wc -l | tr -d ' ')" || n=0
+    echo "$pr $n" >>"$tmp"
+  done
+  mv "$tmp" "$STATUS_PENDING"
+}
+
+last_run_epoch() { # pr -> epoch of the last finished agent run (map, falling back to the log)
+  local v line; v="$(map_get "$1" last_run_at)"
+  if [ -z "$v" ]; then
+    line="$( { grep -E "^\[[0-9: -]+\] PR #$1: (round .*done|round .*finished|agent run failed)" "$LOG_FILE" 2>/dev/null || true; } | tail -1 | cut -c2-20)"
+    [ -n "$line" ] && v="$(date -j -f '%Y-%m-%d %H:%M:%S' "$line" +%s 2>/dev/null || true)"
+  fi
+  echo "$v"
+}
+
+review_cell() { # reviewDecision isDraft -> sets CELL_T / CELL_C
+  if [ "$2" = "true" ]; then CELL_T="draft"; CELL_C="$C_DIM"; return; fi
+  case "$1" in
+    APPROVED)          CELL_T="✓ approved";     CELL_C="$C_GREEN" ;;
+    CHANGES_REQUESTED) CELL_T="✗ changes req."; CELL_C="$C_RED" ;;
+    REVIEW_REQUIRED)   CELL_T="◷ needs review"; CELL_C="$C_YELLOW" ;;
+    *)                 CELL_T="— no review";    CELL_C="$C_DIM" ;;
+  esac
+}
+
+state_cell() { # pr gh_state pending -> sets CELL_T / CELL_C and records hint buckets
+  local pr="$1" marker="$STATE_DIR/running/$1" fc apid started reason
+  if [ -f "$marker" ]; then
+    read -r apid started _ <"$marker"
+    if kill -0 "$apid" 2>/dev/null; then
+      CELL_T="↻ agent working $(fmt_ago $(( $(date +%s) - started )))"; CELL_C="$C_YELLOW$C_BOLD"
+      H_WORKING+=" $pr"; return
+    fi
+    CELL_T="✗ run interrupted"; CELL_C="$C_RED"; H_DIED+=" $pr"; return
+  fi
+  if [ -d "$STATE_DIR/locks/$pr" ]; then CELL_T="↻ reading feedback"; CELL_C="$C_YELLOW"; return; fi
+  case "$2" in
+    MERGED) CELL_T="merged — done"; CELL_C="$C_DIM"; return ;;
+    CLOSED) CELL_T="closed"; CELL_C="$C_DIM"; return ;;
+  esac
+  if [ "$(map_get "$pr" sync_blocked)" = "1" ]; then CELL_T="✗ main-sync failed — needs you"; CELL_C="$C_RED"; H_SYNCFAIL+=" $pr"; return; fi
+  if [ "$(map_get "$pr" sync_pending)" = "1" ]; then CELL_T="● behind base — sync queued"; CELL_C="$C_CYAN$C_BOLD"; H_PENDING+=" $pr"; return; fi
+  reason="$(skip_reason "$pr")"
+  case "$reason" in
+    paused)        CELL_T="⏸ paused"; CELL_C="$C_YELLOW"; H_PAUSED+=" $pr"; return ;;
+    "round limit") CELL_T="⏸ hit $MAX_ROUNDS-round limit"; CELL_C="$C_RED"; H_LIMIT+=" $pr"; return ;;
+    approved)      CELL_T="✓ approved — stopped"; CELL_C="$C_GREEN"; return ;;
+  esac
+  fc="$(map_num "$pr" fail_count)"
+  if [ "${3:-0}" -gt 0 ]; then
+    if [ "$fc" -gt 0 ]; then
+      CELL_T="✗ failed $fc/$MAX_FAILS, retrying"; CELL_C="$C_RED"; H_FAILED+=" $pr"
+    else
+      CELL_T="● $3 new item$([ "$3" -gt 1 ] && echo s || true)"; CELL_C="$C_CYAN$C_BOLD"
+    fi
+    H_PENDING+=" $pr"; return
+  fi
+  if [ "$(map_get "$pr" retry_gave_up)" = "1" ]; then CELL_T="✗ review bot failing"; CELL_C="$C_RED"; H_BOTFAIL+=" $pr"; return; fi
+  if [ "$(map_get "$pr" gave_up)" = "1" ]; then CELL_T="✗ gave up — needs you"; CELL_C="$C_RED"; H_GAVEUP+=" $pr"; return; fi
+  if [ "$(map_num "$pr" rounds)" -eq 0 ]; then CELL_T="· waiting for review"; CELL_C="$C_DIM"; return; fi
+  CELL_T="✓ all feedback handled"; CELL_C="$C_GREEN"
+}
+
+recent_events() { # n width -> last n pr-agent events (agent chatter filtered, repeats collapsed)
+  local today re='^PR #([0-9]+): (.*)$' cnt line ts msg when tag style
+  today="$(date +%F)"
+  { grep -E '^\[[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}\] ' "$LOG_FILE" 2>/dev/null || true; } \
+    | awk '{ m = substr($0, 23) }
+           m == pm { c++; pl = $0; next }
+           NR > 1  { print c "\t" pl }
+                   { pm = m; pl = $0; c = 1 }
+           END     { if (pl != "") print c "\t" pl }' \
+    | tail -n "$1" \
+    | while IFS=$'\t' read -r cnt line; do
+        ts="${line:1:19}" msg="${line:22}" tag='' style=''
+        if [ "${ts:0:10}" = "$today" ]; then when="${ts:11:5}"
+        else when="$(date -j -f %Y-%m-%d "${ts:0:10}" '+%b %d' 2>/dev/null) ${ts:11:5}"; fi
+        if [[ "$msg" =~ $re ]]; then tag="#${BASH_REMATCH[1]}"; msg="${BASH_REMATCH[2]}"; fi
+        msg="$(printf '%s' "$msg" | sed -E \
+          -e 's/^resuming session ([^ ]+) in .*/resumed agent session \1/' \
+          -e 's/^starting new session in .*/started a new agent session/' \
+          -e 's/^round done at .*/round finished ✓/' \
+          -e 's/^1 new feedback item\(s\) since .*/1 new comment → agent started/' \
+          -e 's/^([0-9]+) new feedback item\(s\) since .*/\1 new comments → agent started/' \
+          -e 's/^mapped to session /linked to session /' \
+          -e 's/^watcher started \(.*(interval=|every )([0-9]+)s.*/watcher started (polls every \2s)/' \
+          -e 's/^skipped — session busy.*/skipped: session busy, feedback kept pending/')"
+        case "$msg" in
+          *finished*|*handled*|*[Aa]pproved*|*reachable*) style="$C_GREEN" ;;
+          *fail*|*"gave up"*|*WARNING*|*limit*|*"couldn't"*) style="$C_RED" ;;
+          *"new item"*|*comment*|*instruction*) style="$C_CYAN" ;;
+          *session*|*skipped*|*paused*) style="$C_YELLOW" ;;
+          *) style="$C_DIM" ;;
+        esac
+        [ "$cnt" -gt 1 ] && msg="$msg (×$cnt)"
+        printf '  %s  %s  %s\n' "${C_DIM}$(pad "$when" 12)${C_RESET}" "${C_BOLD}$(pad "$tag" 5)${C_RESET}" \
+          "${style}$(trunc "$msg" $(( $2 - 25 )))${C_RESET}"
+      done
+}
+
+render_hint() { # running -> one contextual "what now" line
+  local hint
+  if [ "$1" -eq 0 ] && [ -n "$H_PENDING" ]; then
+    hint="${C_YELLOW}⚠ watcher is off — new feedback on $(hash_list "$H_PENDING") won't be handled.${C_RESET} Start it: ${C_BOLD}pr-agent on${C_RESET}  (or once: ${C_BOLD}pr-agent run $(first_of "$H_PENDING")${C_RESET})"
+  elif [ -n "$H_SYNCFAIL" ]; then
+    hint="${C_RED}✗ $(hash_list "$H_SYNCFAIL"): couldn't sync the branch with the base ${MAX_FAILS}× in a row.${C_RESET} See ${C_BOLD}pr-agent logs $(first_of "$H_SYNCFAIL")${C_RESET} — retry with ${C_BOLD}pr-agent sync --apply${C_RESET}"
+  elif [ -n "$H_GAVEUP" ]; then
+    hint="${C_RED}✗ $(hash_list "$H_GAVEUP"): agent failed ${MAX_FAILS}× in a row and was escalated on the PR.${C_RESET} See ${C_BOLD}pr-agent logs $(first_of "$H_GAVEUP")${C_RESET}, then ${C_BOLD}pr-agent run $(first_of "$H_GAVEUP") --force${C_RESET} or fix by hand"
+  elif [ -n "$H_BOTFAIL" ]; then
+    hint="${C_RED}✗ $(hash_list "$H_BOTFAIL"): the review run failed ${RETRY_MAX}× in a row — pr-agent stopped pinging the bot.${C_RESET} Check the bot, then ${C_BOLD}pr-agent retry $(first_of "$H_BOTFAIL")${C_RESET} — or clear its state: ${C_BOLD}pr-agent reset $(first_of "$H_BOTFAIL")${C_RESET}"
+  elif [ -n "$H_LIMIT" ]; then
+    hint="${C_RED}⏸ $(hash_list "$H_LIMIT") hit the $MAX_ROUNDS-round limit — the review loop may not be converging.${C_RESET} Continue once: ${C_BOLD}pr-agent run $(first_of "$H_LIMIT")${C_RESET}, or ${C_BOLD}pr-agent attach $(first_of "$H_LIMIT")${C_RESET}"
+  elif [ -n "$H_DIED" ]; then
+    hint="${C_RED}✗ agent run on $(hash_list "$H_DIED") was interrupted.${C_RESET} It retries on the next poll — see ${C_BOLD}pr-agent logs $(first_of "$H_DIED")${C_RESET}"
+  elif [ -n "$H_FAILED" ]; then
+    hint="${C_RED}✗ last agent run on $(hash_list "$H_FAILED") failed.${C_RESET} It retries $NEXT_POLL — see ${C_BOLD}pr-agent logs $(first_of "$H_FAILED")${C_RESET}"
+  elif [ -n "$H_WORKING" ]; then
+    hint="${C_YELLOW}↻ agent is addressing feedback on $(hash_list "$H_WORKING").${C_RESET} Follow along: ${C_BOLD}pr-agent logs $(first_of "$H_WORKING") -f${C_RESET}  · steer: ${C_BOLD}pr-agent attach $(first_of "$H_WORKING")${C_RESET}"
+  elif [ -n "$H_PENDING" ]; then
+    hint="${C_CYAN}● $(hash_list "$H_PENDING") will be picked up $NEXT_POLL.${C_RESET} Or now: ${C_BOLD}pr-agent run $(first_of "$H_PENDING")${C_RESET}"
+  elif [ -n "$H_PAUSED" ]; then
+    hint="${C_YELLOW}⏸ $(hash_list "$H_PAUSED") paused.${C_RESET} Resume: ${C_BOLD}pr-agent resume $(first_of "$H_PAUSED")${C_RESET}"
+  elif [ "$1" -eq 0 ]; then
+    hint="${C_DIM}watcher is off, nothing pending.${C_RESET} Start watching: ${C_BOLD}pr-agent on${C_RESET}"
+  else
+    hint="${C_GREEN}✓ all caught up${C_RESET} — waiting for new review feedback"
+  fi
+  printf '%s\n' "$hint"
+}
+
+render_status() { # ttl [term-rows] -> status screen; with term-rows the PR table is capped so the bottom stays visible
+  if ! need_repo 2>/dev/null; then
+    printf '%s\n' "${C_BOLD}${C_BLUE}pr-agent${C_RESET}  ${C_DIM}○ never started for this repo${C_RESET}" \
+      "cd into a repo and run ${C_BOLD}pr-agent on${C_RESET}"
+    return 0
+  fi
+  map_init
+  refresh_prs "$1" || true
+  refresh_status_pending "$1"
+  H_PENDING='' H_FAILED='' H_GAVEUP='' H_DIED='' H_WORKING='' H_PAUSED='' H_LIMIT='' H_BOTFAIL='' H_SYNCFAIL='' NEXT_POLL="on the next poll"
+
+  local running=0 now badge poll t next cols reacts extras=''
+  now="$(date +%s)"
+  if is_running; then running=1; fi
+  if [ "$running" -eq 1 ]; then
+    badge="${C_GREEN}${C_BOLD}● watching${C_RESET}${C_DIM} (pid $(cat "$PID_FILE")$([ -f "$LAUNCHD_PLIST" ] && echo ", launchd" || true))${C_RESET}"
+    if [ -f "$STATE_DIR/cycle_active" ]; then
+      poll="${C_YELLOW}polling GitHub now${C_RESET}"; NEXT_POLL="in the current poll"
+    elif [ -f "$STATE_DIR/last_cycle" ]; then
+      next=$(( $(cat "$STATE_DIR/last_cycle") + INTERVAL - now ))
+      if [ "$next" -le 0 ]; then poll="next poll any second"; NEXT_POLL="any second"
+      else poll="next poll in ${C_BOLD}$(fmt_ago "$next")${C_RESET}"; NEXT_POLL="on the next poll (in $(fmt_ago "$next"))"; fi
+    else
+      poll="first poll starting"
+    fi
+  else
+    badge="${C_RED}${C_BOLD}○ stopped${C_RESET}"
+    if [ -f "$STATE_DIR/last_cycle" ]; then poll="last poll $(fmt_rel "$(cat "$STATE_DIR/last_cycle")")"; else poll="never polled"; fi
+  fi
+  t="$(cat "$STATE_DIR/targets" 2>/dev/null || echo all)"
+  if [ "$t" = "all" ] || [ -z "$t" ]; then t="all open PRs"; else t="$(hash_list "$t")"; fi
+  if [ -n "$AUTHOR_FILTER" ]; then reacts="$AUTHOR_FILTER"; else reacts="humans + $BOTS"; fi
+  [ "$SANDBOX" = "1" ] && extras+=" · sandbox"
+  [ "$CI_TRIGGER" = "1" ] && extras+=" · CI"
+  [ "$CONFLICT_TRIGGER" = "1" ] && extras+=" · conflicts"
+  [ "$MAIN_SYNC" = "1" ] && extras+=" · main-sync"
+
+  printf '%s  %s   %s\n' "${C_BOLD}${C_BLUE}pr-agent${C_RESET}" "$badge" "${C_BOLD}$(repo)${C_RESET}"
+  printf '%s%s\n' "${C_DIM}watching ${t} · every $(fmt_dur "$INTERVAL") · mode ${PERM_MODE}${extras} · ${CONCURRENCY} parallel · max ${MAX_ROUNDS} rounds · reacts to ${reacts} · ${C_RESET}" "$poll"
+  local gherr=0
+  if [ -f "$STATE_DIR/gh_error" ]; then
+    gherr=1
+    printf '%s\n' "${C_YELLOW}⚠ couldn't reach GitHub — showing cached data (check: gh auth status)${C_RESET}"
+  fi
+  echo
+
+  cols="${COLS:-$(term_cols)}"
+  local prs; prs="$(status_prs)"
+  if [ -z "$prs" ]; then
+    printf '%s\n' "${C_DIM}no PRs to show — no open non-draft PRs and no agent history yet${C_RESET}"
+  else
+    local show_session=0 fixed title_w n=6 num title review state draft pending pass base rt rc sid
+    local total shown hidden=0 hidden_open=0 drawn=0
+    local -a row hdr
+    total="$(printf '%s\n' "$prs" | wc -l | tr -d ' ')"
+    shown="$total"
+    if [ -n "${2:-}" ]; then # budget: 19 fixed lines (+1 on gh_error) frame the table body
+      local cap=$(( $2 - 19 - gherr ))
+      if [ "$total" -gt "$cap" ]; then
+        shown=$(( cap - 1 )); [ "$shown" -lt 0 ] && shown=0 # one body line is reserved for the "… more" row
+        hidden=$(( total - shown ))
+      fi
+    fi
+    [ "$cols" -ge 125 ] && show_session=1
+    fixed=$(( 5 + 14 + 22 + 6 + 8 ))
+    if [ "$show_session" -eq 1 ]; then fixed=$(( fixed + 16 )); n=7; fi
+    title_w=$(( cols - fixed - 3 * n - 1 ))
+    [ "$title_w" -lt 10 ] && title_w=10
+    [ "$title_w" -gt 60 ] && title_w=60
+    COL_W=( 5 "$title_w" 14 22 6 8 )
+    hdr=( PR "$C_BOLD" TITLE "$C_BOLD" REVIEW "$C_BOLD" "AGENT STATE" "$C_BOLD" ROUNDS "$C_BOLD" "LAST RUN" "$C_BOLD" )
+    if [ "$show_session" -eq 1 ]; then COL_W+=( 16 ); hdr+=( SESSION "$C_BOLD" ); fi
+
+    draw_rule ┌ ┬ ┐
+    draw_row "${hdr[@]}"
+    draw_rule ├ ┼ ┤
+    for pass in open done; do
+      for num in $prs; do
+        state="$(pr_info "$num" state)"; [ -n "$state" ] || state=OPEN
+        if [ "$pass" = open ]; then [ "$state" = OPEN ] || continue; base=''
+        else [ "$state" != OPEN ] || continue; base="$C_DIM"; fi
+        title="$(pr_info "$num" title)"; review="$(pr_info "$num" review)"; draft="$(pr_info "$num" draft)"
+        pending="$(awk -v n="$num" '$1 == n { print $2 }' "$STATUS_PENDING" 2>/dev/null)"
+        review_cell "$review" "$draft"; rt="$CELL_T" rc="$CELL_C"
+        state_cell "$num" "$state" "${pending:-0}" # runs for hidden rows too so the hint stays accurate
+        if [ "$drawn" -ge "$shown" ]; then
+          [ "$state" = OPEN ] && hidden_open=$(( hidden_open + 1 ))
+          continue
+        fi
+        title="$(printf '%s' "${title:-?}" | sed -E 's/^[a-z]+(\([^)]*\))?!?: //')"   # drop conventional-commit prefix
+        row=( "#$num" "$C_BOLD$base" "$title" "$base" "$rt" "$rc" "$CELL_T" "$CELL_C"
+              "$(map_num "$num" rounds)" "$base" "$(fmt_rel "$(last_run_epoch "$num")")" "$base" )
+        if [ "$show_session" -eq 1 ]; then
+          sid="$(map_get "$num" session_id)"; row+=( "${sid:-—}" "$C_DIM" )
+        fi
+        draw_row "${row[@]}"
+        drawn=$(( drawn + 1 ))
+      done
+    done
+    if [ "$hidden" -gt 0 ]; then
+      local more="… ${hidden} more"
+      [ "$hidden_open" -gt 0 ] && more="$more ($hidden_open open)"
+      [ "$title_w" -ge 42 ] && more="$more — make the terminal taller"
+      row=( "" "" "$more" "$C_DIM" "" "" "" "" "" "" "" "" )
+      [ "$show_session" -eq 1 ] && row+=( "" "" )
+      draw_row "${row[@]}"
+    fi
+    draw_rule └ ┴ ┘
+  fi
+
+  echo
+  printf '%s%s\n' "${C_BOLD}recent activity${C_RESET}" "${C_DIM}  (full log: pr-agent logs · agent transcript: pr-agent logs N)${C_RESET}"
+  recent_events 6 "$cols"
+  echo
+  render_hint "$running"
+}
+
+cmd_status() {
+  setup_colors
+  case "${1:-}" in
+    -w|--watch)
+      local every="${2:-5}" frame rows nlines
+      if [ -t 1 ]; then
+        tput smcup 2>/dev/null || printf '\033[?1049h' # alt screen: repaints stay out of scrollback
+        tput civis 2>/dev/null
+        trap 'tput cnorm 2>/dev/null; tput rmcup 2>/dev/null || printf "\033[?1049l"' EXIT
+      fi
+      trap 'exit 0' INT TERM
+      printf '\033[2J'
+      while true; do
+        COLS="$(term_cols)"
+        rows="$(tput lines 2>/dev/null || true)"; rows="${rows:-24}"
+        frame="$(render_status 30 "$rows"; printf '\n%s' "${C_DIM}live · refresh ${every}s (GitHub data every 30s) · updated $(date +%H:%M:%S) · Ctrl-C to exit${C_RESET}")"
+        nlines=$(( $(printf '%s\n' "$frame" | wc -l) ))
+        if [ "$nlines" -gt "$rows" ]; then # frame taller than the screen: clip — printing it would scroll
+          frame="$(printf '%s\n' "$frame" | sed -n "1,$((rows-1))p")"$'\n'"${C_DIM}… $((nlines-rows+1)) more lines — make the terminal taller${C_RESET}"
+        fi
+        printf '\033[H%s\033[0m\033[J' "${frame//$'\n'/$'\033[K\n'}"
+        sleep "$every"
+      done ;;
+    *) COLS="$(term_cols)"; render_status 0 ;;
+  esac
+}
+
+usage() { sed -n '2,/^$/p' "$SELF" | sed -e '/^set /d' -e 's/^# \{0,1\}//'; exit "${1:-1}"; }
+
+# --- dispatch ---------------------------------------------------------------------------
+
+case "${1:-}" in
+  on)        shift; cmd_on "$@" ;;
+  off)       shift; cmd_off "$@" ;;
+  status|st) shift; cmd_status "$@" ;;
+  logs)      shift; cmd_logs "$@" ;;
+  add)
+    shift; need_repo
+    t="$(cat "$STATE_DIR/targets" 2>/dev/null || echo all)"
+    [ "$t" != "all" ] || die "watching all open PRs — nothing to add (use 'pr-agent on N...' for an explicit list)"
+    echo "$t $*" | tr ' ' '\n' | { grep -E '^[0-9]+$' || true; } | sort -un | tr '\n' ' ' | sed 's/ $//' >"$STATE_DIR/targets"
+    echo "targets: $(cat "$STATE_DIR/targets")" ;;
+  rm)
+    shift; need_repo
+    t="$(cat "$STATE_DIR/targets" 2>/dev/null || echo all)"
+    [ "$t" != "all" ] || die "watching all open PRs — use 'pr-agent pause N' to skip one"
+    echo "$t" | tr ' ' '\n' | awk -v drop=" $* " 'NF && index(drop, " " $1 " ") == 0' | tr '\n' ' ' | sed 's/ $//' >"$STATE_DIR/targets"
+    echo "targets: $(cat "$STATE_DIR/targets")" ;;
+  run)       shift; need_repo; map_init; cmd_run "$@" ;;
+  tell)      shift; need_repo; map_init; cmd_tell "$@" ;;
+  _tell)     shift; _tell "$@" ;;
+  _check)    shift; need_repo; map_init; refresh_prs 0; check_pr "$1" "" "" "${2:-watch}" ;;
+  attach)    shift; need_repo; cmd_attach "$@" ;;
+  peek)      shift; cmd_peek "$@" ;;
+  mark-seen) shift; cmd_mark_seen "$@" ;;
+  pause)     shift; need_pr "${1:-}"; need_repo; map_set "$1" paused 1; log "PR #$1: paused" >/dev/null; echo "PR #$1: paused — no automatic runs until 'pr-agent resume $1'" ;;
+  resume)    shift; need_pr "${1:-}"; need_repo; map_del "$1" paused; map_del "$1" skip_logged; log "PR #$1: resumed" >/dev/null; echo "PR #$1: resumed" ;;
+  retry)     shift; cmd_retry "$@" ;;
+  reset)     shift; need_pr "${1:-}"; need_repo
+             map_del "$1" session_id; map_set "$1" fail_count 0; map_del "$1" gave_up
+             map_del "$1" retry_count; map_del "$1" retry_gave_up; map_del "$1" retry_skip_logged; map_del "$1" retry_last_ping_ts
+             map_del "$1" sync_pending; map_del "$1" sync_blocked; map_del "$1" sync_blocked_key
+             map_del "$1" sync_done_key; map_del "$1" sync_fail_key; map_set "$1" sync_fails 0; map_del "$1" sync_unblock
+             echo "PR #$1: session forgotten — the next round starts a fresh agent session" ;;
+  gc)        shift; cmd_gc "$@" ;;
+  sync)      shift; cmd_sync "$@" ;;
+  config)    cmd_config ;;
+  map)       map_init; jq . "$MAP_FILE" ;;
+  _loop)     need_repo; watch_loop ;;
+  help|-h|--help) usage 0 ;;
+  *)         usage ;;
+esac
