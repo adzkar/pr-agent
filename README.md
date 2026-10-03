@@ -145,3 +145,9 @@ Env vars always win over the per-repo config saved by `pr-agent on`
   last started with `pr-agent on` (or `PR_AGENT_REPO`).
 - `pr-agent gc` removes worktrees, branches, and state for merged/closed PRs —
   run it periodically to reclaim disk.
+
+## Hacking on pr-agent
+
+The whole tool is one bash script — see [AGENTS.md](AGENTS.md) for
+edit/verify/install rules and [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for
+the code map and execution flows.
