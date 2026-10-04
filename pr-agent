@@ -66,6 +66,12 @@
 #   PR_AGENT_REPO         owner/name to act on when not inside the repo
 #   PR_AGENT_STATE_DIR    State root (default ~/.local/state/pr-agent)
 #   DEVIN_BIN             Devin CLI binary (default devin)
+#
+# Examples:
+#   # one-off:
+#   PR_AGENT_TABLE_ROWS=10 pr-agent status -w
+#   # persist per-repo (watcher must be off: pr-agent off first):
+#   PR_AGENT_TABLE_ROWS=10 pr-agent on
 
 set -euo pipefail
 

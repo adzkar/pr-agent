@@ -137,6 +137,16 @@ Env vars always win over the per-repo config saved by `pr-agent on`
 | `PR_AGENT_STATE_DIR` | `~/.local/state/pr-agent` | State root |
 | `DEVIN_BIN` | `devin` | Devin CLI binary |
 
+To use it, e.g. for `PR_AGENT_TABLE_ROWS`:
+
+```sh
+# one-off
+PR_AGENT_TABLE_ROWS=10 pr-agent status -w
+
+# persist per-repo (watcher must be off: pr-agent off first)
+PR_AGENT_TABLE_ROWS=10 pr-agent on
+```
+
 ## State & how it works
 
 - State lives under `~/.local/state/pr-agent/repos/<owner>__<repo>`: the
