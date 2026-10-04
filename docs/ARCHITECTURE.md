@@ -138,18 +138,21 @@ Header (watcher state, targets, settings, poll countdown) → PR table:
 `status_prs` = watch targets ∪ PRs with map history, **open first then
 merged/closed dimmed**. `state_cell` renders the AGENT STATE column and fills
 the `H_*` buckets that pick the one-line `render_hint`. Then a blank line,
-`recent activity` (last 6 deduped `watch.log` events), and the hint.
+`recent activity` (last `ACTIVITY_LINES` deduped `watch.log` events — the
+whole section is hidden when `ACTIVITY_LINES=0`), and the hint.
 
 `-w` mode repaints on the alt screen: `cmd_status` passes `tput lines` so
-`render_status` caps table body rows at `rows − 19 − gh_error`, collapsing the
-rest into a `… N more` row (open PRs first — merged history drops out first).
-`TABLE_ROWS` (default 0 = off) adds a second cap that applies in both modes —
-the stricter bound wins, and the `… N more` row names whichever is binding
-("make the terminal taller" vs `TABLE_ROWS=N`). If a line wraps and the frame
-still overflows, a bottom clip shows `… N more lines` as a last resort. The
-`19` counts every fixed line: badge, watching line, blank, 3 rules + header,
-blank, activity header, 6 event lines, blank, hint, blank, footer — adjust it
-if you add or remove any.
+`render_status` caps table body rows at `rows − chrome − gh_error`, collapsing
+the rest into a `… N more` row (open PRs first — merged history drops out
+first). `chrome` is `11 + the activity block` (header + `ACTIVITY_LINES` +
+blank, or `0` when `ACTIVITY_LINES=0`): badge, watching line, blank, 3 rules +
+header, blank, hint, blank, footer — adjust the `11` if you add or remove any
+non-table, non-activity line. `TABLE_ROWS` (default 0 = off) sets an exact row
+count in both modes that *overrides* the terminal budget — when it doesn't
+fit, the bottom of the frame (footer, hint, activity) is cut by the fallback
+clip (`… N more lines`); the `… N more` row names the binding cap ("make the
+terminal taller" vs `TABLE_ROWS=N`). A wrapped line can also push the frame
+over; the clip catches that too.
 
 ### Concurrency & locking
 

@@ -62,7 +62,10 @@
 #                         review watcher skips. After a verified sync push, dep-gated
 #                         drafts ('do not review before #N' banner, all N merged) are
 #                         marked ready and unbannered. (default 0)
-#   PR_AGENT_TABLE_ROWS   Max rows in the status table (default 0 = fill the screen)
+#   PR_AGENT_TABLE_ROWS   Rows in the status table (default 0 = fit the screen;
+#                         can exceed it — the bottom of the frame gets clipped)
+#   PR_AGENT_ACTIVITY_LINES  Lines in the status "recent activity" section
+#                         (default 6, 0 = hide — frees rows for the table)
 #   PR_AGENT_REPO         owner/name to act on when not inside the repo
 #   PR_AGENT_STATE_DIR    State root (default ~/.local/state/pr-agent)
 #   DEVIN_BIN             Devin CLI binary (default devin)
@@ -144,11 +147,13 @@ RETRY_MAX="${PR_AGENT_RETRY_MAX:-${CFG_RETRY_MAX:-3}}"            # consecutive 
 RETRY_RE="${PR_AGENT_RETRY_RE:-${CFG_RETRY_RE:-^Review failed:}}" # jq regex matching a failed-run notice
 RETRY_MSG="${PR_AGENT_RETRY_MSG:-${CFG_RETRY_MSG:-}}"
 [ -n "$RETRY_MSG" ] || RETRY_MSG='@{reviewer} the review run failed — please retry.'   # {reviewer} -> bot handle
-TABLE_ROWS="${PR_AGENT_TABLE_ROWS:-${CFG_TABLE_ROWS:-0}}"                     # max PR rows in the status table; 0 = fill the screen
+TABLE_ROWS="${PR_AGENT_TABLE_ROWS:-${CFG_TABLE_ROWS:-0}}"                     # PR rows in the status table; 0 = fit the screen (may overflow → bottom clip)
 [[ "$TABLE_ROWS" =~ ^[0-9]+$ ]] || TABLE_ROWS=0
+ACTIVITY_LINES="${PR_AGENT_ACTIVITY_LINES:-${CFG_ACTIVITY_LINES:-6}}"         # recent-activity lines under the status table; 0 = hide the section
+[[ "$ACTIVITY_LINES" =~ ^[0-9]+$ ]] || ACTIVITY_LINES=6
 FULL_CHECK_EVERY=10   # cycles; forces a full feedback fetch even if nothing looks changed
 
-SETTINGS="INTERVAL PERM_MODE SANDBOX AUTHOR_FILTER BOTS TRIGGER MAX_FAILS MAX_ROUNDS STOP_ON_APPROVE CONCURRENCY CI_TRIGGER CONFLICT_TRIGGER NOTIFY RETRY RETRY_MAX RETRY_RE RETRY_MSG SKIP_RE SETUP_CMD MAIN_SYNC TABLE_ROWS"
+SETTINGS="INTERVAL PERM_MODE SANDBOX AUTHOR_FILTER BOTS TRIGGER MAX_FAILS MAX_ROUNDS STOP_ON_APPROVE CONCURRENCY CI_TRIGGER CONFLICT_TRIGGER NOTIFY RETRY RETRY_MAX RETRY_RE RETRY_MSG SKIP_RE SETUP_CMD MAIN_SYNC TABLE_ROWS ACTIVITY_LINES"
 
 save_config() {
   local k; : >"$STATE_DIR/config"
@@ -1513,20 +1518,20 @@ render_status() { # ttl [term-rows] -> status screen; with term-rows the PR tabl
     local -a row hdr
     total="$(printf '%s\n' "$prs" | wc -l | tr -d ' ')"
     shown="$total"
+    # fixed chrome: badge, watching line, blank, 3 rules + header, blank, hint, blank, footer = 11,
+    # plus the activity block (header + lines + blank) when shown — adjust when the layout changes
+    local chrome=11
+    [ "$ACTIVITY_LINES" -gt 0 ] && chrome=$(( chrome + ACTIVITY_LINES + 2 ))
     local body="$total" cap_why='' # body lines the terminal can spare (PR rows + a "… more" row)
-    if [ -n "${2:-}" ]; then # budget: 19 fixed lines (+1 on gh_error) frame the table body
-      body=$(( $2 - 19 - gherr )); [ "$body" -lt 0 ] && body=0
+    if [ -n "${2:-}" ]; then
+      body=$(( $2 - chrome - gherr )); [ "$body" -lt 0 ] && body=0
     fi
-    [ "$TABLE_ROWS" -gt 0 ] && [ "$TABLE_ROWS" -lt "$shown" ] && shown="$TABLE_ROWS"
-    [ "$shown" -gt "$body" ] && shown="$body"
-    if [ "$shown" -lt "$total" ]; then
-      if [ "$shown" -ge "$body" ]; then # no room for both the rows and the "… more" row — drop one more
-        shown=$(( body - 1 )); [ "$shown" -lt 0 ] && shown=0; cap_why=term
-      else
-        cap_why="TABLE_ROWS"
-      fi
-      hidden=$(( total - shown ))
+    if [ "$TABLE_ROWS" -gt 0 ] && [ "$TABLE_ROWS" -lt "$shown" ]; then
+      shown="$TABLE_ROWS"; cap_why="TABLE_ROWS" # explicit cap wins — overflow falls to the bottom clip
+    elif [ "$shown" -gt "$body" ]; then
+      shown=$(( body - 1 )); [ "$shown" -lt 0 ] && shown=0; cap_why=term # reserve a line for "… more"
     fi
+    [ "$shown" -lt "$total" ] && hidden=$(( total - shown ))
     [ "$cols" -ge 125 ] && show_session=1
     fixed=$(( 5 + 14 + 22 + 6 + 8 ))
     if [ "$show_session" -eq 1 ]; then fixed=$(( fixed + 16 )); n=7; fi
@@ -1578,9 +1583,11 @@ render_status() { # ttl [term-rows] -> status screen; with term-rows the PR tabl
   fi
 
   echo
-  printf '%s%s\n' "${C_BOLD}recent activity${C_RESET}" "${C_DIM}  (full log: pr-agent logs · agent transcript: pr-agent logs N)${C_RESET}"
-  recent_events 6 "$cols"
-  echo
+  if [ "$ACTIVITY_LINES" -gt 0 ]; then
+    printf '%s%s\n' "${C_BOLD}recent activity${C_RESET}" "${C_DIM}  (full log: pr-agent logs · agent transcript: pr-agent logs N)${C_RESET}"
+    recent_events "$ACTIVITY_LINES" "$cols"
+    echo
+  fi
   render_hint "$running"
 }
 
@@ -1602,7 +1609,9 @@ cmd_status() {
         frame="$(render_status 30 "$rows"; printf '\n%s' "${C_DIM}live · refresh ${every}s (GitHub data every 30s) · updated $(date +%H:%M:%S) · Ctrl-C to exit${C_RESET}")"
         nlines=$(( $(printf '%s\n' "$frame" | wc -l) ))
         if [ "$nlines" -gt "$rows" ]; then # frame taller than the screen: clip — printing it would scroll
-          frame="$(printf '%s\n' "$frame" | sed -n "1,$((rows-1))p")"$'\n'"${C_DIM}… $((nlines-rows+1)) more lines — make the terminal taller${C_RESET}"
+          local clip_hint="make the terminal taller"
+          [ "$TABLE_ROWS" -gt 0 ] && clip_hint="lower TABLE_ROWS or make the terminal taller"
+          frame="$(printf '%s\n' "$frame" | sed -n "1,$((rows-1))p")"$'\n'"${C_DIM}… $((nlines-rows+1)) more lines — ${clip_hint}${C_RESET}"
         fi
         printf '\033[H%s\033[0m\033[J' "${frame//$'\n'/$'\033[K\n'}"
         sleep "$every"

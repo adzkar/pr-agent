@@ -68,9 +68,11 @@ them as a smoke test unless that's the intent.
   hint buckets that drive the bottom "what now" line. If you skip drawing a
   table row you must still call them, or the hint lies.
 - **`render_status` row budget.** `status -w` passes terminal rows so the table
-  caps itself; fixed chrome is `19 + gh_error` lines. If you add/remove any
-  non-table line, update the `19` in the `cap=` computation or the frame will
-  scroll/clip again.
+  caps itself; fixed chrome is `11 + the activity block` (`ACTIVITY_LINES>0`
+  adds header + N + blank, i.e. N+2) `+ gh_error` lines. If you add/remove any
+  non-table, non-activity line, update the `11` in `chrome` or the frame will
+  scroll/clip again. `TABLE_ROWS` overrides the budget — rows beyond it fall
+  to the bottom clip, not this cap.
 - **`running/<pr>` marker = "stopped by user".** `run_agent` treats a deleted
   marker as an intentional stop (rc 3), not a crash — remove the marker before
   killing a pid, never after.
@@ -80,7 +82,8 @@ them as a smoke test unless that's the intent.
   *that* item; the PR may still have pending items.
 - **The `… N more` table row and the fallback `… N more lines` clip are
   different mechanisms** — the first caps rows inside the table, the second is
-  the last-resort bottom clip for wrapped lines. Keep both.
+  the last-resort bottom clip for wrapped lines and `TABLE_ROWS` overflow.
+  Keep both.
 
 ## Commit style
 
