@@ -85,7 +85,8 @@ recent activity  (full log: pr-agent logs · agent transcript: pr-agent logs N)
   all feedback handled, or done.
 - When the table is taller than the terminal, rows are dropped from the bottom
   (merged/closed history first) and collapsed into a `… N more` row, so the
-  recent-activity and hint sections always stay visible.
+  recent-activity and hint sections always stay visible. `PR_AGENT_TABLE_ROWS`
+  caps the row count regardless of terminal size — the stricter bound wins.
 - **recent activity** tails the deduplicated event log; the last line is a
   contextual "what now" hint with the command to run.
 - A `SESSION` column (Devin session id per PR) appears when the terminal is
@@ -131,6 +132,7 @@ Env vars always win over the per-repo config saved by `pr-agent on`
 | `PR_AGENT_SKIP_RE` | in-progress markers | Regex; matching feedback bodies are ignored |
 | `PR_AGENT_SETUP` | — | Command run inside a new worktree instead of the built-in env-file + `node_modules`/bun setup |
 | `PR_AGENT_MAIN_SYNC` | `0` | Each poll also auto-syncs open PRs behind the default base |
+| `PR_AGENT_TABLE_ROWS` | `0` | Max rows in the status table (`0` = fill the screen; the terminal still wins when it's shorter) |
 | `PR_AGENT_REPO` | — | `owner/name` to act on when not inside the repo |
 | `PR_AGENT_STATE_DIR` | `~/.local/state/pr-agent` | State root |
 | `DEVIN_BIN` | `devin` | Devin CLI binary |

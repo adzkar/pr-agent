@@ -62,6 +62,7 @@
 #                         review watcher skips. After a verified sync push, dep-gated
 #                         drafts ('do not review before #N' banner, all N merged) are
 #                         marked ready and unbannered. (default 0)
+#   PR_AGENT_TABLE_ROWS   Max rows in the status table (default 0 = fill the screen)
 #   PR_AGENT_REPO         owner/name to act on when not inside the repo
 #   PR_AGENT_STATE_DIR    State root (default ~/.local/state/pr-agent)
 #   DEVIN_BIN             Devin CLI binary (default devin)
@@ -137,9 +138,11 @@ RETRY_MAX="${PR_AGENT_RETRY_MAX:-${CFG_RETRY_MAX:-3}}"            # consecutive 
 RETRY_RE="${PR_AGENT_RETRY_RE:-${CFG_RETRY_RE:-^Review failed:}}" # jq regex matching a failed-run notice
 RETRY_MSG="${PR_AGENT_RETRY_MSG:-${CFG_RETRY_MSG:-}}"
 [ -n "$RETRY_MSG" ] || RETRY_MSG='@{reviewer} the review run failed — please retry.'   # {reviewer} -> bot handle
+TABLE_ROWS="${PR_AGENT_TABLE_ROWS:-${CFG_TABLE_ROWS:-0}}"                     # max PR rows in the status table; 0 = fill the screen
+[[ "$TABLE_ROWS" =~ ^[0-9]+$ ]] || TABLE_ROWS=0
 FULL_CHECK_EVERY=10   # cycles; forces a full feedback fetch even if nothing looks changed
 
-SETTINGS="INTERVAL PERM_MODE SANDBOX AUTHOR_FILTER BOTS TRIGGER MAX_FAILS MAX_ROUNDS STOP_ON_APPROVE CONCURRENCY CI_TRIGGER CONFLICT_TRIGGER NOTIFY RETRY RETRY_MAX RETRY_RE RETRY_MSG SKIP_RE SETUP_CMD MAIN_SYNC"
+SETTINGS="INTERVAL PERM_MODE SANDBOX AUTHOR_FILTER BOTS TRIGGER MAX_FAILS MAX_ROUNDS STOP_ON_APPROVE CONCURRENCY CI_TRIGGER CONFLICT_TRIGGER NOTIFY RETRY RETRY_MAX RETRY_RE RETRY_MSG SKIP_RE SETUP_CMD MAIN_SYNC TABLE_ROWS"
 
 save_config() {
   local k; : >"$STATE_DIR/config"
@@ -1504,12 +1507,19 @@ render_status() { # ttl [term-rows] -> status screen; with term-rows the PR tabl
     local -a row hdr
     total="$(printf '%s\n' "$prs" | wc -l | tr -d ' ')"
     shown="$total"
+    local body="$total" cap_why='' # body lines the terminal can spare (PR rows + a "… more" row)
     if [ -n "${2:-}" ]; then # budget: 19 fixed lines (+1 on gh_error) frame the table body
-      local cap=$(( $2 - 19 - gherr ))
-      if [ "$total" -gt "$cap" ]; then
-        shown=$(( cap - 1 )); [ "$shown" -lt 0 ] && shown=0 # one body line is reserved for the "… more" row
-        hidden=$(( total - shown ))
+      body=$(( $2 - 19 - gherr )); [ "$body" -lt 0 ] && body=0
+    fi
+    [ "$TABLE_ROWS" -gt 0 ] && [ "$TABLE_ROWS" -lt "$shown" ] && shown="$TABLE_ROWS"
+    [ "$shown" -gt "$body" ] && shown="$body"
+    if [ "$shown" -lt "$total" ]; then
+      if [ "$shown" -ge "$body" ]; then # no room for both the rows and the "… more" row — drop one more
+        shown=$(( body - 1 )); [ "$shown" -lt 0 ] && shown=0; cap_why=term
+      else
+        cap_why="TABLE_ROWS"
       fi
+      hidden=$(( total - shown ))
     fi
     [ "$cols" -ge 125 ] && show_session=1
     fixed=$(( 5 + 14 + 22 + 6 + 8 ))
@@ -1550,7 +1560,10 @@ render_status() { # ttl [term-rows] -> status screen; with term-rows the PR tabl
     if [ "$hidden" -gt 0 ]; then
       local more="… ${hidden} more"
       [ "$hidden_open" -gt 0 ] && more="$more ($hidden_open open)"
-      [ "$title_w" -ge 42 ] && more="$more — make the terminal taller"
+      if [ "$title_w" -ge 42 ]; then
+        if [ "$cap_why" = term ]; then more="$more — make the terminal taller"
+        else more="$more — TABLE_ROWS=$TABLE_ROWS"; fi
+      fi
       row=( "" "" "$more" "$C_DIM" "" "" "" "" "" "" "" "" )
       [ "$show_session" -eq 1 ] && row+=( "" "" )
       draw_row "${row[@]}"

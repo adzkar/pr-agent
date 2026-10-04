@@ -143,10 +143,13 @@ the `H_*` buckets that pick the one-line `render_hint`. Then a blank line,
 `-w` mode repaints on the alt screen: `cmd_status` passes `tput lines` so
 `render_status` caps table body rows at `rows − 19 − gh_error`, collapsing the
 rest into a `… N more` row (open PRs first — merged history drops out first).
-If a line wraps and the frame still overflows, a bottom clip shows
-`… N more lines` as a last resort. The `19` counts every fixed line: badge,
-watching line, blank, 3 rules + header, blank, activity header, 6 event lines,
-blank, hint, blank, footer — adjust it if you add or remove any.
+`TABLE_ROWS` (default 0 = off) adds a second cap that applies in both modes —
+the stricter bound wins, and the `… N more` row names whichever is binding
+("make the terminal taller" vs `TABLE_ROWS=N`). If a line wraps and the frame
+still overflows, a bottom clip shows `… N more lines` as a last resort. The
+`19` counts every fixed line: badge, watching line, blank, 3 rules + header,
+blank, activity header, 6 event lines, blank, hint, blank, footer — adjust it
+if you add or remove any.
 
 ### Concurrency & locking
 
