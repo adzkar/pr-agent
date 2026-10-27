@@ -66,6 +66,8 @@
 #                         can exceed it — the bottom of the frame gets clipped)
 #   PR_AGENT_ACTIVITY_LINES  Lines in the status "recent activity" section
 #                         (default 6, 0 = hide — frees rows for the table)
+#   PR_AGENT_TITLE_W      Title column width in the status table (default 0 =
+#                         auto-fit the terminal, up to 100 chars)
 #   PR_AGENT_REPO         owner/name to act on when not inside the repo
 #   PR_AGENT_STATE_DIR    State root (default ~/.local/state/pr-agent)
 #   DEVIN_BIN             Devin CLI binary (default devin)
@@ -152,9 +154,11 @@ TABLE_ROWS="${PR_AGENT_TABLE_ROWS:-${CFG_TABLE_ROWS:-0}}"                     # 
 [[ "$TABLE_ROWS" =~ ^[0-9]+$ ]] || TABLE_ROWS=0
 ACTIVITY_LINES="${PR_AGENT_ACTIVITY_LINES:-${CFG_ACTIVITY_LINES:-6}}"         # recent-activity lines under the status table; 0 = hide the section
 [[ "$ACTIVITY_LINES" =~ ^[0-9]+$ ]] || ACTIVITY_LINES=6
+TITLE_W="${PR_AGENT_TITLE_W:-${CFG_TITLE_W:-0}}"                              # status title column width; 0 = auto-fit (≤100)
+[[ "$TITLE_W" =~ ^[0-9]+$ ]] || TITLE_W=0
 FULL_CHECK_EVERY=10   # cycles; forces a full feedback fetch even if nothing looks changed
 
-SETTINGS="INTERVAL PERM_MODE SANDBOX AUTHOR_FILTER BOTS TRIGGER MAX_FAILS MAX_ROUNDS STOP_ON_APPROVE CONCURRENCY CI_TRIGGER CONFLICT_TRIGGER NOTIFY RETRY RETRY_MAX RETRY_RE RETRY_MSG SKIP_RE SETUP_CMD MAIN_SYNC TABLE_ROWS ACTIVITY_LINES"
+SETTINGS="INTERVAL PERM_MODE SANDBOX AUTHOR_FILTER BOTS TRIGGER MAX_FAILS MAX_ROUNDS STOP_ON_APPROVE CONCURRENCY CI_TRIGGER CONFLICT_TRIGGER NOTIFY RETRY RETRY_MAX RETRY_RE RETRY_MSG SKIP_RE SETUP_CMD MAIN_SYNC TABLE_ROWS ACTIVITY_LINES TITLE_W"
 
 save_config() {
   local k; : >"$STATE_DIR/config"
@@ -1587,8 +1591,8 @@ render_status() { # ttl [term-rows] -> status screen; with term-rows the PR tabl
     fixed=$(( 5 + 14 + 22 + 6 + 8 ))
     if [ "$show_session" -eq 1 ]; then fixed=$(( fixed + 16 )); n=7; fi
     title_w=$(( cols - fixed - 3 * n - 1 ))
+    if [ "$TITLE_W" -gt 0 ]; then title_w="$TITLE_W"; elif [ "$title_w" -gt 100 ]; then title_w=100; fi
     [ "$title_w" -lt 10 ] && title_w=10
-    [ "$title_w" -gt 60 ] && title_w=60
     COL_W=( 5 "$title_w" 14 22 6 8 )
     hdr=( PR "$C_BOLD" TITLE "$C_BOLD" REVIEW "$C_BOLD" "AGENT STATE" "$C_BOLD" ROUNDS "$C_BOLD" "LAST RUN" "$C_BOLD" )
     if [ "$show_session" -eq 1 ]; then COL_W+=( 16 ); hdr+=( SESSION "$C_BOLD" ); fi

@@ -139,6 +139,7 @@ Env vars always win over the per-repo config saved by `pr-agent on`
 | `PR_AGENT_MAIN_SYNC` | `0` | Each poll also auto-syncs open PRs behind the default base |
 | `PR_AGENT_TABLE_ROWS` | `0` | Rows in the status table (`0` = fit the screen; can exceed it — the bottom of the frame gets clipped) |
 | `PR_AGENT_ACTIVITY_LINES` | `6` | Lines in the status "recent activity" section (`0` = hide — frees rows for the table) |
+| `PR_AGENT_TITLE_W` | `0` | Title column width in the status table (`0` = auto-fit the terminal, up to 100 chars) |
 | `PR_AGENT_REPO` | — | `owner/name` to act on when not inside the repo |
 | `PR_AGENT_STATE_DIR` | `~/.local/state/pr-agent` | State root |
 | `DEVIN_BIN` | `devin` | Devin CLI binary |
