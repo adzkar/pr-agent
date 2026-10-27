@@ -18,7 +18,7 @@ Sections are delimited by `# --- name ---` banners, in file order:
 | settings | 115–159 | `CFG_*` saved config → `PR_AGENT_*` env → default precedence; `save_config`, `log`, `notify` (osascript) |
 | repo context | 160–182 | `repo`/`repo_dir`/`me` accessors, `detect_repo` (writes repo, repo_dir, me, base into state) |
 | map | 183–210 | `map.json` accessors (`map_get/set/del/rm/num`) behind `with_map_lock` (mkdir lock, ~10 s stale break) |
-| PR list | 212–249 | `refresh_prs` — one `gh pr list` call → `prs.jsonl` cache (number, title, state, draft, review, updated, branch, head, base, mergeable, ci, ci_failed, body, cross); `pr_info`, `targets` |
+| PR list | 212–249 | `refresh_prs` — one `gh pr list` call → `prs.jsonl` cache (number, title, state, draft, review, updated, branch, head, base, mergeable, ci, ci_failed, body, cross); `backfill_prs` — one `gh pr view` per tracked PR missing from both caches → `prs_extra.jsonl` (once each ever); `pr_info` (list first, extras fallback), `targets` |
 | feedback collection | 251–322 | `fetch_feedback` (3 `gh api` endpoints + `synthetic_feedback`), `seed_seen`, `filter_feedback` (seen/author/bot/skip rules), `pending_feedback` |
 | failed review runs | 324–442 | `handle_review_failure` + helpers — pings the review bot (`RETRY_MSG`) on `Review failed:` notices, `RETRY_MAX` cap, `retry_cutoff` keeps pre-existing failures manual-only |
 | formatting | 444–456 | `format_feedback` — jsonl → markdown prompt sections |
@@ -46,7 +46,8 @@ Sections are delimited by `# --- name ---` banners, in file order:
     map.json                   # PR → session/worktree/counters (see below)
     map.lock                   # mkdir lock dir for map writes
     watch.log                  # event log (drives "recent activity")
-    prs.jsonl                  # PR list cache (one object per PR)
+    prs.jsonl                  # PR list cache (one object per PR; newest ~100)
+    prs_extra.jsonl            # same objects for tracked PRs that aged out of the list window
     gh_error                   # exists ⇔ last refresh_prs failed
     cycle_active / last_cycle  # poll-in-progress marker / last poll epoch
     status_pending             # "pr count" lines, unprocessed feedback per open PR
@@ -135,8 +136,10 @@ the retry path) AND one of:
 ### Status screen (`render_status [ttl] [term-rows]`)
 
 Header (watcher state, targets, settings, poll countdown) → PR table:
-`status_prs` = watch targets ∪ PRs with map history, **open first then
-merged/closed dimmed**. `state_cell` renders the AGENT STATE column and fills
+`status_prs` = watch targets ∪ PRs with map history, **most recent activity
+first** (max of `updated`, `last_seen_ts`, `last_run_at`), then **open first,
+merged/closed dimmed** via the two render passes. `state_cell` renders the
+AGENT STATE column and fills
 the `H_*` buckets that pick the one-line `render_hint`. Then a blank line,
 `recent activity` (last `ACTIVITY_LINES` deduped `watch.log` events — the
 whole section is hidden when `ACTIVITY_LINES=0`), and the hint.

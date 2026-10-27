@@ -76,6 +76,12 @@ them as a smoke test unless that's the intent.
 - **`running/<pr>` marker = "stopped by user".** `run_agent` treats a deleted
   marker as an intentional stop (rc 3), not a crash — remove the marker before
   killing a pid, never after.
+- **`prs_extra.jsonl` is display-only.** It holds last-known PR objects for
+  tracked PRs that aged out of `prs.jsonl`'s `--limit 100` window (backfilled
+  once each by `backfill_prs`, pruned by `gc --yes`). `pr_info` falls back to
+  it so the status table keeps title/state, but `targets`/`pr_sig` must keep
+  reading `prs.jsonl` alone — a stale OPEN entry would make a dead PR
+  watchable forever, and a frozen `updated` would mask real changes.
 - **`seen/<pr>` keys are content-derived** (`id:body-len` / `id:updated_at`) —
   an *edited* review or comment re-triggers. Don't switch to plain ids.
 - **Feedback `key` ≠ seen marker ≠ skip state.** Marking a key seen only stops

@@ -121,6 +121,7 @@ PID_FILE="$STATE_DIR/pid"
 MAP_FILE="$STATE_DIR/map.json"
 LOG_FILE="$STATE_DIR/watch.log"
 PRS_CACHE="$STATE_DIR/prs.jsonl"
+PRS_EXTRA="$STATE_DIR/prs_extra.jsonl"
 mkdir -p "$STATE_DIR"/{locks,running,seen,feedback,logs}
 
 # --- settings: env > saved per-repo config > default ----------------------------
@@ -227,31 +228,56 @@ map_num() { local v; v="$(map_get "$1" "$2")"; echo "${v:-0}"; }
 # --- PR list (one gh call per cycle, shared with status) --------------------------------
 # prs.jsonl: one compact object per PR: number title state draft review updated head base
 #            mergeable ci (pass|fail|pending|none) ci_failed [{name,url}]
+# prs_extra.jsonl: same shape, for map/target PRs that aged out of the list's --limit
+#            window — backfilled once each by backfill_prs so status keeps title/state.
+#            Read by pr_info only; targets/pr_sig must NOT see it (stale state).
+
+PR_JSON_FIELDS='number,title,state,isDraft,reviewDecision,updatedAt,headRefName,headRefOid,baseRefName,mergeable,statusCheckRollup,body,isCrossRepository'
+PR_JQ='([.statusCheckRollup[]? | {name: (.name // .context), url: (.detailsUrl // .targetUrl // ""),
+           bad: ((.conclusion // .state // "") | test("FAILURE|TIMED_OUT|CANCELLED|ACTION_REQUIRED|ERROR")),
+           wait: ((.status // .state // "") | test("IN_PROGRESS|QUEUED|PENDING|EXPECTED|WAITING"))}]) as $c
+       | {number, title, state, draft: .isDraft, review: (.reviewDecision // ""), updated: .updatedAt,
+          branch: .headRefName, head: .headRefOid, base: .baseRefName, mergeable,
+          body, cross: .isCrossRepository,
+          ci: (if ($c|length) == 0 then "none" elif any($c[]; .wait) then "pending"
+               elif any($c[]; .bad) then "fail" else "pass" end),
+          ci_failed: [$c[] | select(.bad) | {name, url}]} | tojson'
 
 refresh_prs() { # ttl -> refresh prs.jsonl unless younger than ttl seconds; 1 on GitHub failure
   local ttl="$1" tmp
   if [ -f "$PRS_CACHE" ] && [ $(( $(date +%s) - $(stat -f %m "$PRS_CACHE") )) -lt "$ttl" ]; then return 0; fi
   tmp="$(mktemp)"
   if ! gh pr list --repo "$(repo)" --state all --limit 100 \
-      --json number,title,state,isDraft,reviewDecision,updatedAt,headRefName,headRefOid,baseRefName,mergeable,statusCheckRollup,body,isCrossRepository \
-      --jq '.[] | ([.statusCheckRollup[]? | {name: (.name // .context), url: (.detailsUrl // .targetUrl // ""),
-                    bad: ((.conclusion // .state // "") | test("FAILURE|TIMED_OUT|CANCELLED|ACTION_REQUIRED|ERROR")),
-                    wait: ((.status // .state // "") | test("IN_PROGRESS|QUEUED|PENDING|EXPECTED|WAITING"))}]) as $c
-            | {number, title, state, draft: .isDraft, review: (.reviewDecision // ""), updated: .updatedAt,
-               branch: .headRefName, head: .headRefOid, base: .baseRefName, mergeable,
-               body, cross: .isCrossRepository,
-               ci: (if ($c|length) == 0 then "none" elif any($c[]; .wait) then "pending"
-                    elif any($c[]; .bad) then "fail" else "pass" end),
-               ci_failed: [$c[] | select(.bad) | {name, url}]} | tojson' >"$tmp" 2>/dev/null; then
+      --json "$PR_JSON_FIELDS" --jq ".[] | $PR_JQ" >"$tmp" 2>/dev/null; then
     rm -f "$tmp"; touch "$STATE_DIR/gh_error"; return 1
   fi
   rm -f "$STATE_DIR/gh_error"
   mv "$tmp" "$PRS_CACHE"
+  backfill_prs
 }
 
-pr_info() { # pr [field] -> the PR's cached object (or one field of it)
-  [ -f "$PRS_CACHE" ] || return 0
-  jq -r --argjson n "$1" --arg f "${2:-}" 'select(.number == $n) | if $f == "" then tojson else (.[$f] // "" | tostring) end' "$PRS_CACHE" | head -1
+backfill_prs() { # -> one gh pr view per tracked PR missing from both prs caches (once each ever)
+  local known cand
+  known="$( { jq -r '.number' "$PRS_CACHE" 2>/dev/null || true
+              [ -f "$PRS_EXTRA" ] && jq -r '.number' "$PRS_EXTRA" 2>/dev/null || true; } | sort -u )"
+  cand="$( { jq -r '.prs | keys[]' "$MAP_FILE" 2>/dev/null || true
+             [ -f "$STATE_DIR/targets" ] && tr ' ' '\n' <"$STATE_DIR/targets" || true; } \
+           | { grep -E '^[0-9]+$' || true; } | sort -u )"
+  [ -n "$cand" ] || return 0
+  local n
+  for n in $(comm -23 <(printf '%s\n' "$cand") <(printf '%s\n' "$known")); do
+    gh pr view "$n" --repo "$(repo)" --json "$PR_JSON_FIELDS" --jq "$PR_JQ" >>"$PRS_EXTRA" 2>/dev/null || true
+  done
+}
+
+pr_info() { # pr [field] -> the PR's cached object (or one field of it); PRS_EXTRA covers aged-out PRs
+  local -a files=()
+  [ -f "$PRS_CACHE" ] && files+=( "$PRS_CACHE" )
+  [ -f "$PRS_EXTRA" ] && files+=( "$PRS_EXTRA" )
+  [ "${#files[@]}" -gt 0 ] || return 0
+  jq -r --argjson n "$1" --arg f "${2:-}" \
+    'select(.number == $n) | if $f == "" then tojson else (.[$f] // "" | tostring) end' \
+    "${files[@]}" | head -1
 }
 
 targets() { # -> PR numbers to watch (from prs.jsonl)
@@ -1208,6 +1234,15 @@ cmd_gc() { # [--yes] -> remove worktrees/branches/state for merged & closed PRs
     echo "  forget session/state"
     if [ -n "$yes" ]; then map_rm "$pr"; rm -rf "$STATE_DIR/seen/$pr" "$STATE_DIR/feedback/$pr".* "$STATE_DIR/logs/$pr"; fi
   done
+  if [ -n "$yes" ] && [ -f "$PRS_EXTRA" ]; then
+    local keep tmp2
+    keep="$( { jq -r '.prs | keys[]' "$MAP_FILE" 2>/dev/null || true
+               [ -f "$STATE_DIR/targets" ] && tr ' ' '\n' <"$STATE_DIR/targets" || true; } \
+             | { grep -E '^[0-9]+$' || true; } | sort -un | jq -Rn '[inputs | tonumber]')"
+    tmp2="$(mktemp)"
+    jq -c --argjson keep "$keep" 'select(.number as $n | $keep | index($n))' "$PRS_EXTRA" >"$tmp2" \
+      && mv "$tmp2" "$PRS_EXTRA" || rm -f "$tmp2"
+  fi
   [ -n "$yes" ] && git -C "$rd" worktree prune
   if [ "$planned" -eq 0 ]; then echo "nothing to clean up"
   elif [ -z "$yes" ]; then echo; echo "dry run — re-run with 'pr-agent gc --yes' to apply"; fi
@@ -1323,8 +1358,24 @@ draw_row() { # text1 style1 text2 style2 ... -> one bordered table row sized to 
   printf '%s\n' "$out"
 }
 
-status_prs() { # -> PR numbers shown in status: watch targets ∪ PRs with agent history
-  { targets | tr ' ' '\n'; jq -r '.prs | keys[]' "$MAP_FILE"; } | { grep -E '^[0-9]+$' || true; } | sort -un
+status_prs() { # -> PR numbers shown in status, most recent activity first: watch targets ∪ agent history
+  local want map f; local -a files=()
+  want="$( { targets | tr ' ' '\n'; jq -r '.prs | keys[]' "$MAP_FILE" 2>/dev/null || true; } \
+           | { grep -E '^[0-9]+$' || true; } | sort -un )"
+  [ -n "$want" ] || return 0
+  for f in "$PRS_EXTRA" "$PRS_CACHE"; do [ -f "$f" ] && files+=( "$f" ); done
+  map="$(cat "$MAP_FILE" 2>/dev/null)"; [ -n "$map" ] || map='{}'
+  { [ "${#files[@]}" -gt 0 ] && cat "${files[@]}" || true; } | jq -rs \
+    --arg want "$want" --argjson map "$map" '
+    (map({key: (.number | tostring), value: .updated}) | from_entries) as $upd
+    | ($map.prs // {}) as $m
+    | [ $want | split("\n")[] | select(length > 0) | tonumber ]
+    | map(. as $n | ($n | tostring) as $k
+        | { n: $n,
+            t: ([ $upd[$k], $m[$k].last_seen_ts,
+                  ($m[$k].last_run_at | tonumber? | todate?) ]
+                | map(select(. != null)) | max // "") })
+    | sort_by(.t) | reverse | .[].n'
 }
 
 refresh_status_pending() { # ttl -> recount unprocessed feedback per open PR unless younger than ttl

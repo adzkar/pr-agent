@@ -79,7 +79,10 @@ recent activity  (full log: pr-agent logs · agent transcript: pr-agent logs N)
 ↻ agent is addressing feedback on #266. Follow along: pr-agent logs 266 -f
 ```
 
-- **Open PRs come first**, then merged/closed history (dimmed).
+- **Open PRs come first**, then merged/closed history (dimmed); within each
+  group rows are ordered by **latest activity** (GitHub updates and agent
+  runs). PRs that aged out of the live list keep their title/state from a
+  side cache (`prs_extra.jsonl`).
 - **AGENT STATE** is the live verdict per PR: working, new items pending,
   failed/retrying, paused, hit the round limit, gave up, waiting for review,
   all feedback handled, or done.
