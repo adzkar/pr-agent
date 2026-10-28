@@ -745,7 +745,7 @@ check_sync() { # pr basesha base mode(watch|manual) -> merge the base into the P
       log "PR #$pr: main sync failed $MAX_FAILS times — giving up on this head/base state"
       notify "PR #$pr" "Main sync failed ${MAX_FAILS}x — needs you"
       gh pr comment "$pr" --repo "$(repo)" \
-        --body "pr-agent: couldn't sync this branch with \`$base\` after $MAX_FAILS attempts — needs manual attention." \
+        --body "Couldn't sync this branch with \`$base\` after $MAX_FAILS attempts — needs manual attention." \
         >>"$LOG_FILE" 2>&1 || true
     else
       log "PR #$pr: sync run didn't land the merge (attempt $fails/$MAX_FAILS) — will retry"
@@ -950,7 +950,7 @@ check_pr() { # pr [sig] [force] [mode] -> processes new feedback for one PR (mod
       jq -r '.key' "$new" >>"$STATE_DIR/seen/$pr"   # stop retrying this round
       map_set "$pr" fail_count 0; map_set "$pr" gave_up 1
       gh pr comment "$pr" --repo "$(repo)" \
-        --body "pr-agent: automated run failed $MAX_FAILS times for this feedback round — needs manual attention." \
+        --body "Automated run failed $MAX_FAILS times for this feedback round — needs manual attention." \
         >>"$LOG_FILE" 2>&1 || true
       log "PR #$pr: gave up on this round after $MAX_FAILS failures; escalated on the PR"
       notify "PR #$pr" "Gave up after $MAX_FAILS failed runs — needs you"
