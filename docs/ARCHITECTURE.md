@@ -22,14 +22,14 @@ Sections are delimited by `# --- name ---` banners, in file order:
 | feedback collection | 321–396 | `fetch_feedback` (3 `gh api` endpoints + `synthetic_feedback`), `seed_seen`, `filter_feedback` (seen/author/bot/skip rules), `pending_feedback` |
 | failed review runs | 397–516 | `handle_review_failure` + helpers — pings the review bot (`RETRY_MSG`) on `Review failed:` notices, `RETRY_MAX` cap, `retry_cutoff` keeps pre-existing failures manual-only |
 | formatting | 517–530 | `format_feedback` — jsonl → markdown prompt sections |
-| worktree | 531–619 | `ensure_worktree` (`<repo>-pr-<N>` next to the main checkout), `worktree_holding`/`still_blocked` (local-only `git worktree list` probes), `setup_worktree` (copies `.env*`/`config.local.json`, reuses `node_modules` when manifests match else `bun install --frozen-lockfile`, husky prepare), `sync_worktree` |
-| main-sync | 620–870 | Post-merge catch-up: `sync_scan` → `check_sync` merges base into PR branch **via the PR's agent session**, then `verify_synced` + `apply_unblock` (dep-gated draft unbanner/ready, `sync_unblock` state machine); rc 4 defers like a busy session — no `sync_fails` |
-| agent | 871–972 | `build_prompt`, `devin_flags`, `session_ids`/`new_session_id` (diff `devin list` before/after), `run_agent` (resume `devin -r` else start new) |
-| per-PR check | 973–1048 | `check_pr` — the per-PR round; `skip_reason` |
-| watcher | 1049–1198 | `watch_loop` (cd `repo_dir` per cycle), `is_running`, `pr_sig`, launchd plist install |
-| manual commands | 1199–1375 | `run`, `tell`/`_tell`, `attach`, `retry`, `peek`, `mark-seen`, `gc`, `sync`, `config`, `logs` |
-| status rendering | 1376–1775 | `fmt_*`, `draw_*`, `status_prs`, `review_cell`/`state_cell` (side effects: `H_*` hint buckets), `recent_events`, `render_hint`, `render_status` (row-budgeted table), `cmd_status` (alt-screen watch loop + fallback clip) |
-| dispatch | 1776–end | `usage`, `case "$1"` router — inline cases: `add`/`rm`, `pause`/`resume`, `reset`, `reset-rounds`, `map`, `version`, `help`; `_loop`/`_check`/`_tell` are internal entries |
+| worktree | 531–620 | `ensure_worktree` (`<repo>-pr-<N>` next to the main checkout), `worktree_holding`/`still_blocked` (local-only `git worktree list` probes), `setup_worktree` (copies `.env*`/`config.local.json`, reuses `node_modules` when manifests match else `bun install --frozen-lockfile`, husky prepare), `sync_worktree` |
+| main-sync | 621–873 | Post-merge catch-up: `sync_scan` → `check_sync` merges base into PR branch **via the PR's agent session**, then `verify_synced` + `apply_unblock` (dep-gated draft unbanner/ready, `sync_unblock` state machine); rc 4 defers like a busy session — no `sync_fails`; `sync_scan watch` skips `worktree_blocked` PRs outright |
+| agent | 874–975 | `build_prompt`, `devin_flags`, `session_ids`/`new_session_id` (diff `devin list` before/after), `run_agent` (resume `devin -r` else start new) |
+| per-PR check | 976–1051 | `check_pr` — the per-PR round; `skip_reason` |
+| watcher | 1052–1202 | `watch_loop` (cd `repo_dir` per cycle), `is_running`, `pr_sig`, launchd plist install |
+| manual commands | 1203–1380 | `run`, `tell`/`_tell`, `attach`, `retry`, `peek`, `mark-seen`, `gc`, `sync`, `config`, `logs` |
+| status rendering | 1381–1789 | `fmt_*`, `draw_*`, `status_prs`, `refresh_status_pending`, `refresh_blocked_flags` (lazy `still_blocked` re-probe — clears a freed flag even with the watcher off), `review_cell`/`state_cell` (side effects: `H_*` hint buckets), `recent_events`, `render_hint`, `render_status` (row-budgeted table), `cmd_status` (alt-screen watch loop + fallback clip) |
+| dispatch | 1790–end | `usage`, `case "$1"` router — inline cases: `add`/`rm`, `pause`/`resume`, `reset`, `reset-rounds`, `map`, `version`, `help`; `_loop`/`_check`/`_tell` are internal entries |
 
 ## On-disk state
 
@@ -82,9 +82,9 @@ same script.
 ```
 refresh_prs 0                      # one gh pr list; failure → gh_error + warn once
 for pr in $(targets):              # all open non-draft PRs (PR_AUTHOR_FILTER scope), or explicit list
-    skip_reason → paused / round limit / approved / merged|closed
     worktree_blocked → still_blocked (local `git worktree list` probe, no gh
         calls): still blocked → skip; freed → clear flag + sig → fall through
+    skip_reason → paused / round limit / approved / merged|closed
     pr_sig unchanged && cycle % 10 != 0 → skip   # cheap dedupe vs full fetch
     while jobs -rp >= CONCURRENCY: sleep 2       # cap parallel rounds
     ( check_pr pr sig ) &
