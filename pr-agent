@@ -844,6 +844,8 @@ sync_scan() { # mode(report|apply|watch) [dep-filter-pr] -> detect PRs behind ba
           fi
           printf '#%-5s %-40s %-24s %s\n' "$pr" "${branch:-?}" "${extra:-—}" "$act" ;;
         watch)
+          # blocked worktree → check_sync only defers rc 4; skip the prompt/fork churn until it frees
+          [ "$(map_get "$pr" worktree_blocked)" = "1" ] && continue
           if [ "$key" != "$(map_get "$pr" sync_done_key)" ] && [ "$key" != "$(map_get "$pr" sync_blocked_key)" ]; then
             map_set "$pr" sync_pending 1
             while [ "$(jobs -rp | wc -l | tr -d ' ')" -ge "$CONCURRENCY" ]; do sleep 2; done
@@ -1480,6 +1482,13 @@ refresh_status_pending() { # ttl -> recount unprocessed feedback per open PR unl
   mv "$tmp" "$STATUS_PENDING"
 }
 
+refresh_blocked_flags() { # -> still_blocked re-probe per flagged PR so a freed branch un-stales the display when the watcher is off
+  local pr
+  for pr in $(jq -r '.prs | to_entries[] | select(.value.worktree_blocked == "1") | .key' "$MAP_FILE" 2>/dev/null || true); do
+    still_blocked "$pr" || { map_del "$pr" worktree_blocked; map_del "$pr" blocked_logged; map_del "$pr" sig; }
+  done
+}
+
 last_run_epoch() { # pr -> epoch of the last finished agent run (map, falling back to the log)
   local v line; v="$(map_get "$1" last_run_at)"
   if [ -z "$v" ]; then
@@ -1622,6 +1631,7 @@ render_status() { # ttl [term-rows] -> status screen; with term-rows the PR tabl
   map_init
   refresh_prs "$1" || true
   refresh_status_pending "$1"
+  refresh_blocked_flags
   H_PENDING='' H_FAILED='' H_GAVEUP='' H_DIED='' H_WORKING='' H_PAUSED='' H_LIMIT='' H_BOTFAIL='' H_SYNCFAIL='' H_BLOCKED='' NEXT_POLL="on the next poll"
 
   local running=0 now badge poll t next cols reacts extras=''
