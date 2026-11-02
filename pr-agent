@@ -1474,15 +1474,16 @@ state_cell() { # pr gh_state pending -> sets CELL_T / CELL_C and records hint bu
     MERGED) CELL_T="merged — done"; CELL_C="$C_DIM"; return ;;
     CLOSED) CELL_T="closed"; CELL_C="$C_DIM"; return ;;
   esac
-  if [ "$(map_get "$pr" sync_blocked)" = "1" ]; then CELL_T="✗ main-sync failed — needs you"; CELL_C="$C_RED"; H_SYNCFAIL+=" $pr"; return; fi
-  if [ "$(map_get "$pr" sync_pending)" = "1" ]; then CELL_T="● behind base — sync queued"; CELL_C="$C_CYAN$C_BOLD"; H_PENDING+=" $pr"; return; fi
   reason="$(skip_reason "$pr")"
   case "$reason" in
     paused)        CELL_T="⏸ paused"; CELL_C="$C_YELLOW"; H_PAUSED+=" $pr"; return ;;
     "round limit") CELL_T="⏸ hit $MAX_ROUNDS-round limit"; CELL_C="$C_RED"; H_LIMIT+=" $pr"; return ;;
     approved)      CELL_T="✓ approved — stopped"; CELL_C="$C_GREEN"; return ;;
   esac
+  # blocked beats the sync cells — no agent can run while the branch sits in the main checkout
   if [ "$(map_get "$pr" worktree_blocked)" = "1" ]; then CELL_T="⚠ worktree blocked"; CELL_C="$C_YELLOW"; H_BLOCKED+=" $pr"; return; fi
+  if [ "$(map_get "$pr" sync_blocked)" = "1" ]; then CELL_T="✗ main-sync failed — needs you"; CELL_C="$C_RED"; H_SYNCFAIL+=" $pr"; return; fi
+  if [ "$(map_get "$pr" sync_pending)" = "1" ]; then CELL_T="● behind base — sync queued"; CELL_C="$C_CYAN$C_BOLD"; H_PENDING+=" $pr"; return; fi
   fc="$(map_num "$pr" fail_count)"
   if [ "${3:-0}" -gt 0 ]; then
     if [ "$fc" -gt 0 ]; then
