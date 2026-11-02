@@ -40,7 +40,7 @@
 #   PR_AGENT_BOTS         Comma list of [bot] logins to react to (default: none);
 #                         other bots are ignored unless listed in PR_AGENT_AUTHOR
 #   PR_AGENT_PR_AUTHOR    Comma list of PR authors to watch in "all" mode
-#                         (@me = your login; default: all authors)
+#                         (@me = your login, @all = everyone; default @me)
 #   PR_AGENT_TRIGGER      Prefix that turns your own comment into feedback (default /agent)
 #   PR_AGENT_MAX_FAILS    Consecutive failed runs per round before giving up (default 3)
 #   PR_AGENT_MAX_ROUNDS   Stop auto-runs on a PR after this many rounds (default 10, 0 = off)
@@ -136,7 +136,7 @@ INTERVAL="${PR_AGENT_INTERVAL:-${CFG_INTERVAL:-120}}"
 PERM_MODE="${PR_AGENT_MODE:-${CFG_PERM_MODE:-dangerous}}"
 SANDBOX="${PR_AGENT_SANDBOX:-${CFG_SANDBOX:-0}}"
 AUTHOR_FILTER="${PR_AGENT_AUTHOR:-${CFG_AUTHOR_FILTER:-}}"
-PR_AUTHOR_FILTER="${PR_AGENT_PR_AUTHOR:-${CFG_PR_AUTHOR_FILTER:-}}"
+PR_AUTHOR_FILTER="${PR_AGENT_PR_AUTHOR:-${CFG_PR_AUTHOR_FILTER:-@me}}"
 BOTS="${PR_AGENT_BOTS:-${CFG_BOTS:-}}"
 TRIGGER="${PR_AGENT_TRIGGER:-${CFG_TRIGGER:-/agent}}"
 MAX_FAILS="${PR_AGENT_MAX_FAILS:-${CFG_MAX_FAILS:-3}}"
@@ -253,10 +253,11 @@ PR_JQ='([.statusCheckRollup[]? | {name: (.name // .context), url: (.detailsUrl /
 
 # jq fragment for "all"-mode author scoping (needs --arg pa $PR_AUTHOR_FILTER --arg me $(me)):
 # true when the object's .author is in the comma list — "@me" maps to your login;
-# a blank filter means any author, missing .author (or unresolvable @me) never matches.
+# "@all" or a blank filter means any author, missing .author (or unresolvable @me) never matches.
 PR_AUTHOR_JQ='($pa | split(",") | map(gsub("^ +| +$"; "")) | map(if . == "@me" then $me else . end)
               | map(select(length > 0))) as $A
-             | ($pa | gsub(" "; "") | length) == 0 or ((.author // "") as $a | any($A[]; . == $a))'
+             | ($pa | gsub(" "; "") | length) == 0 or ($A | index("@all")) != null
+               or ((.author // "") as $a | any($A[]; . == $a))'
 
 refresh_prs() { # ttl -> refresh prs.jsonl unless younger than ttl seconds; 1 on GitHub failure
   local ttl="$1" tmp

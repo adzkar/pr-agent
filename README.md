@@ -25,7 +25,7 @@ install -m 755 pr-agent /usr/local/bin/pr-agent
 
 ```sh
 cd your-repo
-pr-agent on            # watch all open non-draft PRs, poll every 2m
+pr-agent on            # watch your open non-draft PRs, poll every 2m
 pr-agent status -w     # live dashboard, Ctrl-C to exit
 ```
 
@@ -37,7 +37,7 @@ shows where every PR stands.
 
 | Command | What it does |
 | --- | --- |
-| `pr-agent on [--launchd] [all \| N...]` | Start watching (default: all open non-draft PRs — restrict by author with `PR_AGENT_PR_AUTHOR`). `--launchd` runs under launchd so the watcher survives reboots/crashes. |
+| `pr-agent on [--launchd] [all \| N...]` | Start watching (default: your open non-draft PRs — `PR_AGENT_PR_AUTHOR` sets which authors, `@all` = everyone). `--launchd` runs under launchd so the watcher survives reboots/crashes. |
 | `pr-agent off [--now]` | Stop the watcher (`--now` also kills running agents) |
 | `pr-agent status [-w [SECS]]` | Dashboard (`-w`: live refresh, default 5s) |
 | `pr-agent logs [N] [-f]` | Event log, or PR N's latest agent transcript (`-f` follow) |
@@ -122,7 +122,7 @@ Env vars always win over the per-repo config saved by `pr-agent on`
 | `PR_AGENT_MODE` | `dangerous` | `devin --permission-mode` |
 | `PR_AGENT_SANDBOX` | `0` | Pass `--sandbox` to devin |
 | `PR_AGENT_AUTHOR` | anyone but you | Comma list; only react to these logins |
-| `PR_AGENT_PR_AUTHOR` | all authors | Comma list; in `all` mode only watch PRs by these authors (`@me` = your login). Explicit targets (`on N…`) are unaffected |
+| `PR_AGENT_PR_AUTHOR` | `@me` | Comma list; in `all` mode only watch PRs by these authors (`@all` = everyone). Explicit targets (`on N…`) are unaffected |
 | `PR_AGENT_BOTS` | — | Comma list of `[bot]` logins to react to (e.g. your review bot) |
 | `PR_AGENT_TRIGGER` | `/agent` | Prefix that turns your own comment into feedback |
 | `PR_AGENT_MAX_FAILS` | `3` | Consecutive failed runs before giving up |
