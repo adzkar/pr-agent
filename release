@@ -42,6 +42,15 @@ elif [[ "$arg" =~ ^(patch|minor|major)$ ]]; then
 else
   die "bad version '$arg' — want patch, minor, major, or X.Y.Z"
 fi
+
+# the target must not go backwards (patch/minor/major never do; X.Y.Z could)
+IFS=. read -r nmaj nmin npat <<<"$next"
+IFS=. read -r cmaj cmin cpat <<<"$cur"
+if [ "$nmaj" -lt "$cmaj" ] ||
+  { [ "$nmaj" -eq "$cmaj" ] && [ "$nmin" -lt "$cmin" ]; } ||
+  { [ "$nmaj" -eq "$cmaj" ] && [ "$nmin" -eq "$cmin" ] && [ "$npat" -lt "$cpat" ]; }; then
+  die "v$next would downgrade v$cur"
+fi
 [ "$next" != "$cur" ] || die "already at $cur"
 git rev-parse -q --verify "refs/tags/v$next" >/dev/null 2>&1 && die "tag v$next already exists"
 gh release view "v$next" >/dev/null 2>&1 && die "release v$next already exists"
