@@ -7,8 +7,8 @@
 # that session (`devin -r`) so the agent keeps context across review rounds.
 #
 # Usage:
-#   pr-agent on [--launchd] [all | N...]  Start watching (default: all open non-draft PRs)
-#                                         --launchd: run under launchd (survives reboot/crash)
+#   pr-agent on [--launchd] [all | N...]  Start watching (default: your open non-draft PRs —
+#                                         @all = everyone; --launchd survives reboot/crash)
 #   pr-agent off [--now]            Stop the watcher (--now also kills running agents)
 #   pr-agent status [-w [SECS]]     Dashboard (-w: live refresh, default 5s)
 #   pr-agent logs [N] [-f]          Event log, or PR N's latest agent transcript (-f follow)
@@ -779,7 +779,7 @@ check_sync() { # pr basesha base mode(watch|manual) -> merge the base into the P
 }
 
 sync_scan() { # mode(report|apply|watch) [dep-filter-pr] -> detect PRs behind base and act
-  local mode="$1" depf="${2:-}" rd pr head branch key bsha base shown=0 extra act
+  local mode="$1" depf="${2:-}" rd pr head branch key bsha base shown=0 extra act t what
   rd="$(repo_dir)"; [ -n "$rd" ] || { log "sync: no repo_dir — run 'pr-agent on' from the repo first"; return 1; }
   base="$(default_base)"
   fetch_base "$base" || { [ "$mode" != "watch" ] && echo "sync: can't fetch origin/$base" >&2; return 1; }
@@ -825,7 +825,11 @@ sync_scan() { # mode(report|apply|watch) [dep-filter-pr] -> detect PRs behind ba
       fi
     fi
   done
-  if [ "$mode" = "report" ] && [ "$shown" -eq 0 ]; then echo "all open PRs are current with origin/$base — nothing to sync"; fi
+  if [ "$mode" = "report" ] && [ "$shown" -eq 0 ]; then
+    t="$(cat "$STATE_DIR/targets" 2>/dev/null || true)"
+    if [ "$t" = "all" ] || [ -z "$t" ]; then what="$(scope_label)"; else what="watched PRs"; fi
+    echo "$what are current with origin/$base — nothing to sync"
+  fi
 }
 
 # --- agent -----------------------------------------------------------------------------
