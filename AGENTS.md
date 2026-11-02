@@ -13,6 +13,7 @@
 | `README.md` | User docs: install, commands, dashboard, config |
 | `docs/ARCHITECTURE.md` | Code structure map, state files, execution flows |
 | `release` | Maintainer script — cuts versioned GitHub releases (`./release [patch|minor|major|X.Y.Z]`) |
+| `tests/` | `release.sh` — scratch-repo + stubbed-`gh` harness for `release` |
 | `AGENTS.md` | This file |
 
 ## Deploy model

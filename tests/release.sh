@@ -1,0 +1,222 @@
+#!/usr/bin/env bash
+# Harness for ./release: scratch git repos + stubbed gh. No GitHub touched.
+# Run from anywhere: tests/release.sh
+set -euo pipefail
+
+T="$(mktemp -d)"
+trap 'rm -rf "$T"' EXIT
+export GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t \
+       GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t
+export GH_STUB_STATE="$T/state"
+mkdir -p "$T/bin" "$T/state"
+
+cat >"$T/bin/gh" <<'EOF'
+#!/usr/bin/env bash
+state="${GH_STUB_STATE:?}"
+case "$1/$2" in
+  auth/status) exit 0 ;;
+  release/view)
+    [ -f "$state/$3" ] || exit 1
+    case "${4:-} ${5:-}" in
+      "--json url") echo "https://example.test/$3" ;;
+      "--json assets") cat "$state/$3.assets" 2>/dev/null || true ;;
+    esac
+    exit 0 ;;
+  release/create)
+    [ "${GH_STUB_FAIL_CREATE:-0}" = "1" ] && exit 1
+    touch "$state/$3"; exit 0 ;;
+  release/upload)
+    tag="$3"; shift 3; : >"$state/$tag.assets"
+    if [ "${GH_STUB_FAIL_UPLOAD:-0}" = "1" ]; then
+      basename "$1" >>"$state/$tag.assets"   # first asset lands, rest lost
+      exit 1
+    fi
+    for a in "$@"; do case "$a" in -*) ;; *) basename "$a" >>"$state/$tag.assets" ;; esac; done
+    exit 0 ;;
+esac
+exit 1
+EOF
+chmod +x "$T/bin/gh"
+export PATH="$T/bin:$PATH"
+
+REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+pass=0; fail=0
+ok()   { pass=$((pass+1)); echo "ok   $1"; }
+bad()  { fail=$((fail+1)); echo "FAIL $1 — $2"; }
+has()  { case "$2" in *"$3"*) ok "$1" ;; *) bad "$1" "want '$3' in: $2" ;; esac; }
+eq()   { [ "$2" = "$3" ] && ok "$1" || bad "$1" "got '$2' want '$3'"; }
+yes()  { [ -e "$2" ] && ok "$1" || bad "$1" "missing $2"; }
+ver()  { sed -nE 's/^VERSION="(.*)".*/\1/p' pr-agent; }
+
+# new_repo NAME VERSION -> repo+remote+gh state, cds into repo
+new_repo() {
+  mkdir -p "$T/state-$1"; export GH_STUB_STATE="$T/state-$1"
+  git init --bare -q "$T/$1.git"
+  git init -q "$T/$1"
+  ( cd "$T/$1"
+    git checkout -qb main
+    printf '#!/usr/bin/env bash\nVERSION="%s" # release identity\n' "$2" > pr-agent
+    cp "$REPO/release" release; chmod +x release
+    git add -A; git commit -qm init
+    git remote add origin "$T/$1.git"
+    git push -qu origin main )
+  cd "$T/$1"
+}
+
+# try_release OUTVAR [args...] -> runs ./release, sets $OUTVAR + RC
+try_release() {
+  local __var="$1"; shift
+  if out="$(./release "$@" 2>&1)"; then RC=0; else RC=$?; fi
+  printf -v "$__var" '%s' "$out"
+}
+
+bump() { sed -i '' -E "s/^VERSION=\"[0-9.]+\"/VERSION=\"$1\"/" pr-agent; }
+
+echo "== S1: fresh release =="
+new_repo r1 0.1.0
+try_release o
+eq "rc 0" "$RC" 0; has "output" "$o" 'released v0.1.1 (was 0.1.0)'
+eq "VERSION bumped" "$(ver)" 0.1.1
+yes "release created" "$GH_STUB_STATE/v0.1.1"
+eq "assets uploaded" "$(cat "$GH_STUB_STATE/v0.1.1.assets" | tr '\n' ' ')" "pr-agent pr-agent.sha256 "
+eq "tag pushed" "$(git -C "$T/r1.git" tag)" v0.1.1
+
+echo "== S2: rerun after success =="
+try_release o 0.1.1
+eq "rc!=0" "$([ $RC -ne 0 ] && echo y)" y; has "msg" "$o" 'already exists'
+
+echo "== S3: next patch after success (release commit at HEAD is fine) =="
+try_release o
+eq "rc 0" "$RC" 0; has "output" "$o" 'released v0.1.2 (was 0.1.1)'
+yes "release created" "$GH_STUB_STATE/v0.1.2"
+
+echo "== S4: downgrades die =="
+try_release o 0.1.1; has "0.1.1 < 0.1.2" "$o" 'would downgrade'
+try_release o 0.0.9; has "0.0.9 < 0.1.2" "$o" 'would downgrade'
+
+echo "== S5: mint the checked-in VERSION =="
+new_repo r5 0.1.0
+try_release o 0.1.0
+eq "rc 0" "$RC" 0; has "output" "$o" 'released v0.1.0 —'
+eq "tag at HEAD" "$(git rev-parse v0.1.0^{commit})" "$(git rev-parse HEAD)"
+yes "release created" "$GH_STUB_STATE/v0.1.0"
+
+echo "== S6: resume after failed gh release create =="
+new_repo r6 0.1.0
+GH_STUB_FAIL_CREATE=1 try_release o
+eq "create failed rc" "$([ $RC -ne 0 ] && echo y)" y
+eq "tag made" "$(git tag)" v0.1.1
+eq "tag pushed" "$(git -C "$T/r6.git" tag)" v0.1.1
+eq "VERSION bumped" "$(ver)" 0.1.1
+try_release o            # bare rerun -> points at the unfinished release
+has "leapfrog guard" "$o" 'committed but its release is unfinished — finish it first: ./release 0.1.1'
+GH_STUB_FAIL_CREATE=0 try_release o 0.1.1
+eq "resume rc 0" "$RC" 0
+has "released msg" "$o" 'released v0.1.1 —'
+yes "release created" "$GH_STUB_STATE/v0.1.1"
+
+echo "== S7: resume with unpushed release commit + tag =="
+new_repo r7 0.1.0
+bump 0.1.9; git add pr-agent; git commit -qm 'chore: release v0.1.9'; git tag v0.1.9
+try_release o 0.1.9
+eq "rc 0" "$RC" 0
+eq "commit pushed" "$(git -C "$T/r7.git" rev-parse main)" "$(git rev-parse HEAD)"
+eq "tag pushed" "$(git -C "$T/r7.git" tag)" v0.1.9
+yes "release created" "$GH_STUB_STATE/v0.1.9"
+
+echo "== S8: non-release unpushed commit still dies =="
+new_repo r8 0.1.0
+git commit -q --allow-empty -m wip
+try_release o
+has "differs" "$o" 'local main differs'
+
+echo "== S9: resume when commit exists but tag does not =="
+new_repo r9 0.1.0
+bump 0.3.0; git add pr-agent; git commit -qm 'chore: release v0.3.0'
+try_release o 0.3.0
+eq "rc 0" "$RC" 0
+eq "tag created+pushed" "$(git -C "$T/r9.git" tag)" v0.3.0
+yes "release created" "$GH_STUB_STATE/v0.3.0"
+
+echo "== S10: foreign tag still dies =="
+new_repo r10 0.1.0
+git tag v9.9.9; git push -q origin v9.9.9
+try_release o 9.9.9
+has "tag exists" "$o" 'tag v9.9.9 already exists'
+
+echo "== S11: stale tag re-anchored at HEAD =="
+new_repo r11 0.1.0
+bump 0.5.0; git add pr-agent; git commit -qm 'chore: release v0.5.0'
+git tag v0.5.0 'HEAD~1'   # tag stranded on the pre-bump commit (as after rebase)
+try_release o 0.5.0
+eq "rc 0" "$RC" 0; has "re-anchored" "$o" 're-anchored stale tag v0.5.0'
+eq "local tag at HEAD" "$(git rev-parse v0.5.0^{commit})" "$(git rev-parse HEAD)"
+eq "remote tag at HEAD" "$(git -C "$T/r11.git" rev-parse 'v0.5.0^{commit}')" "$(git rev-parse HEAD)"
+yes "release created" "$GH_STUB_STATE/v0.5.0"
+
+echo "== S12: unreleased release commit at HEAD blocks leapfrog =="
+new_repo r12 0.1.0
+bump 0.6.0; git add pr-agent; git commit -qm 'chore: release v0.6.0'
+try_release o            # unpushed variant
+has "unpushed die" "$o" 'v0.6.0 is committed but its release is unfinished — finish it first: ./release 0.6.0'
+git push -q origin main  # pushed variant — same die
+try_release o
+has "pushed die" "$o" 'v0.6.0 is committed but its release is unfinished — finish it first: ./release 0.6.0'
+try_release o 0.6.0      # finishing works
+eq "finish rc 0" "$RC" 0
+yes "release created" "$GH_STUB_STATE/v0.6.0"
+
+echo "== S13: partial upload repaired on resume =="
+new_repo r13 0.1.0
+GH_STUB_FAIL_UPLOAD=1 try_release o
+eq "upload failed rc" "$([ $RC -ne 0 ] && echo y)" y
+yes "release exists" "$GH_STUB_STATE/v0.1.1"
+eq "only first asset" "$(tr '\n' ' ' <"$GH_STUB_STATE/v0.1.1.assets")" "pr-agent "
+GH_STUB_FAIL_UPLOAD=0 try_release o 0.1.1
+eq "repair rc 0" "$RC" 0
+eq "assets repaired" "$(tr '\n' ' ' <"$GH_STUB_STATE/v0.1.1.assets")" "pr-agent pr-agent.sha256 "
+
+echo "== S14: zero-padded components =="
+new_repo r14 0.1.09
+try_release o
+eq "patch 09 -> 10" "$(ver)" 0.1.10
+new_repo r14b 0.1.0
+try_release o 1.09.0
+eq "explicit normalized" "$(ver)" 1.9.0
+eq "tag normalized" "$(git tag)" v1.9.0
+
+echo "== S15: extra arguments die =="
+new_repo r15 0.1.0
+try_release o patch junk
+has "argc guard" "$o" 'too many arguments'
+
+echo "== S16: partial release blocks a bare bump (the leapfrog hole) =="
+new_repo r16 0.1.0
+GH_STUB_FAIL_UPLOAD=1 try_release o      # release exists, 1/2 assets
+try_release o                            # plain ./release must not leapfrog
+has "partial blocks bump" "$o" 'v0.1.1 is committed but its release is unfinished — finish it first: ./release 0.1.1'
+GH_STUB_FAIL_UPLOAD=0 try_release o 0.1.1
+eq "then repair rc 0" "$RC" 0
+eq "assets complete" "$(tr '\n' ' ' <"$GH_STUB_STATE/v0.1.1.assets")" "pr-agent pr-agent.sha256 "
+
+echo "== S17: unfinished tag still blocks when HEAD has moved on =="
+new_repo r17 0.1.0
+bump 0.7.0; git add pr-agent; git commit -qm 'chore: release v0.7.0'
+git tag v0.7.0; git push -q origin main 'refs/tags/v0.7.0:refs/tags/v0.7.0'
+touch "$GH_STUB_STATE/v0.7.0"          # partial release: exists, no assets file
+git commit -q --allow-empty -m docs; git push -q origin main   # HEAD moved on
+try_release o
+has "tagged unfinished die" "$o" 'v0.7.0 is tagged but its release is unfinished — finish it first: ./release 0.7.0'
+
+echo "== S18: zero-padded VERSION does not bypass the v\$curn guard =="
+new_repo r18 0.02.0
+git tag v0.2.0; git push -q origin 'refs/tags/v0.2.0:refs/tags/v0.2.0'
+touch "$GH_STUB_STATE/v0.2.0"          # partial release at canonical name
+try_release o
+has "padded guard fires" "$o" 'v0.2.0 is tagged but its release is unfinished — finish it first: ./release 0.2.0'
+try_release o 0.2.0
+eq "repair rc 0" "$RC" 0
+
+echo
+echo "$pass passed, $fail failed"
+[ "$fail" -eq 0 ]
