@@ -999,6 +999,7 @@ pr_sig() { # pr -> change signature (updatedAt + head + CI + mergeability)
 }
 
 watch_loop() {
+  cd "$(repo_dir)" 2>/dev/null || cd /   # a deleted launch dir spams getcwd errors on every job
   rm -rf "$STATE_DIR"/locks/*/ "$STATE_DIR"/running/* 2>/dev/null || true   # drop markers orphaned by a previous dead loop
   retry_cutoff >/dev/null   # set once on first start of this version; pre-existing failures stay manual-only
   echo $$ >"$PID_FILE"
