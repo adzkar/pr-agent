@@ -18,7 +18,7 @@ Sections are delimited by `# --- name ---` banners, in file order:
 | settings | 115–159 | `CFG_*` saved config → `PR_AGENT_*` env → default precedence; `save_config`, `log`, `notify` (osascript) |
 | repo context | 160–182 | `repo`/`repo_dir`/`me` accessors, `detect_repo` (writes repo, repo_dir, me, base into state) |
 | map | 183–210 | `map.json` accessors (`map_get/set/del/rm/num`) behind `with_map_lock` (mkdir lock, ~10 s stale break) |
-| PR list | 212–249 | `refresh_prs` — one `gh pr list` call → `prs.jsonl` cache (number, title, state, draft, review, updated, branch, head, base, mergeable, ci, ci_failed, body, cross); `backfill_prs` — one `gh pr view` per tracked PR missing from both caches → `prs_extra.jsonl` (once each ever); `pr_info` (list first, extras fallback), `targets` |
+| PR list | 212–249 | `refresh_prs` — one `gh pr list` call → `prs.jsonl` cache (number, title, state, draft, review, updated, branch, head, base, mergeable, ci, ci_failed, body, cross, author); `backfill_prs` — one `gh pr view` per tracked PR missing from both caches → `prs_extra.jsonl` (once each ever); `pr_info` (list first, extras fallback), `targets` ("all" mode scoped by `PR_AUTHOR_FILTER` via `PR_AUTHOR_JQ`) |
 | feedback collection | 251–322 | `fetch_feedback` (3 `gh api` endpoints + `synthetic_feedback`), `seed_seen`, `filter_feedback` (seen/author/bot/skip rules), `pending_feedback` |
 | failed review runs | 324–442 | `handle_review_failure` + helpers — pings the review bot (`RETRY_MSG`) on `Review failed:` notices, `RETRY_MAX` cap, `retry_cutoff` keeps pre-existing failures manual-only |
 | formatting | 444–456 | `format_feedback` — jsonl → markdown prompt sections |
@@ -80,7 +80,7 @@ same script.
 
 ```
 refresh_prs 0                      # one gh pr list; failure → gh_error + warn once
-for pr in $(targets):              # all open non-draft PRs, or explicit list
+for pr in $(targets):              # all open non-draft PRs (PR_AUTHOR_FILTER scope), or explicit list
     skip_reason → paused / round limit / approved / merged|closed
     pr_sig unchanged && cycle % 10 != 0 → skip   # cheap dedupe vs full fetch
     while jobs -rp >= CONCURRENCY: sleep 2       # cap parallel rounds

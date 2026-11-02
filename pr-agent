@@ -39,6 +39,8 @@
 #   PR_AGENT_AUTHOR       Comma list; only react to these logins (default: anyone but you)
 #   PR_AGENT_BOTS         Comma list of [bot] logins to react to (default: none);
 #                         other bots are ignored unless listed in PR_AGENT_AUTHOR
+#   PR_AGENT_PR_AUTHOR    Comma list of PR authors to watch in "all" mode
+#                         (@me = your login; default: all authors)
 #   PR_AGENT_TRIGGER      Prefix that turns your own comment into feedback (default /agent)
 #   PR_AGENT_MAX_FAILS    Consecutive failed runs per round before giving up (default 3)
 #   PR_AGENT_MAX_ROUNDS   Stop auto-runs on a PR after this many rounds (default 10, 0 = off)
@@ -134,6 +136,7 @@ INTERVAL="${PR_AGENT_INTERVAL:-${CFG_INTERVAL:-120}}"
 PERM_MODE="${PR_AGENT_MODE:-${CFG_PERM_MODE:-dangerous}}"
 SANDBOX="${PR_AGENT_SANDBOX:-${CFG_SANDBOX:-0}}"
 AUTHOR_FILTER="${PR_AGENT_AUTHOR:-${CFG_AUTHOR_FILTER:-}}"
+PR_AUTHOR_FILTER="${PR_AGENT_PR_AUTHOR:-${CFG_PR_AUTHOR_FILTER:-}}"
 BOTS="${PR_AGENT_BOTS:-${CFG_BOTS:-}}"
 TRIGGER="${PR_AGENT_TRIGGER:-${CFG_TRIGGER:-/agent}}"
 MAX_FAILS="${PR_AGENT_MAX_FAILS:-${CFG_MAX_FAILS:-3}}"
@@ -159,7 +162,7 @@ TITLE_W="${PR_AGENT_TITLE_W:-${CFG_TITLE_W:-0}}"                              # 
 [[ "$TITLE_W" =~ ^[0-9]+$ ]] || TITLE_W=0
 FULL_CHECK_EVERY=10   # cycles; forces a full feedback fetch even if nothing looks changed
 
-SETTINGS="INTERVAL PERM_MODE SANDBOX AUTHOR_FILTER BOTS TRIGGER MAX_FAILS MAX_ROUNDS STOP_ON_APPROVE CONCURRENCY CI_TRIGGER CONFLICT_TRIGGER NOTIFY RETRY RETRY_MAX RETRY_RE RETRY_MSG SKIP_RE SETUP_CMD MAIN_SYNC TABLE_ROWS ACTIVITY_LINES TITLE_W"
+SETTINGS="INTERVAL PERM_MODE SANDBOX AUTHOR_FILTER PR_AUTHOR_FILTER BOTS TRIGGER MAX_FAILS MAX_ROUNDS STOP_ON_APPROVE CONCURRENCY CI_TRIGGER CONFLICT_TRIGGER NOTIFY RETRY RETRY_MAX RETRY_RE RETRY_MSG SKIP_RE SETUP_CMD MAIN_SYNC TABLE_ROWS ACTIVITY_LINES TITLE_W"
 
 save_config() {
   local k; : >"$STATE_DIR/config"
@@ -237,16 +240,23 @@ map_num() { local v; v="$(map_get "$1" "$2")"; echo "${v:-0}"; }
 #            window — backfilled once each by backfill_prs so status keeps title/state.
 #            Read by pr_info only; targets/pr_sig must NOT see it (stale state).
 
-PR_JSON_FIELDS='number,title,state,isDraft,reviewDecision,updatedAt,headRefName,headRefOid,baseRefName,mergeable,statusCheckRollup,body,isCrossRepository'
+PR_JSON_FIELDS='number,title,state,isDraft,reviewDecision,updatedAt,headRefName,headRefOid,baseRefName,mergeable,statusCheckRollup,body,isCrossRepository,author'
 PR_JQ='([.statusCheckRollup[]? | {name: (.name // .context), url: (.detailsUrl // .targetUrl // ""),
            bad: ((.conclusion // .state // "") | test("FAILURE|TIMED_OUT|CANCELLED|ACTION_REQUIRED|ERROR")),
            wait: ((.status // .state // "") | test("IN_PROGRESS|QUEUED|PENDING|EXPECTED|WAITING"))}]) as $c
        | {number, title, state, draft: .isDraft, review: (.reviewDecision // ""), updated: .updatedAt,
           branch: .headRefName, head: .headRefOid, base: .baseRefName, mergeable,
-          body, cross: .isCrossRepository,
+          body, cross: .isCrossRepository, author: (.author.login // ""),
           ci: (if ($c|length) == 0 then "none" elif any($c[]; .wait) then "pending"
                elif any($c[]; .bad) then "fail" else "pass" end),
           ci_failed: [$c[] | select(.bad) | {name, url}]} | tojson'
+
+# jq fragment for "all"-mode author scoping (needs --arg pa $PR_AUTHOR_FILTER --arg me $(me)):
+# true when the object's .author is in the comma list — "@me" maps to your login;
+# a blank filter means any author, missing .author (or unresolvable @me) never matches.
+PR_AUTHOR_JQ='($pa | split(",") | map(gsub("^ +| +$"; "")) | map(if . == "@me" then $me else . end)
+              | map(select(length > 0))) as $A
+             | ($pa | gsub(" "; "") | length) == 0 or ((.author // "") as $a | any($A[]; . == $a))'
 
 refresh_prs() { # ttl -> refresh prs.jsonl unless younger than ttl seconds; 1 on GitHub failure
   local ttl="$1" tmp
@@ -288,7 +298,9 @@ pr_info() { # pr [field] -> the PR's cached object (or one field of it); PRS_EXT
 targets() { # -> PR numbers to watch (from prs.jsonl)
   local t; t="$(cat "$STATE_DIR/targets" 2>/dev/null || true)"
   if [ "$t" = "all" ] || [ -z "$t" ]; then
-    jq -r 'select(.state == "OPEN" and (.draft | not)) | .number' "$PRS_CACHE" 2>/dev/null | tr '\n' ' '
+    jq -r --arg pa "$PR_AUTHOR_FILTER" --arg me "$(me)" \
+      'select(.state == "OPEN" and (.draft | not) and ('"$PR_AUTHOR_JQ"')) | .number' \
+      "$PRS_CACHE" 2>/dev/null | tr '\n' ' '
   else
     echo "$t"
   fi
@@ -677,7 +689,9 @@ apply_unblock() { # pr -> ready a dep-gated draft + strip its banner; resumable 
 scan_sync_candidates() { # -> open same-repo PRs targeting the default base, within watch scope
   local t p b; t="$(cat "$STATE_DIR/targets" 2>/dev/null || true)"; b="$(default_base)"
   if [ "$t" = "all" ] || [ -z "$t" ]; then
-    jq -r --arg b "$b" 'select(.state=="OPEN" and .base==$b and (.cross // false | not)) | .number' "$PRS_CACHE" 2>/dev/null
+    jq -r --arg b "$b" --arg pa "$PR_AUTHOR_FILTER" --arg me "$(me)" \
+      'select(.state=="OPEN" and .base==$b and (.cross // false | not) and ('"$PR_AUTHOR_JQ"')) | .number' \
+      "$PRS_CACHE" 2>/dev/null
   else
     for p in $t; do
       [ "$(pr_info "$p" state)" = "OPEN" ] && [ "$(pr_info "$p" base)" = "$b" ] \
@@ -1548,7 +1562,9 @@ render_status() { # ttl [term-rows] -> status screen; with term-rows the PR tabl
     if [ -f "$STATE_DIR/last_cycle" ]; then poll="last poll $(fmt_rel "$(cat "$STATE_DIR/last_cycle")")"; else poll="never polled"; fi
   fi
   t="$(cat "$STATE_DIR/targets" 2>/dev/null || echo all)"
-  if [ "$t" = "all" ] || [ -z "$t" ]; then t="all open PRs"; else t="$(hash_list "$t")"; fi
+  if [ "$t" = "all" ] || [ -z "$t" ]; then
+    t="all open PRs"; [ -n "$PR_AUTHOR_FILTER" ] && t="open PRs by $PR_AUTHOR_FILTER"
+  else t="$(hash_list "$t")"; fi
   if [ -n "$AUTHOR_FILTER" ]; then reacts="$AUTHOR_FILTER"; else reacts="humans"; [ -n "$BOTS" ] && reacts+=" + $BOTS"; fi
   [ "$SANDBOX" = "1" ] && extras+=" · sandbox"
   [ "$CI_TRIGGER" = "1" ] && extras+=" · CI"
