@@ -137,6 +137,7 @@ Env vars always win over the per-repo config saved by `pr-agent on`
 | `PR_AGENT_RETRY_RE` | `^Review failed:` | jq regex on bot bodies marking a failed run |
 | `PR_AGENT_RETRY_MSG` | — | Ping comment template; `{reviewer}` → the bot's handle |
 | `PR_AGENT_SKIP_RE` | in-progress markers | Regex; matching feedback bodies are ignored |
+| `PR_AGENT_BOT_STATUS_RE` | `underway\|already running\|in progress\|queued` | jq regex; comments from `[bot]`/`BOTS` authors that are just status narration, not findings |
 | `PR_AGENT_SETUP` | — | Command run inside a new worktree instead of the built-in env-file + `node_modules`/bun setup |
 | `PR_AGENT_MAIN_SYNC` | `0` | Each poll also auto-syncs open PRs behind the default base |
 | `PR_AGENT_TABLE_ROWS` | `0` | Rows in the status table (`0` = fit the screen; can exceed it — the bottom of the frame gets clipped) |

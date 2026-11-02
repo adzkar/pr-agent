@@ -58,6 +58,9 @@
 #   PR_AGENT_SKIP_RE      Regex; feedback bodies matching it are ignored
 #                         (default: HTML "in-progress" markers, e.g. a review bot's
 #                          placeholder)
+#   PR_AGENT_BOT_STATUS_RE  jq regex marking a bot's "working on it" chatter —
+#                         applied only to [bot]/BOTS authors so human comments are
+#                         unaffected (default: underway|already running|in progress|queued)
 #   PR_AGENT_SETUP        Command run inside a newly created worktree instead of the
 #                         built-in setup (env files + node_modules/bun)
 #   PR_AGENT_MAIN_SYNC    1 = each poll also auto-syncs open PRs whose branch falls behind
@@ -147,6 +150,7 @@ CI_TRIGGER="${PR_AGENT_CI:-${CFG_CI_TRIGGER:-0}}"
 CONFLICT_TRIGGER="${PR_AGENT_CONFLICTS:-${CFG_CONFLICT_TRIGGER:-0}}"
 NOTIFY="${PR_AGENT_NOTIFY:-${CFG_NOTIFY:-1}}"
 SKIP_RE="${PR_AGENT_SKIP_RE:-${CFG_SKIP_RE:-in-progress -->}}"
+BOT_STATUS_RE="${PR_AGENT_BOT_STATUS_RE:-${CFG_BOT_STATUS_RE:-underway|already running|in progress|queued}}"
 SETUP_CMD="${PR_AGENT_SETUP:-${CFG_SETUP_CMD:-}}"
 MAIN_SYNC="${PR_AGENT_MAIN_SYNC:-${CFG_MAIN_SYNC:-0}}"               # 1 = poll also syncs PR branches that fall behind the base
 RETRY="${PR_AGENT_RETRY:-${CFG_RETRY:-1}}"                        # 1 = ping the review bot when its review run fails
@@ -162,7 +166,7 @@ TITLE_W="${PR_AGENT_TITLE_W:-${CFG_TITLE_W:-0}}"                              # 
 [[ "$TITLE_W" =~ ^[0-9]+$ ]] || TITLE_W=0
 FULL_CHECK_EVERY=10   # cycles; forces a full feedback fetch even if nothing looks changed
 
-SETTINGS="INTERVAL PERM_MODE SANDBOX AUTHOR_FILTER PR_AUTHOR_FILTER BOTS TRIGGER MAX_FAILS MAX_ROUNDS STOP_ON_APPROVE CONCURRENCY CI_TRIGGER CONFLICT_TRIGGER NOTIFY RETRY RETRY_MAX RETRY_RE RETRY_MSG SKIP_RE SETUP_CMD MAIN_SYNC TABLE_ROWS ACTIVITY_LINES TITLE_W"
+SETTINGS="INTERVAL PERM_MODE SANDBOX AUTHOR_FILTER PR_AUTHOR_FILTER BOTS TRIGGER MAX_FAILS MAX_ROUNDS STOP_ON_APPROVE CONCURRENCY CI_TRIGGER CONFLICT_TRIGGER NOTIFY RETRY RETRY_MAX RETRY_RE RETRY_MSG SKIP_RE BOT_STATUS_RE SETUP_CMD MAIN_SYNC TABLE_ROWS ACTIVITY_LINES TITLE_W"
 
 save_config() {
   local k; : >"$STATE_DIR/config"
@@ -353,7 +357,7 @@ seed_seen() { # pr all_file -> create seen/<pr> on first sight, honouring the le
 filter_feedback() { # pr all_file -> new, actionable items (jsonl, oldest first)
   local seen="$STATE_DIR/seen/$1"; [ -f "$seen" ] || seen=/dev/null
   jq -c -s --arg me "$(me)" --arg only "$AUTHOR_FILTER" --arg bots "$BOTS" --arg skip "$SKIP_RE" \
-      --arg retry_re "$RETRY_RE" --arg trig "$TRIGGER" --rawfile seen "$seen" '
+      --arg retry_re "$RETRY_RE" --arg status_re "$BOT_STATUS_RE" --arg trig "$TRIGGER" --rawfile seen "$seen" '
     ($seen | split("\n") | map(select(length > 0) | {(.): true}) | add // {}) as $S
     | ($only | split(",") | map(gsub("^ +| +$"; "")) | map(select(length > 0))) as $O
     | ($bots | split(",") | map(gsub("^ +| +$"; ""))) as $B
@@ -362,6 +366,8 @@ filter_feedback() { # pr all_file -> new, actionable items (jsonl, oldest first)
         and ($skip == "" or ((.body // "") | test($skip) | not))
         and ($retry_re == "" or ((.author as $a | $B | map(. == $a) | any)
                                  and ((.body // "") | test($retry_re))) | not)
+        and ($status_re == "" or ((.author as $a | ($a | endswith("[bot]")) or ($B | map(. == $a) | any)) | not)
+                                 or ((.body // "") | test($status_re; "i") | not))
         and (.synthetic == true
              or (.author == $me and $trig != "" and ((.body // "") | ltrimstr(" ") | startswith($trig)))
              or (.author != $me and (.author as $a |
