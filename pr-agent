@@ -1324,7 +1324,8 @@ ver_gt() { # a b -> 0 when a is a higher semver than b (bare X.Y.Z; BSD sort has
 }
 
 latest_release_tag() { # -> tag of the newest upstream release; empty when none published, non-zero on gh failure
-  gh release list --repo "$UPDATE_REPO" --limit 1 --json tagName -q '.[0].tagName' 2>/dev/null
+  gh release list --repo "$UPDATE_REPO" --limit 1 --json tagName -q '.[0].tagName' \
+    --exclude-drafts --exclude-pre-releases 2>/dev/null
 }
 
 cmd_update() { # [--check] [--force] [X.Y.Z] -> download a release and install it over this script
@@ -1346,6 +1347,7 @@ cmd_update() { # [--check] [--force] [X.Y.Z] -> download a release and install i
   else
     tag="$(latest_release_tag)" || die "can't reach releases for $UPDATE_REPO (gh auth ok?)"
     [ -n "$tag" ] || die "no releases published yet"
+    [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "unexpected release tag '$tag' — want vX.Y.Z"
   fi
   local latest="${tag#v}"
 
