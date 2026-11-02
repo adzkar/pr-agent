@@ -64,6 +64,10 @@ them as a smoke test unless that's the intent.
 
 ## Traps that have bitten before
 
+- **`watch_loop` re-`cd`s every cycle, on purpose.** The `cd "$(repo_dir)"`
+  at loop entry covers a deleted *launch* dir; repeating it at the top of
+  `while` covers `repo_dir` itself being deleted mid-run — forked jobs in
+  an unreachable cwd spam getcwd errors. Don't hoist the in-loop `cd`.
 - **`state_cell`/`review_cell` have side effects** — they populate the `H_*`
   hint buckets that drive the bottom "what now" line. If you skip drawing a
   table row you must still call them, or the hint lies.
@@ -82,6 +86,12 @@ them as a smoke test unless that's the intent.
   it so the status table keeps title/state, but `targets`/`pr_sig` must keep
   reading `prs.jsonl` alone — a stale OPEN entry would make a dead PR
   watchable forever, and a frozen `updated` would mask real changes.
+- **Feedback `.author` is nullable** — it's `.user.login` from the GitHub API,
+  which is `null` for deleted/ghost accounts. jq string builtins (`endswith`,
+  `startswith`, `test` on the value itself) abort the whole `filter_feedback`
+  run on null input, silently stalling the PR's feedback. Guard with
+  `($a // "")` before any string builtin on `.author` (see the `status_re`
+  clause in `filter_feedback`).
 - **`seen/<pr>` keys are content-derived** (`id:body-len` / `id:updated_at`) —
   an *edited* review or comment re-triggers. Don't switch to plain ids.
 - **`worktree_blocked` is a last-known flag, refreshed locally.** `run_agent`
@@ -102,4 +112,7 @@ them as a smoke test unless that's the intent.
 Conventional-commit prefixes (`feat:`, `fix:`, `docs:`, `chore:`), one logical
 change per commit. When the README's usage table or the usage header comment
 at the top of the script changes, keep both in sync — `pr-agent help` prints
-the header verbatim.
+the header verbatim. Same for other docs that mirror behavior: the README
+dashboard example must match real `status` output, and the ARCHITECTURE.md
+code map must place a command in the section that implements it —
+dispatch-inline commands belong in the `dispatch` row, not `manual commands`.

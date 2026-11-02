@@ -14,22 +14,22 @@ Sections are delimited by `# --- name ---` banners, in file order:
 
 | Section | Approx. lines | Contents |
 | --- | --- | --- |
-| header + bootstrap | 1–131 | Usage doc comment, `set -euo pipefail`, `STATE_ROOT` (`~/.local/state/pr-agent/repos/<owner>__<repo>`), repo-slug resolution, legacy-state migration |
-| settings | 132–183 | `CFG_*` saved config → `PR_AGENT_*` env → default precedence; `save_config`, `log`, `notify` (osascript) |
-| repo context | 184–206 | `repo`/`repo_dir`/`me` accessors, `detect_repo` (writes repo, repo_dir, me, base into state) |
-| map | 207–235 | `map.json` accessors (`map_get/set/del/rm/num`) behind `with_map_lock` (mkdir lock, ~10 s stale break) |
-| PR list | 236–308 | `refresh_prs` — one `gh pr list` call → `prs.jsonl` cache (number, title, state, draft, review, updated, branch, head, base, mergeable, ci, ci_failed, body, cross, author); `backfill_prs` — one `gh pr view` per tracked PR missing from both caches → `prs_extra.jsonl` (once each ever); `pr_info` (list first, extras fallback), `targets` ("all" mode scoped by `PR_AUTHOR_FILTER` via `PR_AUTHOR_JQ`) |
-| feedback collection | 309–381 | `fetch_feedback` (3 `gh api` endpoints + `synthetic_feedback`), `seed_seen`, `filter_feedback` (seen/author/bot/skip rules), `pending_feedback` |
-| failed review runs | 382–501 | `handle_review_failure` + helpers — pings the review bot (`RETRY_MSG`) on `Review failed:` notices, `RETRY_MAX` cap, `retry_cutoff` keeps pre-existing failures manual-only |
-| formatting | 502–514 | `format_feedback` — jsonl → markdown prompt sections |
-| worktree | 516–595 | `ensure_worktree` (`<repo>-pr-<N>` next to the main checkout), `worktree_holding`/`still_blocked` (local-only `git worktree list` probes), `setup_worktree` (copies `.env*`/`config.local.json`, reuses `node_modules` when manifests match else `bun install --frozen-lockfile`, husky prepare), `sync_worktree` |
-| main-sync | 596–845 | Post-merge catch-up: `sync_scan` → `check_sync` merges base into PR branch **via the PR's agent session**, then `verify_synced` + `apply_unblock` (dep-gated draft unbanner/ready, `sync_unblock` state machine); rc 4 defers like a busy session — no `sync_fails` |
-| agent | 846–947 | `build_prompt`, `devin_flags`, `session_ids`/`new_session_id` (diff `devin list` before/after), `run_agent` (resume `devin -r` else start new) |
-| per-PR check | 948–1022 | `check_pr` — the per-PR round; `skip_reason` |
-| watcher | 1023–1170 | `watch_loop`, `is_running`, `pr_sig`, launchd plist install |
-| manual commands | 1171–1347 | `run`, `tell`/`_tell`, `attach`, `retry`, `peek`, `mark-seen`, `gc`, `sync`, `config`, `logs` |
-| status rendering | 1348–1745 | `fmt_*`, `draw_*`, `status_prs`, `review_cell`/`state_cell` (side effects: `H_*` hint buckets), `recent_events`, `render_hint`, `render_status` (row-budgeted table), `cmd_status` (alt-screen watch loop + fallback clip) |
-| dispatch | 1746–end | `usage`, `case "$1"` router; `_loop` is the internal watcher entry |
+| header + bootstrap | 1–142 | Usage doc comment, `set -euo pipefail`, `STATE_ROOT` (`~/.local/state/pr-agent/repos/<owner>__<repo>`), repo-slug resolution, legacy-state migration |
+| settings | 143–195 | `CFG_*` saved config → `PR_AGENT_*` env → default precedence; `save_config`, `log`, `notify` (osascript) |
+| repo context | 196–218 | `repo`/`repo_dir`/`me` accessors, `detect_repo` (writes repo, repo_dir, me, base into state) |
+| map | 219–247 | `map.json` accessors (`map_get/set/del/rm/num`) behind `with_map_lock` (mkdir lock, ~10 s stale break) |
+| PR list | 248–320 | `refresh_prs` — one `gh pr list` call → `prs.jsonl` cache (number, title, state, draft, review, updated, branch, head, base, mergeable, ci, ci_failed, body, cross, author); `backfill_prs` — one `gh pr view` per tracked PR missing from both caches → `prs_extra.jsonl` (once each ever); `pr_info` (list first, extras fallback), `targets` ("all" mode scoped by `PR_AUTHOR_FILTER` via `PR_AUTHOR_JQ`) |
+| feedback collection | 321–396 | `fetch_feedback` (3 `gh api` endpoints + `synthetic_feedback`), `seed_seen`, `filter_feedback` (seen/author/bot/skip rules), `pending_feedback` |
+| failed review runs | 397–516 | `handle_review_failure` + helpers — pings the review bot (`RETRY_MSG`) on `Review failed:` notices, `RETRY_MAX` cap, `retry_cutoff` keeps pre-existing failures manual-only |
+| formatting | 517–529 | `format_feedback` — jsonl → markdown prompt sections |
+| worktree | 531–610 | `ensure_worktree` (`<repo>-pr-<N>` next to the main checkout), `worktree_holding`/`still_blocked` (local-only `git worktree list` probes), `setup_worktree` (copies `.env*`/`config.local.json`, reuses `node_modules` when manifests match else `bun install --frozen-lockfile`, husky prepare), `sync_worktree` |
+| main-sync | 611–860 | Post-merge catch-up: `sync_scan` → `check_sync` merges base into PR branch **via the PR's agent session**, then `verify_synced` + `apply_unblock` (dep-gated draft unbanner/ready, `sync_unblock` state machine); rc 4 defers like a busy session — no `sync_fails` |
+| agent | 861–962 | `build_prompt`, `devin_flags`, `session_ids`/`new_session_id` (diff `devin list` before/after), `run_agent` (resume `devin -r` else start new) |
+| per-PR check | 963–1037 | `check_pr` — the per-PR round; `skip_reason` |
+| watcher | 1038–1187 | `watch_loop` (cd `repo_dir` per cycle), `is_running`, `pr_sig`, launchd plist install |
+| manual commands | 1188–1364 | `run`, `tell`/`_tell`, `attach`, `retry`, `peek`, `mark-seen`, `gc`, `sync`, `config`, `logs` |
+| status rendering | 1365–1763 | `fmt_*`, `draw_*`, `status_prs`, `review_cell`/`state_cell` (side effects: `H_*` hint buckets), `recent_events`, `render_hint`, `render_status` (row-budgeted table), `cmd_status` (alt-screen watch loop + fallback clip) |
+| dispatch | 1764–end | `usage`, `case "$1"` router — inline cases: `add`/`rm`, `pause`/`resume`, `reset`, `reset-rounds`, `map`, `version`, `help`; `_loop`/`_check`/`_tell` are internal entries |
 
 ## On-disk state
 
@@ -135,7 +135,11 @@ summary comment asking for re-review.
 
 An item is actionable when: not in `seen/<pr>` AND not matching `SKIP_RE`
 (default: HTML "in-progress" markers) AND not a bot failure notice (handled by
-the retry path) AND one of:
+the retry path) AND not bot status narration — `[bot]`/`BOTS` comment items
+matching `BOT_STATUS_RE` are filtered (reviews and line comments always pass,
+so findings can't be status-filtered) so placeholder chatter can't spawn
+rounds — AND
+one of:
 
 - synthetic CI/conflict item (opt-in), or
 - authored by you and starting with `TRIGGER` (`/agent`), or
