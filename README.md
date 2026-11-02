@@ -63,7 +63,7 @@ shows where every PR stands.
 it live on the terminal's alt screen.
 
 ```
-pr-agent  ● watching (pid 10391)   owner/repo
+pr-agent v0.1.0  ● watching (pid 10391)   owner/repo
 watching all open PRs · every 2m · mode dangerous · conflicts · 2 parallel · max 10 rounds · reacts to humans + review-bot[bot] · next poll in 34s
 
 ┌───────┬────────────┬────────────────┬────────────────────────┬────────┬──────────┐
