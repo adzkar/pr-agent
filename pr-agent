@@ -766,6 +766,14 @@ check_sync() { # pr basesha base mode(watch|manual) -> merge the base into the P
     map_set "$pr" sync_runs $(( $(map_num "$pr" sync_runs) + 1 )); map_set "$pr" last_run_at "$(date +%s)"
     log "PR #$pr: synced with origin/$base ✓"; notify "PR #$pr" "Synced with $base"
     apply_unblock "$pr" || true
+  elif [ "$rc" -eq 4 ]; then
+    # deterministic local block, not a sync failure — don't burn sync_fails or
+    # escalate; sync_pending stays set so the merge retries once the branch frees
+    if [ -z "$(map_get "$pr" blocked_logged)" ]; then
+      map_set "$pr" blocked_logged 1
+      log "PR #$pr: sync deferred — worktree blocked (branch checked out in the main checkout)"
+      notify "PR #$pr" "Worktree blocked — switch the main checkout off this PR's branch"
+    fi
   elif [ "$rc" -eq 2 ] || [ "$rc" -eq 3 ]; then
     log "PR #$pr: sync deferred — session busy or stopped"   # sync_pending stays set; retried next poll
   else
