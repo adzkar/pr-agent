@@ -27,9 +27,10 @@ Sections are delimited by `# --- name ---` banners, in file order:
 | agent | 762–858 | `build_prompt`, `devin_flags`, `session_ids`/`new_session_id` (diff `devin list` before/after), `run_agent` (resume `devin -r` else start new) |
 | per-PR check | 860–927 | `check_pr` — the per-PR round; `skip_reason` |
 | watcher | 929–1018 | `watch_loop`, `is_running`, `pr_sig`, launchd plist install |
-| manual commands | 1071–1236 | `run`, `tell`/`_tell`, `attach`, `retry`, `peek`, `mark-seen`, `gc`, `sync`, `config`, `logs`, `version` |
-| status rendering | 1238–1593 | `fmt_*`, `draw_*`, `status_prs`, `review_cell`/`state_cell` (side effects: `H_*` hint buckets), `recent_events`, `render_hint`, `render_status` (row-budgeted table), `cmd_status` (alt-screen watch loop + fallback clip) |
-| dispatch | 1596–end | `usage`, `case "$1"` router; `_loop` is the internal watcher entry |
+| manual commands | 1136–1308 | `run`, `tell`/`_tell`, `attach`, `retry`, `peek`, `mark-seen`, `gc`, `sync`, `config`, `logs`, `version` |
+| self-update | 1310–1386 | `ver_gt`, `latest_release_tag`, `cmd_update` — downloads release assets from `UPDATE_REPO`, verifies sha256, atomic-installs over `$SELF` |
+| status rendering | 1388–1777 | `fmt_*`, `draw_*`, `status_prs`, `review_cell`/`state_cell` (side effects: `H_*` hint buckets), `recent_events`, `render_hint`, `render_status` (row-budgeted table), `cmd_status` (alt-screen watch loop + fallback clip) |
+| dispatch | 1780–end | `usage`, `case "$1"` router; `_loop` is the internal watcher entry |
 
 ## On-disk state
 
