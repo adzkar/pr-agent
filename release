@@ -88,6 +88,12 @@ if [ "$curn" = "$next" ]; then
 else
   git rev-parse -q --verify "refs/tags/v$next" >/dev/null 2>&1 && die "tag v$next already exists"
   gh release view "v$next" >/dev/null 2>&1 && die "release v$next already exists"
+  # an unreleased 'chore: release vX.Y.Z' at HEAD is the same open-release
+  # state as a missing tag — finish it before bumping past it
+  if [[ "$(git log -1 --format=%s)" =~ ^chore:\ release\ (v[0-9]+\.[0-9]+\.[0-9]+)$ ]] \
+    && ! gh release view "${BASH_REMATCH[1]}" >/dev/null 2>&1; then
+    die "${BASH_REMATCH[1]} is committed but unreleased — finish it first: ./release ${BASH_REMATCH[1]#v}"
+  fi
   # a tagged-but-unreleased v$cur means the previous release is still open —
   # finish it rather than leapfrogging it
   if git rev-parse -q --verify "refs/tags/v$cur" >/dev/null 2>&1 \
