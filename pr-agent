@@ -30,8 +30,9 @@
 #   pr-agent config                 Show effective settings
 #   pr-agent map                    Show the raw PR → session/worktree map
 #   pr-agent version                Print the installed version
-#   pr-agent update [--check] [X.Y.Z]  Self-update this script from a GitHub release
-#                                      (latest, or the given version)
+#   pr-agent update [--check] [--force] [X.Y.Z]  Self-update this script from a GitHub
+#                                                release (latest, or given; --force
+#                                                reinstalls / allows a repo copy)
 #
 # A PR comment by you that starts with "/agent" is treated as feedback.
 #
