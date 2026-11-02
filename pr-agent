@@ -366,13 +366,13 @@ filter_feedback() { # pr all_file -> new, actionable items (jsonl, oldest first)
         and ($skip == "" or ((.body // "") | test($skip) | not))
         and ($retry_re == "" or ((.author as $a | $B | map(. == $a) | any)
                                  and ((.body // "") | test($retry_re))) | not)
-        and ($status_re == "" or ((.author as $a | ($a | endswith("[bot]")) or ($B | map(. == $a) | any)) | not)
+        and ($status_re == "" or ((.author as $a | (($a // "") | endswith("[bot]")) or ($B | map(. == $a) | any)) | not)
                                  or ((.body // "") | test($status_re; "i") | not))
         and (.synthetic == true
              or (.author == $me and $trig != "" and ((.body // "") | ltrimstr(" ") | startswith($trig)))
              or (.author != $me and (.author as $a |
                    if ($O | length) > 0 then ($O | map(. == $a) | any)
-                   elif ($a | endswith("[bot]")) then ($B | map(. == $a) | any)
+                   elif (($a // "") | endswith("[bot]")) then ($B | map(. == $a) | any)
                    else true end)))))
     | sort_by(.ts) | .[]' "$2"
 }
