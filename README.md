@@ -50,6 +50,7 @@ shows where every PR stands.
 | `pr-agent pause \| resume N` | Stop/restart automatic runs for one PR |
 | `pr-agent retry N [--dry-run]` | Ping the review bot if its latest review run failed |
 | `pr-agent reset N` | Forget PR N's session — the next round starts a fresh session |
+| `pr-agent reset-rounds N` | Reset PR N's round counter — lifts the `PR_AGENT_MAX_ROUNDS` auto-run limit, keeps the session |
 | `pr-agent gc [--yes]` | Clean up worktrees/branches/state of merged & closed PRs |
 | `pr-agent sync [--apply [N]]` | Report open PRs whose branch is behind their base; `--apply` merges the base into them via their agent sessions. Optional N: only PRs whose "do not review" banner depends on merged PR N. |
 | `pr-agent config` | Show effective settings |

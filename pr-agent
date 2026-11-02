@@ -21,6 +21,7 @@
 #   pr-agent pause | resume N       Stop/restart automatic runs for one PR
 #   pr-agent retry N [--dry-run]    Ping the review bot if its latest review run failed
 #   pr-agent reset N                Forget PR N's session (next round starts fresh)
+#   pr-agent reset-rounds N         Reset PR N's round counter (lifts the MAX_ROUNDS limit)
 #   pr-agent gc [--yes]             Clean up worktrees/branches/state of merged & closed PRs
 #   pr-agent sync [--apply [N]]     Report open PRs whose branch is behind their base;
 #                                   --apply merges the base into them via their agent
@@ -1712,6 +1713,9 @@ case "${1:-}" in
              map_del "$1" sync_pending; map_del "$1" sync_blocked; map_del "$1" sync_blocked_key
              map_del "$1" sync_done_key; map_del "$1" sync_fail_key; map_set "$1" sync_fails 0; map_del "$1" sync_unblock
              echo "PR #$1: session forgotten — the next round starts a fresh agent session" ;;
+  reset-rounds) shift; need_pr "${1:-}"; need_repo
+             map_del "$1" rounds; map_del "$1" skip_logged
+             echo "PR #$1: round counter reset — auto-runs resume at the next cycle" ;;
   gc)        shift; cmd_gc "$@" ;;
   sync)      shift; cmd_sync "$@" ;;
   config)    cmd_config ;;
