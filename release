@@ -5,6 +5,10 @@
 #
 # Usage:
 #   ./release [patch|minor|major|X.Y.Z]    (default: patch)
+#
+# Safe to re-run: if an earlier run died mid-release, VERSION is already
+# bumped and the script resumes at tagging/publishing instead of starting
+# over.
 
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")"
@@ -20,7 +24,13 @@ branch="$(git branch --show-current)"
 [ "$branch" = "main" ] || die "must be on main (currently: $branch)"
 [ -z "$(git status --porcelain)" ] || die "working tree not clean — commit or stash first"
 git fetch origin --quiet
-[ "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)" ] || die "local main differs from origin/main — sync first"
+if [ "$(git rev-parse HEAD)" != "$(git rev-parse origin/main)" ]; then
+  # tolerate exactly one unpushed release commit — an interrupted run resumes
+  # at the publish step below
+  [ "$(git rev-parse 'HEAD^' 2>/dev/null)" = "$(git rev-parse origin/main)" ] \
+    && [[ "$(git log -1 --format=%s)" =~ ^chore:\ release\ v[0-9]+\.[0-9]+\.[0-9]+$ ]] \
+    || die "local main differs from origin/main — sync first"
+fi
 bash -n pr-agent || die "pr-agent has syntax errors"
 
 # --- version -----------------------------------------------------------------
@@ -51,22 +61,40 @@ if [ "$nmaj" -lt "$cmaj" ] ||
   { [ "$nmaj" -eq "$cmaj" ] && [ "$nmin" -eq "$cmin" ] && [ "$npat" -lt "$cpat" ]; }; then
   die "v$next would downgrade v$cur"
 fi
-[ "$next" != "$cur" ] || die "already at $cur"
-git rev-parse -q --verify "refs/tags/v$next" >/dev/null 2>&1 && die "tag v$next already exists"
-gh release view "v$next" >/dev/null 2>&1 && die "release v$next already exists"
 
 # --- bump, tag, publish ------------------------------------------------------
 
 tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
 
-sed -i '' -E "s/^VERSION=\"[0-9]+\.[0-9]+\.[0-9]+\"/VERSION=\"$next\"/" pr-agent
-git add pr-agent
-git commit -m "chore: release v$next" >/dev/null
-git tag "v$next"
+if [ "$cur" = "$next" ]; then
+  # VERSION is already bumped — an earlier run was interrupted; finish it
+  gh release view "v$next" >/dev/null 2>&1 && die "release v$next already exists"
+  [ "$(git log -1 --format=%s)" = "chore: release v$next" ] || die "already at $cur"
+  git rev-parse -q --verify "refs/tags/v$next" >/dev/null 2>&1 || git tag "v$next"
+  echo "resuming v$next — publishing release"
+else
+  git rev-parse -q --verify "refs/tags/v$next" >/dev/null 2>&1 && die "tag v$next already exists"
+  gh release view "v$next" >/dev/null 2>&1 && die "release v$next already exists"
+  # a tagged-but-unreleased v$cur means the previous release is still open —
+  # finish it rather than leapfrogging it
+  if git rev-parse -q --verify "refs/tags/v$cur" >/dev/null 2>&1 \
+    && ! gh release view "v$cur" >/dev/null 2>&1; then
+    die "v$cur is tagged but unreleased — finish it first: ./release $cur"
+  fi
+  sed -i '' -E "s/^VERSION=\"[0-9]+\.[0-9]+\.[0-9]+\"/VERSION=\"$next\"/" pr-agent
+  git add pr-agent
+  git commit -m "chore: release v$next" >/dev/null
+  git tag "v$next"
+fi
+
 git push origin main "v$next"
 
 shasum -a 256 pr-agent >"$tmp/pr-agent.sha256"
 gh release create "v$next" pr-agent "$tmp/pr-agent.sha256" \
   --title "v$next" --generate-notes >/dev/null
 
-echo "released v$next (was $cur) — $(gh release view "v$next" --json url -q .url)"
+if [ "$cur" = "$next" ]; then
+  echo "released v$next — $(gh release view "v$next" --json url -q .url)"
+else
+  echo "released v$next (was $cur) — $(gh release view "v$next" --json url -q .url)"
+fi
