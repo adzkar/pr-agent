@@ -38,6 +38,7 @@ bash -n pr-agent || die "pr-agent has syntax errors"
 cur="$(sed -nE 's/^VERSION="([0-9]+\.[0-9]+\.[0-9]+)".*/\1/p' pr-agent | head -1)"
 [ -n "$cur" ] || die 'no VERSION="x.y.z" line in pr-agent'
 
+[ $# -le 1 ] || die "too many arguments — want patch, minor, major, or X.Y.Z"
 arg="${1:-patch}"
 if [[ "$arg" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
   next="$arg"
