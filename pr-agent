@@ -543,6 +543,11 @@ setup_worktree() { # src wt -> copy gitignored env/config files and dependencies
   if [ -n "$husky" ] && command -v bun >/dev/null; then (cd "$wt/$husky" && bun run prepare) || true; fi
 }
 
+worktree_holding() { # rd branch -> worktree path where branch is checked out (empty if none)
+  git -C "$1" worktree list --porcelain \
+    | awk -v b="refs/heads/$2" '/^worktree /{w=substr($0, 10)} /^branch /{if ($2 == b) print w}'
+}
+
 ensure_worktree() { # pr branch -> prints worktree abs path (never the main checkout); rc 4 = branch checked out in the main checkout (deterministic block, not a transient failure)
   local pr="$1" branch="$2" rd rd_real wt existing; rd="$(repo_dir)"
   [ -n "$branch" ] || { echo "PR #$pr: unknown head branch" >&2; return 1; }
@@ -552,8 +557,7 @@ ensure_worktree() { # pr branch -> prints worktree abs path (never the main chec
   existing="$(map_get "$pr" worktree)"
   if [ -n "$existing" ] && [ -d "$existing" ] && [ "$existing" != "$rd" ] && [ "$existing" != "$rd_real" ]; then echo "$existing"; return 0; fi
 
-  wt="$(git -C "$rd" worktree list --porcelain \
-        | awk -v b="refs/heads/$branch" '/^worktree /{w=substr($0, 10)} /^branch /{if ($2 == b) print w}')"
+  wt="$(worktree_holding "$rd" "$branch")"
   if [ "$wt" = "$rd" ] || [ "$wt" = "$rd_real" ]; then
     echo "PR #$pr: branch $branch is checked out in the main checkout — refusing to run there; switch it to another branch" >&2
     return 4
@@ -573,6 +577,15 @@ ensure_worktree() { # pr branch -> prints worktree abs path (never the main chec
     setup_worktree "$rd" "$wt" >&2
   fi
   [ -d "$wt" ] && echo "$wt"
+}
+
+still_blocked() { # pr -> 0 while the worktree_blocked condition holds: PR branch checked out in the main checkout (local-only probe — no gh calls)
+  local rd rd_real wt branch
+  rd="$(repo_dir)"; branch="$(pr_info "$1" branch)"
+  [ -n "$rd" ] && [ -n "$branch" ] || return 1
+  rd_real="$(cd "$rd" 2>/dev/null && pwd -P || true)"; rd_real="${rd_real:-$rd}"
+  wt="$(worktree_holding "$rd" "$branch")"
+  [ "$wt" = "$rd" ] || [ "$wt" = "$rd_real" ]
 }
 
 sync_worktree() { # wt branch -> fast-forward to origin if the tree is clean (best effort)
@@ -1038,6 +1051,12 @@ watch_loop() {
         fi
         [ -n "$(map_get "$pr" skip_logged)" ] && map_del "$pr" skip_logged
         sig="$(pr_sig "$pr")"
+        if [ "$(map_get "$pr" worktree_blocked)" = "1" ]; then
+          # freeing the branch is a local act pr_sig can't see — re-probe each poll
+          # (still_blocked is local-only); once free, drop sig so this poll's check runs
+          if still_blocked "$pr"; then continue; fi
+          map_del "$pr" worktree_blocked; map_del "$pr" blocked_logged; map_del "$pr" sig
+        fi
         if [ -n "$sig" ] && [ "$sig" = "$(map_get "$pr" sig)" ] && [ "$(map_num "$pr" fail_count)" -eq 0 ] \
            && [ $(( cycle % FULL_CHECK_EVERY )) -ne 0 ]; then
           continue   # nothing changed on GitHub since the last check
@@ -1529,7 +1548,11 @@ render_hint() { # running -> one contextual "what now" line
   elif [ -n "$H_LIMIT" ]; then
     hint="${C_RED}⏸ $(hash_list "$H_LIMIT") hit the $MAX_ROUNDS-round limit — the review loop may not be converging.${C_RESET} Continue once: ${C_BOLD}pr-agent run $(first_of "$H_LIMIT")${C_RESET}, or ${C_BOLD}pr-agent attach $(first_of "$H_LIMIT")${C_RESET}"
   elif [ -n "$H_BLOCKED" ]; then
-    hint="${C_YELLOW}⚠ $(hash_list "$H_BLOCKED") blocked — the PR branch is checked out in the main checkout, so no worktree can be made.${C_RESET} Switch that branch; it proceeds $NEXT_POLL"
+    if [ "$1" -eq 0 ]; then
+      hint="${C_YELLOW}⚠ $(hash_list "$H_BLOCKED") blocked — the PR branch is checked out in the main checkout, so no worktree can be made.${C_RESET} Switch that branch, then run it by hand: ${C_BOLD}pr-agent run $(first_of "$H_BLOCKED")${C_RESET}"
+    else
+      hint="${C_YELLOW}⚠ $(hash_list "$H_BLOCKED") blocked — the PR branch is checked out in the main checkout, so no worktree can be made.${C_RESET} Switch that branch; it proceeds $NEXT_POLL"
+    fi
   elif [ -n "$H_DIED" ]; then
     hint="${C_RED}✗ agent run on $(hash_list "$H_DIED") was interrupted.${C_RESET} It retries on the next poll — see ${C_BOLD}pr-agent logs $(first_of "$H_DIED")${C_RESET}"
   elif [ -n "$H_FAILED" ]; then

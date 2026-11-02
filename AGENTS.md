@@ -84,6 +84,12 @@ them as a smoke test unless that's the intent.
   watchable forever, and a frozen `updated` would mask real changes.
 - **`seen/<pr>` keys are content-derived** (`id:body-len` / `id:updated_at`) —
   an *edited* review or comment re-triggers. Don't switch to plain ids.
+- **`worktree_blocked` is a last-known flag, refreshed locally.** `run_agent`
+  sets it on `ensure_worktree` rc 4 and clears it on *any* other prep outcome
+  (success or failure) so a stale flag can't mask real state. Freeing the
+  branch is a local act `pr_sig` can't see, so `watch_loop` re-probes blocked
+  PRs each poll via `still_blocked` (`git worktree list` — keep it gh-free)
+  and clears `sig` to force the round the poll the probe reports free.
 - **Feedback `key` ≠ seen marker ≠ skip state.** Marking a key seen only stops
   *that* item; the PR may still have pending items.
 - **The `… N more` table row and the fallback `… N more lines` clip are
