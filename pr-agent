@@ -570,6 +570,7 @@ worktree_holding() { # rd branch -> worktree path(s) where branch is checked out
 ensure_worktree() { # pr branch -> prints worktree abs path (never the main checkout); rc 4 = branch checked out in the main checkout (deterministic block, not a transient failure)
   local pr="$1" branch="$2" rd rd_real wt existing; rd="$(repo_dir)"
   [ -n "$branch" ] || { echo "PR #$pr: unknown head branch" >&2; return 1; }
+  [ -n "$rd" ] || { echo "PR #$pr: no repo_dir recorded" >&2; return 1; }   # grep -qxF on an empty $rd would false-positive the block check below
   # worktree paths come back canonicalized — compare against the real path too,
   # or a symlinked repo_dir slips through and the agent would run in the main checkout
   rd_real="$(cd "$rd" 2>/dev/null && pwd -P || true)"; rd_real="${rd_real:-$rd}"
