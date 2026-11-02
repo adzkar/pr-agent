@@ -45,18 +45,22 @@ if [[ "$arg" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
 elif [[ "$arg" =~ ^(patch|minor|major)$ ]]; then
   IFS=. read -r maj min pat <<<"$cur"
   case "$arg" in
-    patch) pat=$(( pat + 1 )) ;;
-    minor) min=$(( min + 1 )); pat=0 ;;
-    major) maj=$(( maj + 1 )); min=0; pat=0 ;;
+    patch) pat=$(( 10#$pat + 1 )) ;;
+    minor) min=$(( 10#$min + 1 )); pat=0 ;;
+    major) maj=$(( 10#$maj + 1 )); min=0; pat=0 ;;
   esac
   next="$maj.$min.$pat"
 else
   die "bad version '$arg' — want patch, minor, major, or X.Y.Z"
 fi
 
-# the target must not go backwards (patch/minor/major never do; X.Y.Z could)
+# the target must not go backwards (patch/minor/major never do; X.Y.Z could);
+# 10# keeps zero-padded components out of octal, and canonicalizes next/curn
 IFS=. read -r nmaj nmin npat <<<"$next"
 IFS=. read -r cmaj cmin cpat <<<"$cur"
+nmaj=$((10#$nmaj)); nmin=$((10#$nmin)); npat=$((10#$npat))
+cmaj=$((10#$cmaj)); cmin=$((10#$cmin)); cpat=$((10#$cpat))
+next="$nmaj.$nmin.$npat"; curn="$cmaj.$cmin.$cpat"
 if [ "$nmaj" -lt "$cmaj" ] ||
   { [ "$nmaj" -eq "$cmaj" ] && [ "$nmin" -lt "$cmin" ]; } ||
   { [ "$nmaj" -eq "$cmaj" ] && [ "$nmin" -eq "$cmin" ] && [ "$npat" -lt "$cpat" ]; }; then
