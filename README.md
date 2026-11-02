@@ -173,4 +173,6 @@ PR_AGENT_TABLE_ROWS=10 pr-agent on
 
 The whole tool is one bash script — see [AGENTS.md](AGENTS.md) for
 edit/verify/install rules and [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for
-the code map and execution flows.
+the code map and execution flows. Maintainers cut releases with
+`./release [patch|minor|major|X.Y.Z]`, which bumps `VERSION`, tags `vX.Y.Z`,
+and publishes a GitHub release with the script + checksum assets.

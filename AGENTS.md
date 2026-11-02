@@ -26,6 +26,11 @@ install -m 755 pr-agent /usr/local/bin/pr-agent
 `/usr/local/bin/pr-agent` is a copy, not a symlink — **never edit it in place**,
 or changes diverge silently. If it already drifted, diff before overwriting.
 
+Releases are cut with `./release [patch|minor|major|X.Y.Z]` from a clean
+`main`: it bumps the `VERSION=` line, commits, tags `vX.Y.Z`, pushes, and
+publishes a GitHub release with `pr-agent` + `pr-agent.sha256` assets — the
+artifacts `pr-agent update` downloads.
+
 ## Verify before committing
 
 There is no test suite. Minimum checks:

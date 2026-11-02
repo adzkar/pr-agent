@@ -1,0 +1,63 @@
+#!/usr/bin/env bash
+# release — cut a pr-agent release: bump VERSION, commit, tag, and publish a
+# GitHub release carrying `pr-agent` + `pr-agent.sha256` (what `pr-agent
+# update` downloads).
+#
+# Usage:
+#   ./release [patch|minor|major|X.Y.Z]    (default: patch)
+
+set -euo pipefail
+cd "$(dirname "${BASH_SOURCE[0]}")"
+
+die() { echo "release: $*" >&2; exit 1; }
+
+# --- guards ------------------------------------------------------------------
+
+[ -f pr-agent ] || die "pr-agent not found — run from the repo root"
+command -v gh >/dev/null || die "gh not installed"
+gh auth status >/dev/null 2>&1 || die "gh not authenticated"
+branch="$(git branch --show-current)"
+[ "$branch" = "main" ] || die "must be on main (currently: $branch)"
+[ -z "$(git status --porcelain)" ] || die "working tree not clean — commit or stash first"
+git fetch origin --quiet
+[ "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)" ] || die "local main differs from origin/main — sync first"
+bash -n pr-agent || die "pr-agent has syntax errors"
+
+# --- version -----------------------------------------------------------------
+
+cur="$(sed -nE 's/^VERSION="([0-9]+\.[0-9]+\.[0-9]+)".*/\1/p' pr-agent | head -1)"
+[ -n "$cur" ] || die 'no VERSION="x.y.z" line in pr-agent'
+
+arg="${1:-patch}"
+if [[ "$arg" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+  next="$arg"
+elif [[ "$arg" =~ ^(patch|minor|major)$ ]]; then
+  IFS=. read -r maj min pat <<<"$cur"
+  case "$arg" in
+    patch) pat=$(( pat + 1 )) ;;
+    minor) min=$(( min + 1 )); pat=0 ;;
+    major) maj=$(( maj + 1 )); min=0; pat=0 ;;
+  esac
+  next="$maj.$min.$pat"
+else
+  die "bad version '$arg' — want patch, minor, major, or X.Y.Z"
+fi
+[ "$next" != "$cur" ] || die "already at $cur"
+git rev-parse -q --verify "refs/tags/v$next" >/dev/null 2>&1 && die "tag v$next already exists"
+gh release view "v$next" >/dev/null 2>&1 && die "release v$next already exists"
+
+# --- bump, tag, publish ------------------------------------------------------
+
+tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
+
+sed -i '' -E "s/^VERSION=\"[0-9]+\.[0-9]+\.[0-9]+\"/VERSION=\"$next\"/" pr-agent
+git add pr-agent
+git commit -m "chore: release v$next" >/dev/null
+git tag "v$next"
+git push origin main "v$next"
+
+shasum -a 256 pr-agent >"$tmp/pr-agent.sha256"
+gh release create "v$next" pr-agent "$tmp/pr-agent.sha256" \
+  --title "v$next" --generate-notes >/dev/null
+
+echo "released v$next (was $cur) — $(gh release view "v$next" --json url -q .url)"
