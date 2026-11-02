@@ -16,6 +16,13 @@ cd "$(dirname "${BASH_SOURCE[0]}")"
 
 die() { echo "release: $*" >&2; exit 1; }
 
+# assets_complete TAG -> 0 iff TAG's GitHub release exists with both assets
+assets_complete() {
+  local a
+  a="$(gh release view "$1" --json assets -q '.assets[].name' 2>/dev/null || true)"
+  printf '%s\n' "$a" | grep -qx 'pr-agent' && printf '%s\n' "$a" | grep -qx 'pr-agent.sha256'
+}
+
 # --- guards ------------------------------------------------------------------
 
 [ -f pr-agent ] || die "pr-agent not found — run from the repo root"
@@ -74,12 +81,7 @@ tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
 
 # a release with both assets is done; one missing assets was interrupted
 # mid-upload — the idempotent tail below repairs it
-if gh release view "v$next" >/dev/null 2>&1; then
-  assets="$(gh release view "v$next" --json assets -q '.assets[].name' 2>/dev/null || true)"
-  printf '%s\n' "$assets" | grep -qx 'pr-agent' \
-    && printf '%s\n' "$assets" | grep -qx 'pr-agent.sha256' \
-    && die "release v$next already exists"
-fi
+assets_complete "v$next" && die "release v$next already exists"
 
 if [ "$curn" = "$next" ]; then
   # VERSION is already the target — an interrupted run's release commit at
@@ -96,17 +98,17 @@ if [ "$curn" = "$next" ]; then
   echo "releasing v$next"
 else
   git rev-parse -q --verify "refs/tags/v$next" >/dev/null 2>&1 && die "tag v$next already exists"
-  # an unreleased 'chore: release vX.Y.Z' at HEAD is the same open-release
+  # an unfinished 'chore: release vX.Y.Z' at HEAD is the same open-release
   # state as a missing tag — finish it before bumping past it
   if [[ "$(git log -1 --format=%s)" =~ ^chore:\ release\ (v[0-9]+\.[0-9]+\.[0-9]+)$ ]] \
-    && ! gh release view "${BASH_REMATCH[1]}" >/dev/null 2>&1; then
-    die "${BASH_REMATCH[1]} is committed but unreleased — finish it first: ./release ${BASH_REMATCH[1]#v}"
+    && ! assets_complete "${BASH_REMATCH[1]}"; then
+    die "${BASH_REMATCH[1]} is committed but its release is unfinished — finish it first: ./release ${BASH_REMATCH[1]#v}"
   fi
-  # a tagged-but-unreleased v$cur means the previous release is still open —
-  # finish it rather than leapfrogging it
+  # a v$cur whose release is unfinished (missing or partial) means the
+  # previous release is still open — finish it rather than leapfrogging it
   if git rev-parse -q --verify "refs/tags/v$cur" >/dev/null 2>&1 \
-    && ! gh release view "v$cur" >/dev/null 2>&1; then
-    die "v$cur is tagged but unreleased — finish it first: ./release $cur"
+    && ! assets_complete "v$cur"; then
+    die "v$cur is tagged but its release is unfinished — finish it first: ./release $cur"
   fi
   sed -i '' -E "s/^VERSION=\"[0-9]+\.[0-9]+\.[0-9]+\"/VERSION=\"$next\"/" pr-agent
   git add pr-agent
