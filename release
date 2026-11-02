@@ -71,12 +71,20 @@ fi
 
 tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
 
-if [ "$cur" = "$next" ]; then
-  # VERSION is already bumped — an earlier run was interrupted; finish it
+if [ "$curn" = "$next" ]; then
+  # VERSION is already the target — an interrupted run's release commit at
+  # HEAD, or the checked-in version was never minted: tag HEAD and publish
   gh release view "v$next" >/dev/null 2>&1 && die "release v$next already exists"
-  [ "$(git log -1 --format=%s)" = "chore: release v$next" ] || die "already at $cur"
-  git rev-parse -q --verify "refs/tags/v$next" >/dev/null 2>&1 || git tag "v$next"
-  echo "resuming v$next — publishing release"
+  if git rev-parse -q --verify "refs/tags/v$next" >/dev/null 2>&1; then
+    # a tag left on a pre-rebase commit would publish outside main's history
+    if [ "$(git rev-parse "v$next^{commit}")" != "$(git rev-parse HEAD)" ]; then
+      git tag -f "v$next" >/dev/null
+      echo "re-anchored stale tag v$next at HEAD"
+    fi
+  else
+    git tag "v$next"
+  fi
+  echo "releasing v$next"
 else
   git rev-parse -q --verify "refs/tags/v$next" >/dev/null 2>&1 && die "tag v$next already exists"
   gh release view "v$next" >/dev/null 2>&1 && die "release v$next already exists"
@@ -92,13 +100,15 @@ else
   git tag "v$next"
 fi
 
-git push origin main "v$next"
+# '+tag' is a no-op when the remote tag already points at HEAD, and fixes a
+# re-anchored stale tag on the remote
+git push origin main "+refs/tags/v$next:refs/tags/v$next"
 
 shasum -a 256 pr-agent >"$tmp/pr-agent.sha256"
 gh release create "v$next" pr-agent "$tmp/pr-agent.sha256" \
   --title "v$next" --generate-notes >/dev/null
 
-if [ "$cur" = "$next" ]; then
+if [ "$curn" = "$next" ]; then
   echo "released v$next — $(gh release view "v$next" --json url -q .url)"
 else
   echo "released v$next (was $cur) — $(gh release view "v$next" --json url -q .url)"
