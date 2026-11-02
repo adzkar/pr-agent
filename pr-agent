@@ -74,7 +74,8 @@
 #                         (default 6, 0 = hide — frees rows for the table)
 #   PR_AGENT_TITLE_W      Title column width in the status table (default 0 =
 #                         auto-fit the terminal, up to 100 chars)
-#   PR_AGENT_UPDATE_CHECK 1 = check for newer releases in the background (default 1)
+#   PR_AGENT_UPDATE_CHECK 1 = check for newer releases in the background; the notice
+#                             lands on a later run (default 1, 0 = fully off)
 #   PR_AGENT_UPDATE_CHECK_EVERY  Seconds between release checks (default 86400)
 #   PR_AGENT_REPO         owner/name to act on when not inside the repo
 #   PR_AGENT_STATE_DIR    State root (default ~/.local/state/pr-agent)
@@ -1408,7 +1409,8 @@ maybe_update_check() { # -> spawn a background release check at most every UPDAT
       && mv "$STATE_ROOT/.latest_release.$$" "$STATE_ROOT/latest_release" ) >/dev/null 2>&1 &
 }
 
-pending_update_version() { # -> release version newer than VERSION from the last check, or nothing
+pending_update_version() { # -> release version newer than VERSION from the last check, or nothing; empty when checks are disabled
+  [ "$UPDATE_CHECK" = "1" ] || return 1
   local v; v="$(cat "$STATE_ROOT/latest_release" 2>/dev/null)"; v="${v#v}"
   { [ -n "$v" ] && [ "$v" != "$VERSION" ] && ver_gt "$v" "$VERSION"; } || return 1
   echo "$v"
