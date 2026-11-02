@@ -63,7 +63,7 @@ it live on the terminal's alt screen.
 
 ```
 pr-agent  ● watching (pid 10391)   owner/repo
-watching all open PRs · every 2m · mode dangerous · conflicts · 2 parallel · max 10 rounds · reacts to humans + review-bot[bot] · next poll in 34s
+watching open PRs by @me · every 2m · mode dangerous · conflicts · 2 parallel · max 10 rounds · reacts to humans + review-bot[bot] · next poll in 34s
 
 ┌───────┬────────────┬────────────────┬────────────────────────┬────────┬──────────┐
 │ PR    │ TITLE      │ REVIEW         │ AGENT STATE            │ ROUNDS │ LAST RUN │
