@@ -993,10 +993,14 @@ skip_reason() { # pr -> why the watcher won't auto-run this PR (empty = eligible
 
 # --- watcher ---------------------------------------------------------------------------
 
+pid_is_watcher() { # pid -> 0 when pid is a live `pr-agent _loop` process
+  kill -0 "$1" 2>/dev/null && ps -p "$1" -o command= 2>/dev/null | grep -q "_loop"
+}
+
 is_running() {
   [ -f "$PID_FILE" ] || return 1
   local pid; pid="$(cat "$PID_FILE")"
-  kill -0 "$pid" 2>/dev/null && ps -p "$pid" -o command= 2>/dev/null | grep -q "_loop"
+  pid_is_watcher "$pid"
 }
 
 pr_sig() { # pr -> change signature (updatedAt + head + CI + mergeability)
@@ -1364,29 +1368,36 @@ cmd_update() { # [--check] [--force] [X.Y.Z] -> download a release and install i
   fi
 
   local dir; dir="$(dirname "$SELF")"
+  if [ "$force" = "0" ] && git -C "$dir" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    die "$SELF is inside a git worktree — refusing to overwrite it (--force to override)"
+  fi
   [ -w "$dir" ] || die "$dir not writable — retry with: sudo pr-agent update $tag"
 
-  local tmp; tmp="$(mktemp -d)"
-  gh release download "$tag" --repo "$UPDATE_REPO" --dir "$tmp" --clobber \
+  UPDATE_TMP="$(mktemp -d)"; UPDATE_STAGED="$dir/.pr-agent.new.$$"   # globals: EXIT traps can't see locals under set -u
+  trap 'rm -rf "$UPDATE_TMP"; rm -f "$UPDATE_STAGED"' EXIT
+  gh release download "$tag" --repo "$UPDATE_REPO" --dir "$UPDATE_TMP" --clobber \
       -p pr-agent -p pr-agent.sha256 >/dev/null 2>&1 \
-    || { rm -rf "$tmp"; die "couldn't download $tag assets"; }
-  (cd "$tmp" && shasum -a 256 -c pr-agent.sha256 >/dev/null 2>&1) \
-    || { rm -rf "$tmp"; die "$tag checksum verification failed — not installing"; }
+    || die "couldn't download $tag assets"
+  (cd "$UPDATE_TMP" && shasum -a 256 -c pr-agent.sha256 >/dev/null 2>&1) \
+    || die "$tag checksum verification failed — not installing"
 
-  local staged="$dir/.pr-agent.new.$$"
-  if ! install -m 755 "$tmp/pr-agent" "$staged" 2>/dev/null; then
-    rm -rf "$tmp" "$staged"; die "couldn't stage the new script in $dir"
-  fi
-  if ! mv "$staged" "$SELF" 2>/dev/null; then
-    rm -rf "$tmp" "$staged"; die "couldn't install over $SELF"
-  fi
-  rm -rf "$tmp"
+  install -m 755 "$UPDATE_TMP/pr-agent" "$UPDATE_STAGED" 2>/dev/null \
+    || die "couldn't stage the new script in $dir"
+  mv -f "$UPDATE_STAGED" "$SELF" 2>/dev/null || die "couldn't install over $SELF"
+  rm -rf "$UPDATE_TMP"; trap - EXIT
 
   if ver_gt "$latest" "$VERSION"; then echo "updated $VERSION → $latest at $SELF"
   else echo "installed $tag at $SELF (was $VERSION)"; fi
-  if is_running; then
-    echo "note: the watcher still runs $VERSION — restart it: pr-agent off && pr-agent on"
-  fi
+  local pf pid
+  for pf in "$STATE_ROOT"/repos/*/pid; do
+    [ -f "$pf" ] || continue
+    pid="$(cat "$pf" 2>/dev/null || true)"
+    if [ -n "$pid" ] && pid_is_watcher "$pid"; then
+      echo "note: a watcher still runs $VERSION — restart it: pr-agent off && pr-agent on"
+      break
+    fi
+  done
+  return 0
 }
 
 # --- status rendering -----------------------------------------------------------------
