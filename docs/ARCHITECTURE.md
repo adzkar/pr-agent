@@ -126,7 +126,11 @@ summary comment asking for re-review.
 
 An item is actionable when: not in `seen/<pr>` AND not matching `SKIP_RE`
 (default: HTML "in-progress" markers) AND not a bot failure notice (handled by
-the retry path) AND one of:
+the retry path) AND not bot status narration — `[bot]`/`BOTS` comment items
+matching `BOT_STATUS_RE` are filtered (reviews and line comments always pass,
+so findings can't be status-filtered) so placeholder chatter can't spawn
+rounds — AND
+one of:
 
 - synthetic CI/conflict item (opt-in), or
 - authored by you and starting with `TRIGGER` (`/agent`), or
