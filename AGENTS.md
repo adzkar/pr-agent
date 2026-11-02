@@ -96,6 +96,13 @@ the intent.
   different mechanisms** — the first caps rows inside the table, the second is
   the last-resort bottom clip for wrapped lines and `TABLE_ROWS` overflow.
   Keep both.
+- **A feature toggle must gate the read side, not just the writer.**
+  `UPDATE_CHECK` originally only stopped `maybe_update_check` from refreshing
+  `latest_release`, so a recorded pending update kept nagging forever. Gate
+  the reader (`pending_update_version`) instead — every current and future
+  consumer is covered in one place. Mind per-repo config vs global state: a
+  `SETTINGS`-persisted toggle still reads global `$STATE_ROOT` files, so the
+  disable only applies in the repo it's set in.
 
 ## Commit style
 
