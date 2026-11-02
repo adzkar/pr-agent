@@ -37,12 +37,14 @@ mints the checked-in `VERSION` if it was never released.
 
 ## Verify before committing
 
-There is no test suite. Minimum checks:
+`tests/release.sh` is the only test suite — a scratch-repo + stubbed-`gh`
+harness covering the `release` state machine end-to-end. Minimum checks:
 
 ```sh
 bash -n pr-agent                       # syntax
 bash -n release                        # syntax
 shellcheck pr-agent release 2>/dev/null || true # lint if available
+./tests/release.sh                     # release scenarios (run when `release` changes)
 cd /path/to/a/watched/repo             # then run READ-ONLY commands only:
 pr-agent status                        #   dashboard (renders table + activity)
 pr-agent status -w 1 & sleep 4; kill %1  #   watch-mode frame
