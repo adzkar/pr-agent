@@ -1072,6 +1072,13 @@ watch_loop() {
     if refresh_prs 0; then
       [ "$gh_down" -eq 1 ] && log "GitHub reachable again"; gh_down=0
       for pr in $(targets); do
+        if [ "$(map_get "$pr" worktree_blocked)" = "1" ]; then
+          # freeing the branch is a local act pr_sig can't see — re-probe every poll
+          # (still_blocked is local-only), skipped PRs included so the flag can't go
+          # stale under a pause/limit; once free, drop sig so this poll's check runs
+          if still_blocked "$pr"; then continue; fi
+          map_del "$pr" worktree_blocked; map_del "$pr" blocked_logged; map_del "$pr" sig
+        fi
         reason="$(skip_reason "$pr")"
         if [ -n "$reason" ]; then
           if [ "$(map_get "$pr" skip_logged)" != "$reason" ]; then
@@ -1087,12 +1094,6 @@ watch_loop() {
         fi
         [ -n "$(map_get "$pr" skip_logged)" ] && map_del "$pr" skip_logged
         sig="$(pr_sig "$pr")"
-        if [ "$(map_get "$pr" worktree_blocked)" = "1" ]; then
-          # freeing the branch is a local act pr_sig can't see — re-probe each poll
-          # (still_blocked is local-only); once free, drop sig so this poll's check runs
-          if still_blocked "$pr"; then continue; fi
-          map_del "$pr" worktree_blocked; map_del "$pr" blocked_logged; map_del "$pr" sig
-        fi
         if [ -n "$sig" ] && [ "$sig" = "$(map_get "$pr" sig)" ] && [ "$(map_num "$pr" fail_count)" -eq 0 ] \
            && [ $(( cycle % FULL_CHECK_EVERY )) -ne 0 ]; then
           continue   # nothing changed on GitHub since the last check
