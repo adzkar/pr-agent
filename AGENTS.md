@@ -30,9 +30,9 @@ or changes diverge silently. If it already drifted, diff before overwriting.
 Releases are cut with `./release [patch|minor|major|X.Y.Z]` from a clean
 `main`: it bumps the `VERSION=` line, commits, tags `vX.Y.Z`, pushes, and
 publishes a GitHub release with `pr-agent` + `pr-agent.sha256` assets — the
-artifacts `pr-agent update` downloads. Re-running `./release vX.Y.Z` after
-an interrupted run resumes at publishing instead of dying on the existing
-tag.
+artifacts `pr-agent update` downloads. Interrupted runs resume — the tag
+is (re)anchored at `HEAD` and assets (re)uploaded — and `./release X.Y.Z`
+mints the checked-in `VERSION` if it was never released.
 
 ## Verify before committing
 
@@ -40,7 +40,8 @@ There is no test suite. Minimum checks:
 
 ```sh
 bash -n pr-agent                       # syntax
-shellcheck pr-agent 2>/dev/null || true # lint if available
+bash -n release                        # syntax
+shellcheck pr-agent release 2>/dev/null || true # lint if available
 cd /path/to/a/watched/repo             # then run READ-ONLY commands only:
 pr-agent status                        #   dashboard (renders table + activity)
 pr-agent status -w 1 & sleep 4; kill %1  #   watch-mode frame
