@@ -61,11 +61,12 @@
 #   PR_AGENT_BOT_STATUS_RE  jq regex marking a bot's "working on it" chatter —
 #                         applied only to top-level comments from [bot]/BOTS authors
 #                         (reviews and line comments always pass, so bot findings
-#                         can't be filtered). Case-insensitive and unanchored: a
-#                         findings *comment* mentioning these phrases mid-sentence
-#                         is still filtered — tighten via env, or have bots mark
+#                         can't be filtered). Case-insensitive and unanchored; the
+#                         default omits "in progress" — too common in findings
+#                         prose — but a comment using a shipped phrase mid-sentence
+#                         is still filtered. Tighten via env, or have bots mark
 #                         chatter with the SKIP_RE HTML marker
-#                         (default: \b(underway|already running|in progress|queued)\b)
+#                         (default: \b(underway|already running|queued)\b)
 #   PR_AGENT_SETUP        Command run inside a newly created worktree instead of the
 #                         built-in setup (env files + node_modules/bun)
 #   PR_AGENT_MAIN_SYNC    1 = each poll also auto-syncs open PRs whose branch falls behind
@@ -155,7 +156,7 @@ CI_TRIGGER="${PR_AGENT_CI:-${CFG_CI_TRIGGER:-0}}"
 CONFLICT_TRIGGER="${PR_AGENT_CONFLICTS:-${CFG_CONFLICT_TRIGGER:-0}}"
 NOTIFY="${PR_AGENT_NOTIFY:-${CFG_NOTIFY:-1}}"
 SKIP_RE="${PR_AGENT_SKIP_RE:-${CFG_SKIP_RE:-in-progress -->}}"
-BOT_STATUS_RE="${PR_AGENT_BOT_STATUS_RE:-${CFG_BOT_STATUS_RE:-\b(underway|already running|in progress|queued)\b}}"
+BOT_STATUS_RE="${PR_AGENT_BOT_STATUS_RE:-${CFG_BOT_STATUS_RE:-\b(underway|already running|queued)\b}}"
 SETUP_CMD="${PR_AGENT_SETUP:-${CFG_SETUP_CMD:-}}"
 MAIN_SYNC="${PR_AGENT_MAIN_SYNC:-${CFG_MAIN_SYNC:-0}}"               # 1 = poll also syncs PR branches that fall behind the base
 RETRY="${PR_AGENT_RETRY:-${CFG_RETRY:-1}}"                        # 1 = ping the review bot when its review run fails
