@@ -1206,7 +1206,8 @@ _tell() { # N prompt_file (internal, background)
   log "PR #$pr: owner instruction sent to agent"
   run_agent "$pr" "$2" || rc=$?
   if [ "$rc" -eq 0 ]; then log "PR #$pr: instruction handled ✓"; notify "PR #$pr" "Your instruction was handled"
-  elif [ "$rc" -eq 1 ]; then log "PR #$pr: instruction run failed (see pr-agent logs $pr)"; fi
+  elif [ "$rc" -eq 1 ]; then log "PR #$pr: instruction run failed (see pr-agent logs $pr)"
+  elif [ "$rc" -eq 4 ]; then log "PR #$pr: instruction not delivered — worktree blocked (branch checked out in the main checkout)"; fi
   map_set "$pr" last_run_at "$(date +%s)"
   rm -f "$STATE_DIR/running/$pr"; rmdir "$lock" 2>/dev/null || true
 }
