@@ -59,11 +59,12 @@
 #                         (default: HTML "in-progress" markers, e.g. a review bot's
 #                          placeholder)
 #   PR_AGENT_BOT_STATUS_RE  jq regex marking a bot's "working on it" chatter —
-#                         applied only to [bot]/BOTS authors so human comments are
-#                         unaffected. Case-insensitive and unanchored: a bot's real
-#                         findings that mention these phrases mid-sentence are
-#                         filtered too — tighten via env if your bots word status
-#                         prose into findings
+#                         applied only to top-level comments from [bot]/BOTS authors
+#                         (reviews and line comments always pass, so bot findings
+#                         can't be filtered). Case-insensitive and unanchored: a
+#                         findings *comment* mentioning these phrases mid-sentence
+#                         is still filtered — tighten via env, or have bots mark
+#                         chatter with the SKIP_RE HTML marker
 #                         (default: \b(underway|already running|in progress|queued)\b)
 #   PR_AGENT_SETUP        Command run inside a newly created worktree instead of the
 #                         built-in setup (env files + node_modules/bun)
@@ -370,7 +371,8 @@ filter_feedback() { # pr all_file -> new, actionable items (jsonl, oldest first)
         and ($skip == "" or ((.body // "") | test($skip) | not))
         and ($retry_re == "" or ((.author as $a | $B | map(. == $a) | any)
                                  and ((.body // "") | test($retry_re))) | not)
-        and ($status_re == "" or ((.author as $a | (($a // "") | endswith("[bot]")) or ($B | map(. == $a) | any)) | not)
+        and ($status_re == "" or (.kind != "comment")
+                                 or ((.author as $a | (($a // "") | endswith("[bot]")) or ($B | map(. == $a) | any)) | not)
                                  or ((.body // "") | test($status_re; "i") | not))
         and (.synthetic == true
              or (.author == $me and $trig != "" and ((.body // "") | ltrimstr(" ") | startswith($trig)))
