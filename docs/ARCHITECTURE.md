@@ -104,6 +104,9 @@ build_prompt → run_agent
   rc 1 → fail_count++; at MAX_FAILS: keys → seen (stop retrying), gave_up=1,
          escalates with a PR comment + notification
   rc 2/3 → session busy / stopped by user: feedback stays pending
+  rc 4 → worktree blocked (PR branch checked out in the main checkout):
+         not an agent failure — no fail_count/escalation; status shows
+         "worktree blocked" and notifies once until freed
 ```
 
 ### Agent run (`run_agent`)
