@@ -46,8 +46,9 @@ pr-agent peek N / pr-agent logs N      #   per-PR inspection
 ```
 
 Commands with side effects — `on`, `off`, `run`, `tell`, `retry`, `sync --apply`,
-`gc` — spawn agent sessions, post PR comments, or delete worktrees. Don't run
-them as a smoke test unless that's the intent.
+`gc`, `update` — spawn agent sessions, post PR comments, delete worktrees, or
+overwrite the installed script. Don't run them as a smoke test unless that's
+the intent.
 
 ## Conventions (match what's there)
 

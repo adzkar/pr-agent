@@ -28,9 +28,9 @@ Sections are delimited by `# --- name ---` banners, in file order:
 | per-PR check | 860–927 | `check_pr` — the per-PR round; `skip_reason` |
 | watcher | 929–1018 | `watch_loop`, `is_running`, `pr_sig`, launchd plist install |
 | manual commands | 1136–1308 | `run`, `tell`/`_tell`, `attach`, `retry`, `peek`, `mark-seen`, `gc`, `sync`, `config`, `logs`, `version` |
-| self-update | 1310–1386 | `ver_gt`, `latest_release_tag`, `cmd_update` — downloads release assets from `UPDATE_REPO`, verifies sha256, atomic-installs over `$SELF` |
+| self-update | 1310–1413 | `ver_gt`, `latest_release_tag`, `cmd_update` — downloads release assets from `UPDATE_REPO`, verifies sha256, atomic-installs over `$SELF`; `maybe_update_check`/`pending_update_version` — throttled background release check (OMZ-style) |
 | status rendering | 1388–1777 | `fmt_*`, `draw_*`, `status_prs`, `review_cell`/`state_cell` (side effects: `H_*` hint buckets), `recent_events`, `render_hint`, `render_status` (row-budgeted table), `cmd_status` (alt-screen watch loop + fallback clip) |
-| dispatch | 1780–end | `usage`, `case "$1"` router; `_loop` is the internal watcher entry |
+| dispatch | 1805–end | `usage`, `case "$1"` router; `_loop` is the internal watcher entry. `maybe_update_check` runs just before dispatch; the notice is skipped for internal/machine-readable commands (`_loop` logs it) |
 
 ## On-disk state
 
@@ -39,6 +39,8 @@ Sections are delimited by `# --- name ---` banners, in file order:
 ```
 <root>/
   current                      # repo slug last `on`ed (used outside a repo)
+  update_check.ts              # epoch of the last release check (throttle)
+  latest_release               # newest upstream tag seen by the update check
   repos/<owner>__<repo>/
     repo repo_dir me base      # written by detect_repo
     targets                    # "all" or explicit PR numbers
