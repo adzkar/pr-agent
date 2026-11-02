@@ -28,9 +28,9 @@ Sections are delimited by `# --- name ---` banners, in file order:
 | per-PR check | 860–927 | `check_pr` — the per-PR round; `skip_reason` |
 | watcher | 929–1018 | `watch_loop`, `is_running`, `pr_sig`, launchd plist install |
 | manual commands | 1136–1308 | `run`, `tell`/`_tell`, `attach`, `retry`, `peek`, `mark-seen`, `gc`, `sync`, `config`, `logs`, `version` |
-| self-update | 1310–1413 | `ver_gt`, `latest_release_tag`, `cmd_update` — downloads release assets from `UPDATE_REPO`, verifies sha256, atomic-installs over `$SELF`; `maybe_update_check`/`pending_update_version` — throttled background release check (OMZ-style) |
-| status rendering | 1388–1777 | `fmt_*`, `draw_*`, `status_prs`, `review_cell`/`state_cell` (side effects: `H_*` hint buckets), `recent_events`, `render_hint`, `render_status` (row-budgeted table), `cmd_status` (alt-screen watch loop + fallback clip) |
-| dispatch | 1805–end | `usage`, `case "$1"` router; `_loop` is the internal watcher entry. `maybe_update_check` runs just before dispatch; the notice is skipped for internal/machine-readable commands (`_loop` logs it) |
+| self-update | 1317–1416 | `ver_gt`, `latest_release_tag`, `cmd_update` — downloads release assets from `UPDATE_REPO`, verifies sha256, atomic-installs over `$SELF`; `maybe_update_check`/`pending_update_version` — throttled background release check (OMZ-style), both gated on `UPDATE_CHECK` |
+| status rendering | 1418–1806 | `fmt_*`, `draw_*`, `status_prs`, `review_cell`/`state_cell` (side effects: `H_*` hint buckets), `recent_events`, `render_hint`, `render_status` (row-budgeted table), `cmd_status` (alt-screen watch loop + fallback clip) |
+| dispatch | 1808–end | `usage`, `case "$1"` router; `_loop` is the internal watcher entry. `maybe_update_check` runs just before dispatch; the notice is skipped for internal/machine-readable commands (`_loop` logs it) |
 
 ## On-disk state
 
