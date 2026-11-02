@@ -6,9 +6,10 @@
 # Usage:
 #   ./release [patch|minor|major|X.Y.Z]    (default: patch)
 #
-# Safe to re-run: if an earlier run died mid-release, VERSION is already
-# bumped and the script resumes at tagging/publishing instead of starting
-# over.
+# Safe to re-run: an interrupted run resumes where it stopped — the tag is
+# (re)anchored at HEAD, the release created if missing, and assets
+# (re)uploaded with --clobber. './release X.Y.Z' also mints the checked-in
+# VERSION when it was never released.
 
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")"
@@ -71,10 +72,18 @@ fi
 
 tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
 
+# a release with both assets is done; one missing assets was interrupted
+# mid-upload — the idempotent tail below repairs it
+if gh release view "v$next" >/dev/null 2>&1; then
+  assets="$(gh release view "v$next" --json assets -q '.assets[].name' 2>/dev/null || true)"
+  printf '%s\n' "$assets" | grep -qx 'pr-agent' \
+    && printf '%s\n' "$assets" | grep -qx 'pr-agent.sha256' \
+    && die "release v$next already exists"
+fi
+
 if [ "$curn" = "$next" ]; then
   # VERSION is already the target — an interrupted run's release commit at
   # HEAD, or the checked-in version was never minted: tag HEAD and publish
-  gh release view "v$next" >/dev/null 2>&1 && die "release v$next already exists"
   if git rev-parse -q --verify "refs/tags/v$next" >/dev/null 2>&1; then
     # a tag left on a pre-rebase commit would publish outside main's history
     if [ "$(git rev-parse "v$next^{commit}")" != "$(git rev-parse HEAD)" ]; then
@@ -87,7 +96,6 @@ if [ "$curn" = "$next" ]; then
   echo "releasing v$next"
 else
   git rev-parse -q --verify "refs/tags/v$next" >/dev/null 2>&1 && die "tag v$next already exists"
-  gh release view "v$next" >/dev/null 2>&1 && die "release v$next already exists"
   # an unreleased 'chore: release vX.Y.Z' at HEAD is the same open-release
   # state as a missing tag — finish it before bumping past it
   if [[ "$(git log -1 --format=%s)" =~ ^chore:\ release\ (v[0-9]+\.[0-9]+\.[0-9]+)$ ]] \
@@ -111,8 +119,11 @@ fi
 git push origin main "+refs/tags/v$next:refs/tags/v$next"
 
 shasum -a 256 pr-agent >"$tmp/pr-agent.sha256"
-gh release create "v$next" pr-agent "$tmp/pr-agent.sha256" \
-  --title "v$next" --generate-notes >/dev/null
+# create+upload are separate so a partial release (asset upload died) is
+# repairable: view skips the create, --clobber re-uploads missing assets
+gh release view "v$next" >/dev/null 2>&1 \
+  || gh release create "v$next" --title "v$next" --generate-notes >/dev/null
+gh release upload "v$next" pr-agent "$tmp/pr-agent.sha256" --clobber >/dev/null
 
 if [ "$curn" = "$next" ]; then
   echo "released v$next — $(gh release view "v$next" --json url -q .url)"
