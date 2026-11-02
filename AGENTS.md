@@ -12,6 +12,7 @@
 | `pr-agent` | The entire tool — a self-contained bash script, no build step |
 | `README.md` | User docs: install, commands, dashboard, config |
 | `docs/ARCHITECTURE.md` | Code structure map, state files, execution flows |
+| `release` | Maintainer script — cuts versioned GitHub releases (`./release [patch|minor|major|X.Y.Z]`) |
 | `AGENTS.md` | This file |
 
 ## Deploy model
@@ -29,7 +30,9 @@ or changes diverge silently. If it already drifted, diff before overwriting.
 Releases are cut with `./release [patch|minor|major|X.Y.Z]` from a clean
 `main`: it bumps the `VERSION=` line, commits, tags `vX.Y.Z`, pushes, and
 publishes a GitHub release with `pr-agent` + `pr-agent.sha256` assets — the
-artifacts `pr-agent update` downloads.
+artifacts `pr-agent update` downloads. Re-running `./release vX.Y.Z` after
+an interrupted run resumes at publishing instead of dying on the existing
+tag.
 
 ## Verify before committing
 
