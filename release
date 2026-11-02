@@ -117,8 +117,9 @@ else
 fi
 
 # '+tag' is a no-op when the remote tag already points at HEAD, and fixes a
-# re-anchored stale tag on the remote
-git push origin main "+refs/tags/v$next:refs/tags/v$next"
+# re-anchored stale tag on the remote; --atomic keeps the pair all-or-nothing
+# so a rejected main never leaves a stray tag pointing at an unpushed commit
+git push --atomic origin main "+refs/tags/v$next:refs/tags/v$next"
 
 shasum -a 256 pr-agent >"$tmp/pr-agent.sha256"
 # create+upload are separate so a partial release (asset upload died) is
