@@ -64,6 +64,10 @@ them as a smoke test unless that's the intent.
 
 ## Traps that have bitten before
 
+- **`watch_loop` re-`cd`s every cycle, on purpose.** The `cd "$(repo_dir)"`
+  at loop entry covers a deleted *launch* dir; repeating it at the top of
+  `while` covers `repo_dir` itself being deleted mid-run — forked jobs in
+  an unreachable cwd spam getcwd errors. Don't hoist the in-loop `cd`.
 - **`state_cell`/`review_cell` have side effects** — they populate the `H_*`
   hint buckets that drive the bottom "what now" line. If you skip drawing a
   table row you must still call them, or the hint lies.

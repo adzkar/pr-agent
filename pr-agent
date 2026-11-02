@@ -1001,6 +1001,7 @@ pr_sig() { # pr -> change signature (updatedAt + head + CI + mergeability)
 }
 
 watch_loop() {
+  cd "$(repo_dir)" 2>/dev/null || cd /   # a deleted launch dir spams getcwd errors on every job
   rm -rf "$STATE_DIR"/locks/*/ "$STATE_DIR"/running/* 2>/dev/null || true   # drop markers orphaned by a previous dead loop
   retry_cutoff >/dev/null   # set once on first start of this version; pre-existing failures stay manual-only
   echo $$ >"$PID_FILE"
@@ -1008,6 +1009,7 @@ watch_loop() {
   log "watcher started (repo=$(repo), every ${INTERVAL}s, mode=$PERM_MODE, concurrency=$CONCURRENCY)"
   local cycle=0 pr reason sig gh_down=0
   while true; do
+    cd "$(repo_dir)" 2>/dev/null || cd /   # keep cwd valid — repo_dir itself may be deleted mid-run
     touch "$STATE_DIR/cycle_active"
     if refresh_prs 0; then
       [ "$gh_down" -eq 1 ] && log "GitHub reachable again"; gh_down=0
