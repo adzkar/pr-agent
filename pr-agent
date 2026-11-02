@@ -307,6 +307,14 @@ targets() { # -> PR numbers to watch (from prs.jsonl)
   fi
 }
 
+scope_label() { # -> display label for the "all"-mode watch scope ("@all"/blank = "all open PRs")
+  local e
+  for e in ${PR_AUTHOR_FILTER//,/ }; do
+    [ "$e" = "@all" ] && { echo "all open PRs"; return; }
+  done
+  if [ -n "${PR_AUTHOR_FILTER// /}" ]; then echo "open PRs by $PR_AUTHOR_FILTER"; else echo "all open PRs"; fi
+}
+
 # --- feedback collection ------------------------------------------------------------------
 # Items are JSON lines: {key, ts, kind, author, body, url, ...}. `key` changes when an item
 # is edited, so an edited review/comment (e.g. a placeholder turned into a real review) is
@@ -1087,7 +1095,7 @@ cmd_on() {
   if [ $# -eq 0 ] || [ "$1" = "all" ]; then echo "all" >"$STATE_DIR/targets"; else echo "$*" >"$STATE_DIR/targets"; fi
   save_config
   local what; what="$(cat "$STATE_DIR/targets")"
-  if [ "$what" = "all" ]; then what="all open PRs"; else what="$(hash_list "$what")"; fi
+  if [ "$what" = "all" ]; then what="$(scope_label)"; else what="$(hash_list "$what")"; fi
   if [ "$use_launchd" -eq 1 ]; then
     install_launchd
     echo "watching $what on $(repo) via launchd ($LAUNCHD_LABEL, every $(fmt_dur "$INTERVAL")) — pr-agent status to follow"
@@ -1564,7 +1572,7 @@ render_status() { # ttl [term-rows] -> status screen; with term-rows the PR tabl
   fi
   t="$(cat "$STATE_DIR/targets" 2>/dev/null || echo all)"
   if [ "$t" = "all" ] || [ -z "$t" ]; then
-    t="all open PRs"; [ -n "$PR_AUTHOR_FILTER" ] && t="open PRs by $PR_AUTHOR_FILTER"
+    t="$(scope_label)"
   else t="$(hash_list "$t")"; fi
   if [ -n "$AUTHOR_FILTER" ]; then reacts="$AUTHOR_FILTER"; else reacts="humans"; [ -n "$BOTS" ] && reacts+=" + $BOTS"; fi
   [ "$SANDBOX" = "1" ] && extras+=" · sandbox"
@@ -1705,13 +1713,13 @@ case "${1:-}" in
   add)
     shift; need_repo
     t="$(cat "$STATE_DIR/targets" 2>/dev/null || echo all)"
-    [ "$t" != "all" ] || die "watching all open PRs — nothing to add (use 'pr-agent on N...' for an explicit list)"
+    [ "$t" != "all" ] || die "watching $(scope_label) — nothing to add (use 'pr-agent on N...' for an explicit list)"
     echo "$t $*" | tr ' ' '\n' | { grep -E '^[0-9]+$' || true; } | sort -un | tr '\n' ' ' | sed 's/ $//' >"$STATE_DIR/targets"
     echo "targets: $(cat "$STATE_DIR/targets")" ;;
   rm)
     shift; need_repo
     t="$(cat "$STATE_DIR/targets" 2>/dev/null || echo all)"
-    [ "$t" != "all" ] || die "watching all open PRs — use 'pr-agent pause N' to skip one"
+    [ "$t" != "all" ] || die "watching $(scope_label) — use 'pr-agent pause N' to skip one"
     echo "$t" | tr ' ' '\n' | awk -v drop=" $* " 'NF && index(drop, " " $1 " ") == 0' | tr '\n' ' ' | sed 's/ $//' >"$STATE_DIR/targets"
     echo "targets: $(cat "$STATE_DIR/targets")" ;;
   run)       shift; need_repo; map_init; cmd_run "$@" ;;
