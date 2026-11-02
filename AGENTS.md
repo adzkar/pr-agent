@@ -71,6 +71,11 @@ them as a smoke test unless that's the intent.
 - **`state_cell`/`review_cell` have side effects** — they populate the `H_*`
   hint buckets that drive the bottom "what now" line. If you skip drawing a
   table row you must still call them, or the hint lies.
+- **`state_cell` precedence is deliberate** — working/interrupted →
+  merged/closed → `worktree_blocked` → `sync_blocked`/`sync_pending` →
+  `skip_reason` (paused/round-limit/approved) → pending items → idle. The
+  sync cells must stay above `skip_reason`: `sync_blocked` is a sticky
+  "needs you" state for approved/paused PRs the watcher itself skips.
 - **`render_status` row budget.** `status -w` passes terminal rows so the table
   caps itself; fixed chrome is `11 + the activity block` (`ACTIVITY_LINES>0`
   adds header + N + blank, i.e. N+2) `+ gh_error` lines. If you add/remove any

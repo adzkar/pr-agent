@@ -1506,16 +1506,17 @@ state_cell() { # pr gh_state pending -> sets CELL_T / CELL_C and records hint bu
     MERGED) CELL_T="merged — done"; CELL_C="$C_DIM"; return ;;
     CLOSED) CELL_T="closed"; CELL_C="$C_DIM"; return ;;
   esac
+  # blocked beats the sync cells — no agent can run while the branch sits in the main checkout;
+  # both stay above skip_reason — sync_blocked is a sticky needs-you state for PRs the watcher skips
+  if [ "$(map_get "$pr" worktree_blocked)" = "1" ]; then CELL_T="⚠ worktree blocked"; CELL_C="$C_YELLOW"; H_BLOCKED+=" $pr"; return; fi
+  if [ "$(map_get "$pr" sync_blocked)" = "1" ]; then CELL_T="✗ main-sync failed — needs you"; CELL_C="$C_RED"; H_SYNCFAIL+=" $pr"; return; fi
+  if [ "$(map_get "$pr" sync_pending)" = "1" ]; then CELL_T="● behind base — sync queued"; CELL_C="$C_CYAN$C_BOLD"; H_PENDING+=" $pr"; return; fi
   reason="$(skip_reason "$pr")"
   case "$reason" in
     paused)        CELL_T="⏸ paused"; CELL_C="$C_YELLOW"; H_PAUSED+=" $pr"; return ;;
     "round limit") CELL_T="⏸ hit $MAX_ROUNDS-round limit"; CELL_C="$C_RED"; H_LIMIT+=" $pr"; return ;;
     approved)      CELL_T="✓ approved — stopped"; CELL_C="$C_GREEN"; return ;;
   esac
-  # blocked beats the sync cells — no agent can run while the branch sits in the main checkout
-  if [ "$(map_get "$pr" worktree_blocked)" = "1" ]; then CELL_T="⚠ worktree blocked"; CELL_C="$C_YELLOW"; H_BLOCKED+=" $pr"; return; fi
-  if [ "$(map_get "$pr" sync_blocked)" = "1" ]; then CELL_T="✗ main-sync failed — needs you"; CELL_C="$C_RED"; H_SYNCFAIL+=" $pr"; return; fi
-  if [ "$(map_get "$pr" sync_pending)" = "1" ]; then CELL_T="● behind base — sync queued"; CELL_C="$C_CYAN$C_BOLD"; H_PENDING+=" $pr"; return; fi
   fc="$(map_num "$pr" fail_count)"
   if [ "${3:-0}" -gt 0 ]; then
     if [ "$fc" -gt 0 ]; then
@@ -1801,6 +1802,7 @@ case "${1:-}" in
              map_del "$1" retry_count; map_del "$1" retry_gave_up; map_del "$1" retry_skip_logged; map_del "$1" retry_last_ping_ts
              map_del "$1" sync_pending; map_del "$1" sync_blocked; map_del "$1" sync_blocked_key
              map_del "$1" sync_done_key; map_del "$1" sync_fail_key; map_set "$1" sync_fails 0; map_del "$1" sync_unblock
+             map_del "$1" worktree_blocked; map_del "$1" blocked_logged
              echo "PR #$1: session forgotten — the next round starts a fresh agent session" ;;
   reset-rounds) shift; need_pr "${1:-}"; need_repo
              map_del "$1" rounds; map_del "$1" skip_logged
