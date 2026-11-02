@@ -558,9 +558,13 @@ setup_worktree() { # src wt -> copy gitignored env/config files and dependencies
   if [ -n "$husky" ] && command -v bun >/dev/null; then (cd "$wt/$husky" && bun run prepare) || true; fi
 }
 
-worktree_holding() { # rd branch -> worktree path where branch is checked out (empty if none)
+worktree_holding() { # rd branch -> worktree path(s) where branch is checked out, one per line (skips prunable stale registrations)
   git -C "$1" worktree list --porcelain \
-    | awk -v b="refs/heads/$2" '/^worktree /{w=substr($0, 10)} /^branch /{if ($2 == b) print w}'
+    | awk -v b="refs/heads/$2" '
+        /^worktree /{if (hit && !prun) print w; w=substr($0, 10); hit=0; prun=0}
+        /^branch /{if ($2 == b) hit=1}
+        /^prunable /{prun=1}
+        END{if (hit && !prun) print w}'
 }
 
 ensure_worktree() { # pr branch -> prints worktree abs path (never the main checkout); rc 4 = branch checked out in the main checkout (deterministic block, not a transient failure)
@@ -573,14 +577,16 @@ ensure_worktree() { # pr branch -> prints worktree abs path (never the main chec
   if [ -n "$existing" ] && [ -d "$existing" ] && [ "$existing" != "$rd" ] && [ "$existing" != "$rd_real" ]; then echo "$existing"; return 0; fi
 
   wt="$(worktree_holding "$rd" "$branch")"
-  if [ "$wt" = "$rd" ] || [ "$wt" = "$rd_real" ]; then
+  if printf '%s\n' "$wt" | grep -qxF "$rd" || printf '%s\n' "$wt" | grep -qxF "$rd_real"; then
     echo "PR #$pr: branch $branch is checked out in the main checkout — refusing to run there; switch it to another branch" >&2
     return 4
   fi
-  if [ -n "$wt" ]; then echo "$wt"; return 0; fi
+  wt="$(printf '%s\n' "$wt" | head -1)"   # a branch lives in at most one worktree — take the first live entry
+  if [ -n "$wt" ] && [ -d "$wt" ]; then echo "$wt"; return 0; fi
 
   wt="$(dirname "$rd")/$(basename "$rd")-pr-$pr"
   if [ ! -d "$wt" ]; then
+    git -C "$rd" worktree prune 2>/dev/null || true   # drop stale registrations or a leftover "checked out" blocks the add below
     git -C "$rd" fetch origin "$branch" >&2 2>/dev/null || git -C "$rd" fetch origin "pull/$pr/head:pr-$pr" >&2
     if git -C "$rd" show-ref --verify --quiet "refs/heads/$branch"; then
       git -C "$rd" worktree add "$wt" "$branch" >&2
@@ -600,7 +606,7 @@ still_blocked() { # pr -> 0 while the worktree_blocked condition holds: PR branc
   [ -n "$rd" ] && [ -n "$branch" ] || return 1
   rd_real="$(cd "$rd" 2>/dev/null && pwd -P || true)"; rd_real="${rd_real:-$rd}"
   wt="$(worktree_holding "$rd" "$branch")"
-  [ "$wt" = "$rd" ] || [ "$wt" = "$rd_real" ]
+  printf '%s\n' "$wt" | grep -qxF "$rd" || printf '%s\n' "$wt" | grep -qxF "$rd_real"
 }
 
 sync_worktree() { # wt branch -> fast-forward to origin if the tree is clean (best effort)

@@ -98,8 +98,9 @@ them as a smoke test unless that's the intent.
   sets it on `ensure_worktree` rc 4 and clears it on *any* other prep outcome
   (success or failure) so a stale flag can't mask real state. Freeing the
   branch is a local act `pr_sig` can't see, so `watch_loop` re-probes blocked
-  PRs each poll via `still_blocked` (`git worktree list` — keep it gh-free)
-  and clears `sig` to force the round the poll the probe reports free.
+  PRs each poll via `still_blocked` (`git worktree list`, prunable stale
+  registrations skipped — keep it gh-free) and clears `sig` to force the
+  round on the poll the probe reports free.
 - **Feedback `key` ≠ seen marker ≠ skip state.** Marking a key seen only stops
   *that* item; the PR may still have pending items.
 - **The `… N more` table row and the fallback `… N more lines` clip are
