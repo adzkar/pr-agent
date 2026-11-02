@@ -29,7 +29,7 @@ Sections are delimited by `# --- name ---` banners, in file order:
 | watcher | 929–1018 | `watch_loop`, `is_running`, `pr_sig`, launchd plist install |
 | manual commands | 1071–1236 | `run`, `tell`/`_tell`, `attach`, `retry`, `peek`, `mark-seen`, `gc`, `sync`, `config`, `logs` |
 | status rendering | 1238–1593 | `fmt_*`, `draw_*`, `status_prs`, `review_cell`/`state_cell` (side effects: `H_*` hint buckets), `recent_events`, `render_hint`, `render_status` (row-budgeted table), `cmd_status` (alt-screen watch loop + fallback clip) |
-| dispatch | 1596–end | `usage`, `case "$1"` router; `_loop` is the internal watcher entry |
+| dispatch | 1596–end | `usage`, `case "$1"` router — inline cases: `add`/`rm`, `pause`/`resume`, `reset`, `reset-rounds`, `map`, `version`, `help`; `_loop`/`_check`/`_tell` are internal entries |
 
 ## On-disk state
 

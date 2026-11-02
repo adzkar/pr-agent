@@ -96,4 +96,7 @@ them as a smoke test unless that's the intent.
 Conventional-commit prefixes (`feat:`, `fix:`, `docs:`, `chore:`), one logical
 change per commit. When the README's usage table or the usage header comment
 at the top of the script changes, keep both in sync — `pr-agent help` prints
-the header verbatim.
+the header verbatim. Same for other docs that mirror behavior: the README
+dashboard example must match real `status` output, and the ARCHITECTURE.md
+code map must place a command in the section that implements it —
+dispatch-inline commands belong in the `dispatch` row, not `manual commands`.
