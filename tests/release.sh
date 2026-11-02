@@ -217,6 +217,22 @@ has "padded guard fires" "$o" 'v0.2.0 is tagged but its release is unfinished â€
 try_release o 0.2.0
 eq "repair rc 0" "$RC" 0
 
+echo "== S19: foreign remote tag is not silently re-pointed =="
+new_repo r19 0.1.0
+# a tag on a commit unreachable from main, pushed by another clone â€” fetch
+# won't follow it, so refs/tags/v0.1.1 stays absent and the plain tag
+# refspec (no '+') must fail instead of clobbering the remote tag
+git init -q "$T/r19b"; ( cd "$T/r19b"
+  git remote add origin "$T/r19.git"
+  git checkout -qb side
+  git commit -qm foreign --allow-empty
+  git tag v0.1.1
+  git push -q origin 'refs/tags/v0.1.1:refs/tags/v0.1.1' )
+try_release o
+eq "rc!=0" "$([ $RC -ne 0 ] && echo y)" y
+has "push rejected" "$o" 'rejected'
+eq "remote tag intact" "$(git -C "$T/r19.git" rev-parse 'v0.1.1^{commit}')" "$(git -C "$T/r19b" rev-parse HEAD)"
+
 echo
 echo "$pass passed, $fail failed"
 [ "$fail" -eq 0 ]
