@@ -82,6 +82,12 @@ them as a smoke test unless that's the intent.
   it so the status table keeps title/state, but `targets`/`pr_sig` must keep
   reading `prs.jsonl` alone — a stale OPEN entry would make a dead PR
   watchable forever, and a frozen `updated` would mask real changes.
+- **Feedback `.author` is nullable** — it's `.user.login` from the GitHub API,
+  which is `null` for deleted/ghost accounts. jq string builtins (`endswith`,
+  `startswith`, `test` on the value itself) abort the whole `filter_feedback`
+  run on null input, silently stalling the PR's feedback. Guard with
+  `($a // "")` before any string builtin on `.author` (see the `status_re`
+  clause in `filter_feedback`).
 - **`seen/<pr>` keys are content-derived** (`id:body-len` / `id:updated_at`) —
   an *edited* review or comment re-triggers. Don't switch to plain ids.
 - **Feedback `key` ≠ seen marker ≠ skip state.** Marking a key seen only stops
