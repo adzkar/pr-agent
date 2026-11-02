@@ -64,6 +64,10 @@ them as a smoke test unless that's the intent.
 
 ## Traps that have bitten before
 
+- **`watch_loop` re-`cd`s every cycle, on purpose.** The `cd "$(repo_dir)"`
+  at loop entry covers a deleted *launch* dir; repeating it at the top of
+  `while` covers `repo_dir` itself being deleted mid-run — forked jobs in
+  an unreachable cwd spam getcwd errors. Don't hoist the in-loop `cd`.
 - **`state_cell`/`review_cell` have side effects** — they populate the `H_*`
   hint buckets that drive the bottom "what now" line. If you skip drawing a
   table row you must still call them, or the hint lies.
@@ -100,4 +104,7 @@ them as a smoke test unless that's the intent.
 Conventional-commit prefixes (`feat:`, `fix:`, `docs:`, `chore:`), one logical
 change per commit. When the README's usage table or the usage header comment
 at the top of the script changes, keep both in sync — `pr-agent help` prints
-the header verbatim.
+the header verbatim. Same for other docs that mirror behavior: the README
+dashboard example must match real `status` output, and the ARCHITECTURE.md
+code map must place a command in the section that implements it —
+dispatch-inline commands belong in the `dispatch` row, not `manual commands`.

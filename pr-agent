@@ -29,6 +29,7 @@
 #                                   banner depends on merged PR N.
 #   pr-agent config                 Show effective settings
 #   pr-agent map                    Show the raw PR → session/worktree map
+#   pr-agent version                Print the installed version
 #
 # A PR comment by you that starts with "/agent" is treated as feedback.
 #
@@ -83,6 +84,7 @@
 
 set -euo pipefail
 
+VERSION="0.1.0"   # release identity — bumped by ./release, shown by 'pr-agent version'
 STATE_ROOT="${PR_AGENT_STATE_DIR:-$HOME/.local/state/pr-agent}"
 DEVIN_BIN="${DEVIN_BIN:-devin}"
 SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
@@ -1012,6 +1014,7 @@ pr_sig() { # pr -> change signature (updatedAt + head + CI + mergeability)
 }
 
 watch_loop() {
+  cd "$(repo_dir)" 2>/dev/null || cd /   # a deleted launch dir spams getcwd errors on every job
   rm -rf "$STATE_DIR"/locks/*/ "$STATE_DIR"/running/* 2>/dev/null || true   # drop markers orphaned by a previous dead loop
   retry_cutoff >/dev/null   # set once on first start of this version; pre-existing failures stay manual-only
   echo $$ >"$PID_FILE"
@@ -1019,6 +1022,7 @@ watch_loop() {
   log "watcher started (repo=$(repo), every ${INTERVAL}s, mode=$PERM_MODE, concurrency=$CONCURRENCY)"
   local cycle=0 pr reason sig gh_down=0
   while true; do
+    cd "$(repo_dir)" 2>/dev/null || cd /   # keep cwd valid — repo_dir itself may be deleted mid-run
     touch "$STATE_DIR/cycle_active"
     if refresh_prs 0; then
       [ "$gh_down" -eq 1 ] && log "GitHub reachable again"; gh_down=0
@@ -1584,7 +1588,7 @@ render_status() { # ttl [term-rows] -> status screen; with term-rows the PR tabl
   [ "$CONFLICT_TRIGGER" = "1" ] && extras+=" · conflicts"
   [ "$MAIN_SYNC" = "1" ] && extras+=" · main-sync"
 
-  printf '%s  %s   %s\n' "${C_BOLD}${C_BLUE}pr-agent${C_RESET}" "$badge" "${C_BOLD}$(repo)${C_RESET}"
+  printf '%s  %s   %s\n' "${C_BOLD}${C_BLUE}pr-agent v${VERSION}${C_RESET}" "$badge" "${C_BOLD}$(repo)${C_RESET}"
   printf '%s%s\n' "${C_DIM}watching ${t} · every $(fmt_dur "$INTERVAL") · mode ${PERM_MODE}${extras} · ${CONCURRENCY} parallel · max ${MAX_ROUNDS} rounds · reacts to ${reacts} · ${C_RESET}" "$poll"
   local gherr=0
   if [ -f "$STATE_DIR/gh_error" ]; then
@@ -1749,6 +1753,7 @@ case "${1:-}" in
   sync)      shift; cmd_sync "$@" ;;
   config)    cmd_config ;;
   map)       map_init; jq . "$MAP_FILE" ;;
+  version|--version|-v) echo "pr-agent $VERSION" ;;
   _loop)     need_repo; watch_loop ;;
   help|-h|--help) usage 0 ;;
   *)         usage ;;

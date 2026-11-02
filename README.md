@@ -55,6 +55,7 @@ shows where every PR stands.
 | `pr-agent sync [--apply [N]]` | Report open PRs whose branch is behind their base; `--apply` merges the base into them via their agent sessions. Optional N: only PRs whose "do not review" banner depends on merged PR N. |
 | `pr-agent config` | Show effective settings |
 | `pr-agent map` | Show the raw PR → session/worktree map (JSON) |
+| `pr-agent version` | Print the installed version |
 
 ## The dashboard
 
@@ -62,7 +63,7 @@ shows where every PR stands.
 it live on the terminal's alt screen.
 
 ```
-pr-agent  ● watching (pid 10391)   owner/repo
+pr-agent v0.1.0  ● watching (pid 10391)   owner/repo
 watching open PRs by @me · every 2m · mode dangerous · conflicts · 2 parallel · max 10 rounds · reacts to humans + review-bot[bot] · next poll in 34s
 
 ┌───────┬────────────┬────────────────┬────────────────────────┬────────┬──────────┐
