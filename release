@@ -104,11 +104,11 @@ else
     && ! assets_complete "${BASH_REMATCH[1]}"; then
     die "${BASH_REMATCH[1]} is committed but its release is unfinished — finish it first: ./release ${BASH_REMATCH[1]#v}"
   fi
-  # a v$cur whose release is unfinished (missing or partial) means the
+  # a v$curn whose release is unfinished (missing or partial) means the
   # previous release is still open — finish it rather than leapfrogging it
-  if git rev-parse -q --verify "refs/tags/v$cur" >/dev/null 2>&1 \
-    && ! assets_complete "v$cur"; then
-    die "v$cur is tagged but its release is unfinished — finish it first: ./release $cur"
+  if git rev-parse -q --verify "refs/tags/v$curn" >/dev/null 2>&1 \
+    && ! assets_complete "v$curn"; then
+    die "v$curn is tagged but its release is unfinished — finish it first: ./release $curn"
   fi
   sed -i '' -E "s/^VERSION=\"[0-9]+\.[0-9]+\.[0-9]+\"/VERSION=\"$next\"/" pr-agent
   git add pr-agent
