@@ -1602,8 +1602,9 @@ render_status() { # ttl [term-rows] -> status screen; with term-rows the PR tabl
     if [ -n "${2:-}" ]; then
       body=$(( $2 - chrome - gherr )); [ "$body" -lt 0 ] && body=0
     fi
-    if [ "$TABLE_ROWS" -gt 0 ] && [ "$TABLE_ROWS" -lt "$shown" ]; then
-      shown="$TABLE_ROWS"; cap_why="TABLE_ROWS" # explicit cap wins — overflow falls to the bottom clip
+    if [ "$TABLE_ROWS" -gt 0 ]; then
+      [ "$TABLE_ROWS" -lt "$shown" ] && { shown="$TABLE_ROWS"; cap_why="TABLE_ROWS"; }
+      # explicit size wins over terminal-fit — overflow falls to the bottom clip
     elif [ "$shown" -gt "$body" ]; then
       shown=$(( body - 1 )); [ "$shown" -lt 0 ] && shown=0; cap_why=term # reserve a line for "… more"
     fi
