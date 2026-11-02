@@ -29,6 +29,7 @@
 #                                   banner depends on merged PR N.
 #   pr-agent config                 Show effective settings
 #   pr-agent map                    Show the raw PR → session/worktree map
+#   pr-agent version                Print the installed version
 #
 # A PR comment by you that starts with "/agent" is treated as feedback.
 #
@@ -83,6 +84,7 @@
 
 set -euo pipefail
 
+VERSION="0.1.0"   # release identity — bumped by ./release, shown by 'pr-agent version'
 STATE_ROOT="${PR_AGENT_STATE_DIR:-$HOME/.local/state/pr-agent}"
 DEVIN_BIN="${DEVIN_BIN:-devin}"
 SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
@@ -1571,7 +1573,7 @@ render_status() { # ttl [term-rows] -> status screen; with term-rows the PR tabl
   [ "$CONFLICT_TRIGGER" = "1" ] && extras+=" · conflicts"
   [ "$MAIN_SYNC" = "1" ] && extras+=" · main-sync"
 
-  printf '%s  %s   %s\n' "${C_BOLD}${C_BLUE}pr-agent${C_RESET}" "$badge" "${C_BOLD}$(repo)${C_RESET}"
+  printf '%s  %s   %s\n' "${C_BOLD}${C_BLUE}pr-agent v${VERSION}${C_RESET}" "$badge" "${C_BOLD}$(repo)${C_RESET}"
   printf '%s%s\n' "${C_DIM}watching ${t} · every $(fmt_dur "$INTERVAL") · mode ${PERM_MODE}${extras} · ${CONCURRENCY} parallel · max ${MAX_ROUNDS} rounds · reacts to ${reacts} · ${C_RESET}" "$poll"
   local gherr=0
   if [ -f "$STATE_DIR/gh_error" ]; then
@@ -1736,6 +1738,7 @@ case "${1:-}" in
   sync)      shift; cmd_sync "$@" ;;
   config)    cmd_config ;;
   map)       map_init; jq . "$MAP_FILE" ;;
+  version|--version|-v) echo "pr-agent $VERSION" ;;
   _loop)     need_repo; watch_loop ;;
   help|-h|--help) usage 0 ;;
   *)         usage ;;

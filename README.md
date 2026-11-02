@@ -55,6 +55,7 @@ shows where every PR stands.
 | `pr-agent sync [--apply [N]]` | Report open PRs whose branch is behind their base; `--apply` merges the base into them via their agent sessions. Optional N: only PRs whose "do not review" banner depends on merged PR N. |
 | `pr-agent config` | Show effective settings |
 | `pr-agent map` | Show the raw PR → session/worktree map (JSON) |
+| `pr-agent version` | Print the installed version |
 
 ## The dashboard
 
