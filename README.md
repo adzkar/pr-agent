@@ -122,7 +122,7 @@ Env vars always win over the per-repo config saved by `pr-agent on`
 | `PR_AGENT_MODE` | `dangerous` | `devin --permission-mode` |
 | `PR_AGENT_SANDBOX` | `0` | Pass `--sandbox` to devin |
 | `PR_AGENT_AUTHOR` | anyone but you | Comma list; only react to these logins |
-| `PR_AGENT_PR_AUTHOR` | `@me` | Comma list; in `all` mode only watch PRs by these authors (`@all` = everyone). Explicit targets (`on N…`) are unaffected |
+| `PR_AGENT_PR_AUTHOR` | `@me` | Comma list; in `all` mode only watch PRs by these authors (`@me` = your login, `@all` = everyone). Explicit targets (`on N…`) are unaffected |
 | `PR_AGENT_BOTS` | — | Comma list of `[bot]` logins to react to (e.g. your review bot) |
 | `PR_AGENT_TRIGGER` | `/agent` | Prefix that turns your own comment into feedback |
 | `PR_AGENT_MAX_FAILS` | `3` | Consecutive failed runs before giving up |
