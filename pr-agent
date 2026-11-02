@@ -883,12 +883,12 @@ run_agent() { # pr prompt_file -> 0 ok, 1 fail, 2 session busy elsewhere, 3 stop
   [ -n "$branch" ] || branch="$(gh pr view "$pr" --repo "$(repo)" --json headRefName -q .headRefName 2>/dev/null || true)"
   local ewrc=0
   wt="$(ensure_worktree "$pr" "$branch" 2>>"$LOG_FILE")" || ewrc=$?
+  if [ "$ewrc" -eq 4 ]; then map_set "$pr" worktree_blocked 1; return 4; fi
+  map_del "$pr" worktree_blocked; map_del "$pr" blocked_logged   # last prep wasn't blocked — no stale flag masking real failures
   if [ -z "$wt" ]; then
-    if [ "$ewrc" -eq 4 ]; then map_set "$pr" worktree_blocked 1; return 4; fi
     log "PR #$pr: couldn't prepare a worktree (see log)"; return 1
   fi
   map_set "$pr" worktree "$wt"; map_set "$pr" branch "$branch"
-  map_del "$pr" worktree_blocked; map_del "$pr" blocked_logged
   sync_worktree "$wt" "$branch"
 
   mkdir -p "$STATE_DIR/logs/$pr"
