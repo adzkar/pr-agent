@@ -604,6 +604,9 @@ still_blocked() { # pr -> 0 while the worktree_blocked condition holds: PR branc
   local rd rd_real wt branch
   rd="$(repo_dir)"; branch="$(pr_info "$1" branch)"
   [ -n "$rd" ] && [ -n "$branch" ] || return 1
+  # a renamed branch name can freeze in prs_extra — don't trust a probe on a ref that isn't there
+  git -C "$rd" show-ref --verify --quiet "refs/heads/$branch" \
+    || git -C "$rd" show-ref --verify --quiet "refs/remotes/origin/$branch" || return 1
   rd_real="$(cd "$rd" 2>/dev/null && pwd -P || true)"; rd_real="${rd_real:-$rd}"
   wt="$(worktree_holding "$rd" "$branch")"
   printf '%s\n' "$wt" | grep -qxF "$rd" || printf '%s\n' "$wt" | grep -qxF "$rd_real"
@@ -790,6 +793,7 @@ check_sync() { # pr basesha base mode(watch|manual) -> merge the base into the P
   elif [ "$rc" -eq 4 ]; then
     # deterministic local block, not a sync failure — don't burn sync_fails or
     # escalate; sync_pending stays set so the merge retries once the branch frees
+    [ "$mode" = "manual" ] && echo "PR #$pr: worktree blocked — the branch is checked out in the main checkout; switch it to another branch and retry"
     if [ -z "$(map_get "$pr" blocked_logged)" ]; then
       map_set "$pr" blocked_logged 1
       log "PR #$pr: sync deferred — worktree blocked (branch checked out in the main checkout)"
@@ -997,6 +1001,7 @@ check_pr() { # pr [sig] [force] [mode] -> processes new feedback for one PR (mod
 
   run_agent "$pr" "$pf" || rc=$?
   if [ "$rc" -eq 4 ]; then
+    [ "$mode" = "manual" ] && echo "PR #$pr: worktree blocked — the branch is checked out in the main checkout; switch it to another branch and retry"
     log "PR #$pr: worktree blocked — feedback stays pending until the branch frees up in the main checkout"
     if [ -z "$(map_get "$pr" blocked_logged)" ]; then
       map_set "$pr" blocked_logged 1   # deterministic block: skip + one notice, no fail_count/escalation
