@@ -1259,14 +1259,16 @@ cmd_off() {
 
 need_pr() { [[ "${1:-}" =~ ^[0-9]+$ ]] || die "expected a PR number"; }
 
+gh_err_not_pr() { # gh pr view stderr -> rc 0 iff it means the number is not a pull request (vs repo-level/transport errors)
+  case "$1" in *"Could not resolve to a PullRequest"*) return 0 ;; *) return 1 ;; esac
+}
+
 need_real_pr() { # N -> need_pr + dies unless the number resolves to a pull request (one gh call — manual commands only)
   need_pr "${1:-}"; need_repo
   local err
   if err="$(gh pr view "$1" --repo "$(repo)" --json number 2>&1 >/dev/null)"; then return 0; fi
-  case "$err" in
-    *"Could not resolve"*) die "#$1 is not a pull request on $(repo) — that number may be an issue" ;;
-    *)                     die "couldn't verify PR #$1 on $(repo): ${err:-gh failed}" ;;
-  esac
+  gh_err_not_pr "$err" && die "#$1 is not a pull request on $(repo) — that number may be an issue"
+  die "couldn't verify PR #$1 on $(repo): ${err:-gh failed}"
 }
 
 cmd_run() { # N [--force]
@@ -1382,7 +1384,9 @@ cmd_gc() { # [--yes] -> remove worktrees/branches/state for merged & closed PRs 
   for pr in $(jq -r '.prs | keys[]' "$MAP_FILE"); do
     state="$(pr_info "$pr" state)"
     if [ -z "$state" ]; then   # no cached object: keep real PRs the caches missed, forget keys that never were PRs
-      gh pr view "$pr" --repo "$(repo)" --json number >/dev/null 2>&1 && continue
+      local verr
+      if verr="$(gh pr view "$pr" --repo "$(repo)" --json number 2>&1 >/dev/null)"; then continue; fi
+      gh_err_not_pr "$verr" || { echo "#$pr: couldn't verify — skipping"; continue; }
       [ -d "$STATE_DIR/locks/$pr" ] && { echo "#$pr: busy, skipping"; continue; }
       planned=1
       echo "#$pr (not a pull request):"

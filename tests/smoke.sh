@@ -18,11 +18,15 @@ R="$(mktemp -d /tmp/pr-agent-smoke-repo.XXXXXX)"
 G="$(mktemp -d /tmp/pr-agent-smoke-gh.XXXXXX)"
 trap 'rm -rf "$PR_AGENT_STATE_DIR" "$R" "$R"-* "$G"' EXIT   # "$R"-* = link + worktree dirs created next to it
 
-# stub gh — hermetic: `pr view N` resolves iff N is in $GH_STUB_PRS, `pr list` prints $GH_STUB_LIST
+# stub gh — hermetic: `pr view N` resolves iff N is in $GH_STUB_PRS (N in $GH_STUB_500 fails
+# transiently instead of "not a PR"), `pr list` prints $GH_STUB_LIST
 cat >"$G/gh" <<'STUB'
 #!/usr/bin/env bash
 case "$1/$2" in
-  pr/view) case " ${GH_STUB_PRS:-} " in
+  pr/view) case " ${GH_STUB_500:-} " in
+             *" $3 "*) echo "gh: HTTP 500 Internal Server Error" >&2; exit 1 ;;
+           esac
+           case " ${GH_STUB_PRS:-} " in
              *" $3 "*) echo "{\"number\":$3,\"state\":\"OPEN\",\"title\":\"t\",\"updated\":\"2026-01-01\"}" ;;
              *) echo "GraphQL: Could not resolve to a PullRequest with the number of $3." >&2; exit 1 ;;
            esac ;;
@@ -106,6 +110,14 @@ if jq -e '.prs["6"]' "$D/map.json" >/dev/null 2>&1; then echo "  FAIL phantom ke
 else echo "  ok   gc --yes forgot the phantom"; fi
 if jq -e '.prs["42"].paused' "$D/map.json" >/dev/null 2>&1; then echo "  ok   real PR key kept"
 else echo "  FAIL real PR key dropped"; fail=1; fi
+
+export GH_STUB_500=55                       # 55's gh pr view fails transiently — not "not a PR"
+check "setup: legacy _tell mints key"   0 "$(try _tell 55 "$D/prompt.md")"
+rc=0; out="$(./pr-agent gc --yes 2>&1)" || rc=$?
+check "gc --yes rc with unverifiable key" 0 "$rc"
+case "$out" in *"couldn't verify — skipping"*) echo "  ok   gc names the unverifiable key" ;; *) echo "  FAIL gc output: $out"; fail=1 ;; esac
+if jq -e '.prs["55"]' "$D/map.json" >/dev/null 2>&1; then echo "  ok   unverifiable key kept"
+else echo "  FAIL gc forgot a key it couldn't verify"; fail=1; fi
 
 echo
 if [ "$fail" -eq 0 ]; then echo "smoke: all checks passed"; else echo "smoke: FAILURES"; exit 1; fi

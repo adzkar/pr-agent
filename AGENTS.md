@@ -194,10 +194,14 @@ the intent.
   must also confirm the number resolves to a pull request — `tell`/`pause`/
   `reset` on an *issue* number used to mint a `.prs` key that rendered as a
   permanent "?" status row (`pr_info` finds nothing; `gc` skipped the `""`
-  state). `gc` now forgets keys with no cached object that `gh pr view`
-  can't resolve — `refresh_prs 0` + `backfill_prs` already ran by then, so a
-  failed view means "not a PR", not "uncached". `need_pr` alone stays only
-  where a command does its own resolution (`sync --apply`).
+  state). `gc` now forgets keys with no cached object whose `gh pr view`
+  fails with "Could not resolve to a PullRequest" — `refresh_prs 0` +
+  `backfill_prs` already ran by then, so that verdict means "not a PR", not
+  "uncached". Only that exact stderr verdict is proof (`gh_err_not_pr` is
+  the shared check): rate limits, 5xxs, and repo-level "Could not resolve
+  to a Repository" failures mean "couldn't verify" — keep the key, never
+  let a transient failure delete state. `need_pr` alone stays only where a
+  command does its own resolution (`sync --apply`).
 
 ## Commit style
 
