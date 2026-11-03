@@ -33,9 +33,12 @@ or changes diverge silently. If it already drifted, diff before overwriting.
 Releases are cut with `./release [patch|minor|major|X.Y.Z]` from a clean
 `main`: it bumps the `VERSION=` line, commits, tags `vX.Y.Z`, pushes, and
 publishes a GitHub release with `pr-agent` + `pr-agent.sha256` assets — the
-artifacts `pr-agent update` downloads. Interrupted runs resume — the tag
-is (re)anchored at `HEAD` and assets (re)uploaded — and `./release X.Y.Z`
-mints the checked-in `VERSION` if it was never released.
+artifacts `pr-agent update` downloads. Notes are grouped from the PRs
+merged since the previous tag (`feat:`/`fix:` sections, the rest under
+Other); a range with no merged PRs falls back to `--generate-notes`.
+Interrupted runs resume — the tag is (re)anchored at `HEAD` and assets
+(re)uploaded — and `./release X.Y.Z` mints the checked-in `VERSION` if it
+was never released.
 
 ## Verify before committing
 

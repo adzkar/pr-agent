@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # release — cut a pr-agent release: bump VERSION, commit, tag, and publish a
 # GitHub release carrying `pr-agent` + `pr-agent.sha256` (what `pr-agent
-# update` downloads).
+# update` downloads). Notes are grouped from the PRs merged since the
+# previous tag — falls back to --generate-notes when the range has none.
 #
 # Usage:
 #   ./release [patch|minor|major|X.Y.Z]    (default: patch)
@@ -21,6 +22,42 @@ assets_complete() {
   local a
   a="$(gh release view "$1" --json assets -q '.assets[].name' 2>/dev/null || true)"
   printf '%s\n' "$a" | grep -qx 'pr-agent' && printf '%s\n' "$a" | grep -qx 'pr-agent.sha256'
+}
+
+# release_notes NEWTAG -> tidy "What's Changed" markdown on stdout;
+# rc 1 when the tag range has no merged PRs (caller falls back to --generate-notes)
+release_notes() {
+  local tag="$1" prev range nums prs slug cmp n title feats="" fixes="" others=""
+  # the tag is already anchored at HEAD, so v$tag^ reaches the previous release
+  prev="$(git describe --tags --abbrev=0 --match 'v[0-9]*' "v$tag^" 2>/dev/null || true)"
+  range="${prev:+$prev..}HEAD"
+  # PR numbers from merge subjects ("Merge pull request #N") and squash tails ("(#N)")
+  nums="$(git log "$range" --format=%s \
+          | sed -nE -e 's/^Merge pull request #([0-9]+).*/\1/p' \
+                    -e 's/.*\(#([0-9]+)\)$/\1/p' | sort -un || true)"
+  [ -n "$nums" ] || return 1
+  prs="$(gh pr list --state all --limit 500 --json number,title \
+         --jq '.[] | "\(.number)\t\(.title)"' 2>/dev/null || true)"
+  [ -n "$prs" ] || return 1
+  for n in $nums; do
+    title="$(printf '%s\n' "$prs" | sed -n "s/^$n\t//p" | head -1)"
+    [ -n "$title" ] || title="pull request #$n"
+    case "$title" in
+      feat:*|feat\(*) feats+="* $title — #$n"$'\n' ;;
+      fix:*|fix\(*)   fixes+="* $title — #$n"$'\n' ;;
+      *)              others+="* $title — #$n"$'\n' ;;
+    esac
+  done
+  echo "## What's Changed"
+  [ -n "$feats" ]  && printf '\n### Features\n%s' "$feats"
+  [ -n "$fixes" ]  && printf '\n### Fixes\n%s' "$fixes"
+  [ -n "$others" ] && printf '\n### Other\n%s' "$others"
+  slug="$(git remote get-url origin 2>/dev/null \
+          | sed -nE 's#^.*github\.com[:/]([^/]+/[^/]+)$#\1#p' | sed 's/\.git$//' || true)"
+  if [ -n "$slug" ]; then
+    if [ -n "$prev" ]; then cmp="compare/$prev...v$tag"; else cmp="commits/v$tag"; fi
+    printf '\n**Full Changelog**: https://github.com/%s/%s\n' "$slug" "$cmp"
+  fi
 }
 
 # --- guards ------------------------------------------------------------------
@@ -126,8 +163,10 @@ git push --atomic origin main "$tagpush"
 shasum -a 256 pr-agent >"$tmp/pr-agent.sha256"
 # create+upload are separate so a partial release (asset upload died) is
 # repairable: view skips the create, --clobber re-uploads missing assets
+create_args=(--generate-notes)
+release_notes "$next" >"$tmp/notes.md" && create_args=(--notes-file "$tmp/notes.md")
 gh release view "v$next" >/dev/null 2>&1 \
-  || gh release create "v$next" --title "v$next" --generate-notes >/dev/null
+  || gh release create "v$next" --title "v$next" "${create_args[@]}" >/dev/null
 gh release upload "v$next" pr-agent "$tmp/pr-agent.sha256" --clobber >/dev/null
 
 if [ "$curn" = "$next" ]; then
