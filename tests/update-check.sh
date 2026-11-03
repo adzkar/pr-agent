@@ -98,6 +98,12 @@ eq "partial version quiet" "$O" survived
 d="$(sr s8c)"; printf v1.2.3rc1 >"$d/latest_release"; try "$d" pending
 eq "suffixed version quiet" "$O" survived
 
+echo "== S9: read-only latest_release -> overwritten, no litter =="
+d="$(sr s9)"; printf v0.0.1 >"$d/latest_release"; chmod 444 "$d/latest_release"; try "$d" check
+eq "overwritten" "$(cat "$d/latest_release")" v9.9.9
+if ls "$d"/.latest_release.* >/dev/null 2>&1; then bad "no litter" "temp files remain"; else ok "no litter"; fi
+chmod 644 "$d/latest_release"  # let the trap clean up
+
 echo
 echo "$pass passed, $fail failed"
 [ "$fail" -eq 0 ]

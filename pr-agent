@@ -1451,7 +1451,7 @@ maybe_update_check() { # -> spawn a background release check at most every UPDAT
   echo "$now" 2>/dev/null >"$stamp" || return 0   # stamp first — no gh stampede; an unwritable stamp can't throttle, so bail
   ( latest="$(latest_release_tag)" && [ -n "$latest" ] \
       && printf '%s' "$latest" >"$STATE_ROOT/.latest_release.$$" \
-      && mv "$STATE_ROOT/.latest_release.$$" "$STATE_ROOT/latest_release" ) >/dev/null 2>&1 &
+      && mv -f "$STATE_ROOT/.latest_release.$$" "$STATE_ROOT/latest_release" ) >/dev/null 2>&1 </dev/null &
 }
 
 pending_update_version() { # -> release version newer than VERSION from the last check, or nothing; empty when checks are disabled
