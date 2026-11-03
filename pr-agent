@@ -1445,7 +1445,7 @@ maybe_update_check() { # -> spawn a background release check at most every UPDAT
   now="$(date +%s)"
   last="$(cat "$stamp" 2>/dev/null || echo 0)"; [[ "$last" =~ ^[0-9]+$ ]] || last=0
   [ $(( now - last )) -lt "$UPDATE_CHECK_EVERY" ] && return 0
-  echo "$now" >"$stamp"   # stamp first — back-to-back invocations must not stampede gh
+  echo "$now" 2>/dev/null >"$stamp" || return 0   # stamp first — no gh stampede; an unwritable stamp can't throttle, so bail
   ( latest="$(latest_release_tag)" && [ -n "$latest" ] \
       && printf '%s' "$latest" >"$STATE_ROOT/.latest_release.$$" \
       && mv "$STATE_ROOT/.latest_release.$$" "$STATE_ROOT/latest_release" ) >/dev/null 2>&1 &
