@@ -119,5 +119,13 @@ case "$out" in *"couldn't verify — skipping"*) echo "  ok   gc names the unver
 if jq -e '.prs["55"]' "$D/map.json" >/dev/null 2>&1; then echo "  ok   unverifiable key kept"
 else echo "  FAIL gc forgot a key it couldn't verify"; fail=1; fi
 
+check "setup: legacy _tell mints key"   0 "$(try _tell 66 "$D/prompt.md")"
+mkdir "$D/locks/66"                            # stale lock left by a crashed pre-upgrade run
+rc=0; out="$(./pr-agent gc --yes 2>&1)" || rc=$?
+check "gc --yes rc with locked phantom" 0 "$rc"
+if jq -e '.prs["66"]' "$D/map.json" >/dev/null 2>&1; then echo "  FAIL locked phantom survived gc --yes"; fail=1
+else echo "  ok   stale lock didn't shield the phantom"; fi
+[ -d "$D/locks/66" ] && { echo "  FAIL stale lock dir left behind"; fail=1; } || echo "  ok   stale lock dir dropped"
+
 echo
 if [ "$fail" -eq 0 ]; then echo "smoke: all checks passed"; else echo "smoke: FAILURES"; exit 1; fi

@@ -200,7 +200,9 @@ the intent.
   "uncached". Only that exact stderr verdict is proof (`gh_err_not_pr` is
   the shared check): rate limits, 5xxs, and repo-level "Could not resolve
   to a Repository" failures mean "couldn't verify" — keep the key, never
-  let a transient failure delete state. `need_pr` alone stays only where a
+  let a transient failure delete state. A stale `locks/<n>` can't shield a
+  phantom either — no live run can hold a lock on a non-PR number, so
+  `gc --yes` drops the orphaned dir. `need_pr` alone stays only where a
   command does its own resolution (`sync --apply`).
 
 ## Commit style

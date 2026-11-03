@@ -1387,11 +1387,13 @@ cmd_gc() { # [--yes] -> remove worktrees/branches/state for merged & closed PRs 
       local verr
       if verr="$(gh pr view "$pr" --repo "$(repo)" --json number 2>&1 >/dev/null)"; then continue; fi
       gh_err_not_pr "$verr" || { echo "#$pr: couldn't verify — skipping"; continue; }
-      [ -d "$STATE_DIR/locks/$pr" ] && { echo "#$pr: busy, skipping"; continue; }
       planned=1
       echo "#$pr (not a pull request):"
       echo "  forget session/state"
-      [ -n "$yes" ] && forget_pr "$pr"
+      if [ -n "$yes" ]; then
+        rmdir "$STATE_DIR/locks/$pr" 2>/dev/null || true   # orphaned — no live run can hold a lock on a non-PR number
+        forget_pr "$pr"
+      fi
       continue
     fi
     [ "$state" = "MERGED" ] || [ "$state" = "CLOSED" ] || continue
