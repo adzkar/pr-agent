@@ -514,6 +514,8 @@ handle_review_failure() { # pr all_file mode(watch|manual|dry) has_other(0|1) ->
   fi
 }
 
+# --- formatting ---------------------------------------------------------------------
+
 format_feedback() { # jsonl on stdin -> markdown for the agent prompt
   jq -r -s --arg me "$(me)" '.[] |
     "---\n" +
