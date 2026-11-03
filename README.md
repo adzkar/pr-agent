@@ -25,7 +25,7 @@ install -m 755 pr-agent /usr/local/bin/pr-agent
 
 ```sh
 cd your-repo
-pr-agent on            # watch all open non-draft PRs, poll every 2m
+pr-agent on            # watch your open non-draft PRs, poll every 2m
 pr-agent status -w     # live dashboard, Ctrl-C to exit
 ```
 
@@ -37,7 +37,7 @@ shows where every PR stands.
 
 | Command | What it does |
 | --- | --- |
-| `pr-agent on [--launchd] [all \| N...]` | Start watching (default: all open non-draft PRs — restrict by author with `PR_AGENT_PR_AUTHOR`). `--launchd` runs under launchd so the watcher survives reboots/crashes. |
+| `pr-agent on [--launchd] [all \| N...]` | Start watching (default: your open non-draft PRs — `PR_AGENT_PR_AUTHOR` sets which authors, `@all` = everyone). `--launchd` runs under launchd so the watcher survives reboots/crashes. |
 | `pr-agent off [--now]` | Stop the watcher (`--now` also kills running agents) |
 | `pr-agent status [-w [SECS]]` | Dashboard (`-w`: live refresh, default 5s) |
 | `pr-agent logs [N] [-f]` | Event log, or PR N's latest agent transcript (`-f` follow) |
@@ -64,7 +64,7 @@ it live on the terminal's alt screen.
 
 ```
 pr-agent v0.1.0  ● watching (pid 10391)   owner/repo
-watching all open PRs · every 2m · mode dangerous · conflicts · 2 parallel · max 10 rounds · reacts to humans + review-bot[bot] · next poll in 34s
+watching open PRs by @me · every 2m · mode dangerous · conflicts · 2 parallel · max 10 rounds · reacts to humans + review-bot[bot] · next poll in 34s
 
 ┌───────┬────────────┬────────────────┬────────────────────────┬────────┬──────────┐
 │ PR    │ TITLE      │ REVIEW         │ AGENT STATE            │ ROUNDS │ LAST RUN │
@@ -124,7 +124,7 @@ Env vars always win over the per-repo config saved by `pr-agent on`
 | `PR_AGENT_MODE` | `dangerous` | `devin --permission-mode` |
 | `PR_AGENT_SANDBOX` | `0` | Pass `--sandbox` to devin |
 | `PR_AGENT_AUTHOR` | anyone but you | Comma list; only react to these logins |
-| `PR_AGENT_PR_AUTHOR` | all authors | Comma list; in `all` mode only watch PRs by these authors (`@me` = your login). Explicit targets (`on N…`) are unaffected |
+| `PR_AGENT_PR_AUTHOR` | `@me` | Comma list; in `all` mode only watch PRs by these authors (`@me` = your login, `@all` = everyone). Explicit targets (`on N…`) are unaffected |
 | `PR_AGENT_BOTS` | — | Comma list of `[bot]` logins to react to (e.g. your review bot) |
 | `PR_AGENT_TRIGGER` | `/agent` | Prefix that turns your own comment into feedback |
 | `PR_AGENT_MAX_FAILS` | `3` | Consecutive failed runs before giving up |
@@ -175,4 +175,8 @@ PR_AGENT_TABLE_ROWS=10 pr-agent on
 
 The whole tool is one bash script — see [AGENTS.md](AGENTS.md) for
 edit/verify/install rules and [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for
-the code map and execution flows.
+the code map and execution flows. Maintainers cut releases with
+`./release [patch|minor|major|X.Y.Z]`, which bumps `VERSION`, tags `vX.Y.Z`,
+and publishes a GitHub release with the script + checksum assets. It's
+resumable after an interrupted run, and `./release X.Y.Z` mints the
+checked-in `VERSION` if it was never released.

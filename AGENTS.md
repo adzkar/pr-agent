@@ -12,6 +12,8 @@
 | `pr-agent` | The entire tool — a self-contained bash script, no build step |
 | `README.md` | User docs: install, commands, dashboard, config |
 | `docs/ARCHITECTURE.md` | Code structure map, state files, execution flows |
+| `release` | Maintainer script — cuts versioned GitHub releases (`./release [patch|minor|major|X.Y.Z]`) |
+| `tests/` | `release.sh` — scratch-repo + stubbed-`gh` harness for `release` |
 | `test/smoke.sh` | Scratch-repo smoke for the worktree-blocked lifecycle (local git only) |
 | `AGENTS.md` | This file |
 
@@ -27,14 +29,25 @@ install -m 755 pr-agent /usr/local/bin/pr-agent
 `/usr/local/bin/pr-agent` is a copy, not a symlink — **never edit it in place**,
 or changes diverge silently. If it already drifted, diff before overwriting.
 
+Releases are cut with `./release [patch|minor|major|X.Y.Z]` from a clean
+`main`: it bumps the `VERSION=` line, commits, tags `vX.Y.Z`, pushes, and
+publishes a GitHub release with `pr-agent` + `pr-agent.sha256` assets — the
+artifacts `pr-agent update` downloads. Interrupted runs resume — the tag
+is (re)anchored at `HEAD` and assets (re)uploaded — and `./release X.Y.Z`
+mints the checked-in `VERSION` if it was never released.
+
 ## Verify before committing
 
-There is no test suite. Minimum checks:
+Two scratch-repo harnesses cover what CI doesn't: `test/smoke.sh` exercises
+the worktree-blocked lifecycle on local git alone; `tests/release.sh` drives
+the `release` state machine end-to-end with a stubbed `gh`. Minimum checks:
 
 ```sh
 bash -n pr-agent                       # syntax
-shellcheck pr-agent 2>/dev/null || true # lint if available
+bash -n release                        # syntax
+shellcheck pr-agent release 2>/dev/null || true # lint if available
 test/smoke.sh                          # worktree-blocked lifecycle in a scratch repo (no gh)
+./tests/release.sh                     # release scenarios (run when `release` changes)
 cd /path/to/a/watched/repo             # then run READ-ONLY commands only:
 pr-agent status                        #   dashboard (renders table + activity)
 pr-agent status -w 1 & sleep 4; kill %1  #   watch-mode frame
@@ -122,6 +135,10 @@ them as a smoke test unless that's the intent.
   different mechanisms** — the first caps rows inside the table, the second is
   the last-resort bottom clip for wrapped lines and `TABLE_ROWS` overflow.
   Keep both.
+- **Watch-scope text goes through `scope_label`.** Any message that says
+  what's being watched (`cmd_on` confirm, the status header, the `add`/`rm`
+  dies) must use it — printing raw `PR_AUTHOR_FILTER` leaks the `@all`
+  meta-token as a pseudo-author, and a blank filter means everyone.
 
 ## Commit style
 
