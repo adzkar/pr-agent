@@ -1403,9 +1403,13 @@ cmd_update() { # [--check] [--force] [X.Y.Z] -> download a release and install i
     echo "already on $VERSION — nothing to do (--force to reinstall)"; return 0
   fi
 
-  local dir; dir="$(dirname "$SELF")"
+  local dir self l; self="$SELF"
+  while [ -L "$self" ]; do   # installed via symlink: swap the real target, keep the link
+    l="$(readlink "$self")"; case "$l" in /*) self="$l" ;; *) self="$(dirname "$self")/$l" ;; esac
+  done
+  dir="$(dirname "$self")"
   if [ "$force" = "0" ] && git -C "$dir" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-    die "$SELF is inside a git worktree — refusing to overwrite it (--force to override)"
+    die "$self is inside a git worktree — refusing to overwrite it (--force to override)"
   fi
   [ -w "$dir" ] || die "$dir not writable — retry with: sudo pr-agent update $tag"
 
@@ -1419,11 +1423,11 @@ cmd_update() { # [--check] [--force] [X.Y.Z] -> download a release and install i
 
   install -m 755 "$UPDATE_TMP/pr-agent" "$UPDATE_STAGED" 2>/dev/null \
     || die "couldn't stage the new script in $dir"
-  mv -f "$UPDATE_STAGED" "$SELF" 2>/dev/null || die "couldn't install over $SELF"
+  mv -f "$UPDATE_STAGED" "$self" 2>/dev/null || die "couldn't install over $self"
   rm -rf "$UPDATE_TMP"; trap - EXIT
 
-  if ver_gt "$latest" "$VERSION"; then echo "updated $VERSION → $latest at $SELF"
-  else echo "installed $tag at $SELF (was $VERSION)"; fi
+  if ver_gt "$latest" "$VERSION"; then echo "updated $VERSION → $latest at $self"
+  else echo "installed $tag at $self (was $VERSION)"; fi
   local pf pid
   for pf in "$STATE_ROOT"/repos/*/pid; do
     [ -f "$pf" ] || continue
