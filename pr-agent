@@ -248,15 +248,25 @@ map_num() { local v; v="$(map_get "$1" "$2")"; echo "${v:-0}"; }
 # --- PR list (one gh call per cycle, shared with status) --------------------------------
 # prs.jsonl: one compact object per PR: number title state draft review updated head base
 #            mergeable ci (pass|fail|pending|none) ci_failed [{name,url}]
+#            review = reviewDecision; when empty (base has no required reviewers —
+#            GitHub only computes it for protected branches) falls back to the
+#            latest non-author review state: CHANGES_REQUESTED > APPROVED > none
 # prs_extra.jsonl: same shape, for map/target PRs that aged out of the list's --limit
 #            window — backfilled once each by backfill_prs so status keeps title/state.
 #            Read by pr_info only; targets/pr_sig must NOT see it (stale state).
 
-PR_JSON_FIELDS='number,title,state,isDraft,reviewDecision,updatedAt,headRefName,headRefOid,baseRefName,mergeable,statusCheckRollup,body,isCrossRepository,author'
+PR_JSON_FIELDS='number,title,state,isDraft,reviewDecision,latestReviews,updatedAt,headRefName,headRefOid,baseRefName,mergeable,statusCheckRollup,body,isCrossRepository,author'
 PR_JQ='([.statusCheckRollup[]? | {name: (.name // .context), url: (.detailsUrl // .targetUrl // ""),
            bad: ((.conclusion // .state // "") | test("FAILURE|TIMED_OUT|CANCELLED|ACTION_REQUIRED|ERROR")),
            wait: ((.status // .state // "") | test("IN_PROGRESS|QUEUED|PENDING|EXPECTED|WAITING"))}]) as $c
-       | {number, title, state, draft: .isDraft, review: (.reviewDecision // ""), updated: .updatedAt,
+       | (.author.login // "") as $al
+       | ([.latestReviews[]? | select(.author.login != $al) | .state]) as $lr
+       | {number, title, state, draft: .isDraft,
+          review: (if (.reviewDecision // "") != "" then .reviewDecision
+                   elif any($lr[]; . == "CHANGES_REQUESTED") then "CHANGES_REQUESTED"
+                   elif any($lr[]; . == "APPROVED") then "APPROVED"
+                   else "" end),
+          updated: .updatedAt,
           branch: .headRefName, head: .headRefOid, base: .baseRefName, mergeable,
           body, cross: .isCrossRepository, author: (.author.login // ""),
           ci: (if ($c|length) == 0 then "none" elif any($c[]; .wait) then "pending"

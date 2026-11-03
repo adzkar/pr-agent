@@ -1,7 +1,7 @@
 # pr-agent — agent rules
 
 > Read this before editing. The whole tool is **one file**: `pr-agent`
-> (~1600 lines of bash). The canonical docs are `README.md` (usage) and
+> (~1800 lines of bash). The canonical docs are `README.md` (usage) and
 > `docs/ARCHITECTURE.md` (code map + flows) — read the architecture doc
 > before touching anything past line 100.
 
@@ -98,6 +98,11 @@ them as a smoke test unless that's the intent.
   it so the status table keeps title/state, but `targets`/`pr_sig` must keep
   reading `prs.jsonl` alone — a stale OPEN entry would make a dead PR
   watchable forever, and a frozen `updated` would mask real changes.
+- **`reviewDecision` is empty without branch protection** — GitHub only
+  computes it relative to required reviewers, so an APPROVED PR on an
+  unprotected base still returns `""`. That's why `.review` falls back to
+  non-author `latestReviews` (CHANGES_REQUESTED wins, else APPROVED counts);
+  never read `reviewDecision` raw when the verdict matters.
 - **Feedback `.author` is nullable** — it's `.user.login` from the GitHub API,
   which is `null` for deleted/ghost accounts. jq string builtins (`endswith`,
   `startswith`, `test` on the value itself) abort the whole `filter_feedback`
