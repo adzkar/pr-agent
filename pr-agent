@@ -1818,6 +1818,8 @@ case "${1:-}" in
   tell)      shift; need_repo; map_init; cmd_tell "$@" ;;
   _tell)     shift; _tell "$@" ;;
   _check)    shift; need_repo; map_init; refresh_prs 0; check_pr "$1" "" "" "${2:-watch}" ;;
+  _ensure)   shift; need_repo; map_init; ensure_worktree "$@" ;;   # internal — test/smoke.sh drives these
+  _blocked)  shift; need_repo; still_blocked "$@" ;;               # internal — rc 0 blocked / 1 free / 2 indeterminate
   attach)    shift; need_repo; cmd_attach "$@" ;;
   peek)      shift; cmd_peek "$@" ;;
   mark-seen) shift; cmd_mark_seen "$@" ;;

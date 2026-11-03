@@ -12,6 +12,7 @@
 | `pr-agent` | The entire tool — a self-contained bash script, no build step |
 | `README.md` | User docs: install, commands, dashboard, config |
 | `docs/ARCHITECTURE.md` | Code structure map, state files, execution flows |
+| `test/smoke.sh` | Scratch-repo smoke for the worktree-blocked lifecycle (local git only) |
 | `AGENTS.md` | This file |
 
 ## Deploy model
@@ -33,6 +34,7 @@ There is no test suite. Minimum checks:
 ```sh
 bash -n pr-agent                       # syntax
 shellcheck pr-agent 2>/dev/null || true # lint if available
+test/smoke.sh                          # worktree-blocked lifecycle in a scratch repo (no gh)
 cd /path/to/a/watched/repo             # then run READ-ONLY commands only:
 pr-agent status                        #   dashboard (renders table + activity)
 pr-agent status -w 1 & sleep 4; kill %1  #   watch-mode frame
