@@ -288,12 +288,14 @@ PR_JQ='([.statusCheckRollup[]? | {name: (.name // .context), url: (.detailsUrl /
           ci_failed: [$c[] | select(.bad) | {name, url}]} | tojson'
 
 # jq fragment for "all"-mode author scoping (needs --arg pa $PR_AUTHOR_FILTER --arg me $(me)):
-# true when the object's .author is in the comma list — "@me" maps to your login;
-# "@all" or a blank filter means any author, missing .author (or unresolvable @me) never matches.
-PR_AUTHOR_JQ='($pa | split(",") | map(gsub("^ +| +$"; "")) | map(if . == "@me" then $me else . end)
+# true when the object's .author is in the comma list (case-insensitive) — "@me" maps to your
+# login; "@all" or a blank filter means any author, missing .author (or unresolvable @me)
+# never matches.
+PR_AUTHOR_JQ='($pa | split(",") | map(gsub("^ +| +$"; "") | ascii_downcase
+              | if . == "@me" then ($me | ascii_downcase) else . end)
               | map(select(length > 0))) as $A
              | ($pa | gsub(" "; "") | length) == 0 or ($A | index("@all")) != null
-               or ((.author // "") as $a | any($A[]; . == $a))'
+               or ((.author // "") | ascii_downcase as $a | any($A[]; . == $a))'
 
 refresh_prs() { # ttl -> refresh prs.jsonl unless younger than ttl seconds; 1 on GitHub failure
   local ttl="$1" tmp
@@ -346,7 +348,7 @@ targets() { # -> PR numbers to watch (from prs.jsonl)
 scope_label() { # -> display label for the "all"-mode watch scope ("@all"/blank = "all open PRs")
   local e
   for e in ${PR_AUTHOR_FILTER//,/ }; do
-    [ "$e" = "@all" ] && { echo "all open PRs"; return; }
+    [ "$(echo "$e" | tr '[:upper:]' '[:lower:]')" = "@all" ] && { echo "all open PRs"; return; }
   done
   if [ -n "${PR_AUTHOR_FILTER// /}" ]; then echo "open PRs by $PR_AUTHOR_FILTER"; else echo "all open PRs"; fi
 }
@@ -400,22 +402,24 @@ filter_feedback() { # pr all_file -> new, actionable items (jsonl, oldest first)
   jq -c -s --arg me "$(me)" --arg only "$AUTHOR_FILTER" --arg bots "$BOTS" --arg skip "$SKIP_RE" \
       --arg retry_re "$RETRY_RE" --arg status_re "$BOT_STATUS_RE" --arg trig "$TRIGGER" --rawfile seen "$seen" '
     ($seen | split("\n") | map(select(length > 0) | {(.): true}) | add // {}) as $S
-    | ($only | split(",") | map(gsub("^ +| +$"; "")) | map(select(length > 0))) as $O
-    | ($bots | split(",") | map(gsub("^ +| +$"; ""))) as $B
+    | ($only | split(",") | map(gsub("^ +| +$"; "") | ascii_downcase) | map(select(length > 0))) as $O
+    | ($bots | split(",") | map(gsub("^ +| +$"; "") | ascii_downcase) | map(select(length > 0))) as $B
     | map(select(
-        ($S[.key] | not)
+        ((.author // "") | ascii_downcase) as $a
+        | ($S[.key] | not)
         and ($skip == "" or ((.body // "") | test($skip) | not))
-        and ($retry_re == "" or ((.author as $a | $B | map(. == $a) | any)
-                                 and ((.body // "") | test($retry_re))) | not)
+        and ($retry_re == "" or ((($B | map(. == $a) | any)
+                                 and ((.body // "") | test($retry_re))) | not))
         and ($status_re == "" or (.kind != "comment")
-                                 or ((.author as $a | (($a // "") | endswith("[bot]")) or ($B | map(. == $a) | any)) | not)
+                                 or ((($a | endswith("[bot]")) or ($B | map(. == $a) | any)) | not)
                                  or ((.body // "") | test($status_re; "i") | not))
         and (.synthetic == true
-             or (.author == $me and $trig != "" and ((.body // "") | ltrimstr(" ") | startswith($trig)))
-             or (.author != $me and (.author as $a |
-                   if ($O | length) > 0 then ($O | map(. == $a) | any)
-                   elif (($a // "") | endswith("[bot]")) then ($B | map(. == $a) | any)
-                   else true end)))))
+             or ($a != "" and $a == ($me | ascii_downcase)
+                 and $trig != "" and ((.body // "") | ltrimstr(" ") | startswith($trig)))
+             or (($a == "" or $a != ($me | ascii_downcase))
+                 and (if ($O | length) > 0 then ($O | map(. == $a) | any)
+                      elif ($a | endswith("[bot]")) then ($B | map(. == $a) | any)
+                      else true end)))))
     | sort_by(.ts) | .[]' "$2"
 }
 
@@ -446,9 +450,9 @@ review_failure_plan() { # pr all_file -> {key,url,updated,reviewer,stale[],reaso
   local seen="$STATE_DIR/seen/$1"; [ -f "$seen" ] || seen=/dev/null
   jq -c -s --arg me "$(me)" --arg bots "$BOTS" --arg re "$RETRY_RE" --rawfile seen "$seen" '
     ($seen | split("\n") | map(select(length > 0) | {(.): true}) | add // {}) as $S
-    | ($bots | split(",") | map(gsub("^ +| +$"; ""))) as $B
+    | ($bots | split(",") | map(gsub("^ +| +$"; "") | ascii_downcase) | map(select(length > 0))) as $B
     | . as $all
-    | [ $all[] | select(.kind == "comment" and (.author as $a | $B | map(. == $a) | any)
+    | [ $all[] | select(.kind == "comment" and (((.author // "") | ascii_downcase) as $a | $B | map(. == $a) | any)
                         and ((.body // "") | test($re))) ] as $F
     | if ($F | length) == 0 then empty else
         ($F | max_by(.updated // .ts)) as $L
@@ -458,9 +462,11 @@ review_failure_plan() { # pr all_file -> {key,url,updated,reviewer,stale[],reaso
             stale: [ $F[] | select(.key != $L.key and ($S[.key] | not)) | .key ],
             reason: (
               if $S[$L.key] then "seen"
-              elif any($all[]; .author == $L.author and .key != $L.key and .ts > $t
+              elif any($all[]; (((.author // "") | ascii_downcase) == (($L.author // "") | ascii_downcase))
+                       and .key != $L.key and .ts > $t
                        and (.kind != "comment" or ((.body // "") | test($re) | not))) then "bot-active"
-              elif any($all[]; .author == $me and .kind == "comment" and .ts > $t
+              elif any($all[]; (((.author // "") | ascii_downcase) as $a | $a != "" and $a == ($me | ascii_downcase))
+                       and .kind == "comment" and .ts > $t
                        and ((.body // "") | contains("@" + $who))) then "already-pinged"
               else "" end) }
       end' "$2"
@@ -470,8 +476,8 @@ retry_reset_if_reviewed() { # pr all_file -> clear retry state when the bot prod
   [ "$(map_num "$1" retry_count)" -gt 0 ] || return 0
   local last; last="$(map_get "$1" retry_last_ping_ts)"; last="${last:-0000-00-00T00:00:00Z}"
   if jq -e -s --arg bots "$BOTS" --arg last "$last" '
-       ($bots | split(",") | map(gsub("^ +| +$"; ""))) as $B
-       | any(.[]; (.author as $a | $B | map(. == $a) | any)
+       ($bots | split(",") | map(gsub("^ +| +$"; "") | ascii_downcase) | map(select(length > 0))) as $B
+       | any(.[]; (((.author // "") | ascii_downcase) as $a | $B | map(. == $a) | any)
              and (.kind == "review" or .kind == "line") and .ts > $last)' "$2" >/dev/null; then
     map_set "$1" retry_count 0; map_del "$1" retry_gave_up
     log "PR #$1: bot reviewed again — retry counter reset"
@@ -558,7 +564,8 @@ format_feedback() { # jsonl on stdin -> markdown for the agent prompt
      elif .kind == "review"   then "### Review (\(.state)) by @\(.author)\n\(.url)\n\n"
      elif .kind == "ci"       then "### Failing CI checks\n\n"
      elif .kind == "conflict" then "### Merge conflict\n\n"
-     elif .author == $me      then "### Instruction from the PR owner (@\(.author))\n\(.url)\n\n"
+     elif .author != null and (.author | ascii_downcase) == ($me | ascii_downcase)
+           then "### Instruction from the PR owner (@\(.author))\n\(.url)\n\n"
      else "### PR comment by @\(.author)\n\(.url)\n\n" end)
     + (.body // "") + "\n"'
 }
