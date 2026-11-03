@@ -1,6 +1,6 @@
 # Architecture
 
-`pr-agent` is a single bash script (~1600 lines). It polls GitHub for new PR
+`pr-agent` is a single bash script (~1800 lines). It polls GitHub for new PR
 feedback and hands each round to a **persistent Devin CLI session per PR**
 running inside that PR's dedicated git worktree — so the agent keeps context
 across review rounds and never touches your checkout.
@@ -14,22 +14,23 @@ Sections are delimited by `# --- name ---` banners, in file order:
 
 | Section | Approx. lines | Contents |
 | --- | --- | --- |
-| header + bootstrap | 1–94 | Usage doc comment, `set -euo pipefail`, `die`, `STATE_ROOT` (`~/.local/state/pr-agent`), `VERSION` |
-| per-repo state | 95–133 | repo-slug resolution (`slug_of`/`git_repo_name`/`resolve_repo_slug` → `repos/<owner>__<repo>`), `migrate_legacy_state`, `STATE_DIR` + `*_FILE` paths |
-| settings | 134–185 | `CFG_*` saved config → `PR_AGENT_*` env → default precedence; `save_config`, `log`, `notify` (osascript) |
-| repo context | 186–208 | `repo`/`repo_dir`/`me` accessors, `detect_repo` (writes repo, repo_dir, me, base into state) |
-| map | 209–237 | `map.json` accessors (`map_get/set/del/rm/num`) behind `with_map_lock` (mkdir lock, ~10 s stale break) |
-| PR list | 238–319 | `refresh_prs` — one `gh pr list` call → `prs.jsonl` cache (number, title, state, draft, review, updated, branch, head, base, mergeable, ci, ci_failed, body, cross, author); `backfill_prs` — one `gh pr view` per tracked PR missing from both caches → `prs_extra.jsonl` (once each ever); `pr_info` (list first, extras fallback), `targets` ("all" mode scoped by `PR_AUTHOR_FILTER` via `PR_AUTHOR_JQ`), `scope_label` (that scope as display text) |
-| feedback collection | 320–392 | `fetch_feedback` (3 `gh api` endpoints + `synthetic_feedback`), `seed_seen`, `filter_feedback` (seen/author/bot/skip rules), `pending_feedback` |
-| failed review runs | 393–526 | `handle_review_failure` + helpers — pings the review bot (`RETRY_MSG`) on `Review failed:` notices, `RETRY_MAX` cap, `retry_cutoff` keeps pre-existing failures manual-only; `format_feedback` (jsonl → markdown prompt sections) at the tail |
-| worktree | 527–590 | `ensure_worktree` (`<repo>-pr-<N>` next to the main checkout), `setup_worktree` (copies `.env*`/`config.local.json`, reuses `node_modules` when manifests match else `bun install --frozen-lockfile`, husky prepare), `sync_worktree` |
-| main-sync | 591–836 | Post-merge catch-up: `sync_scan` → `check_sync` merges base into PR branch **via the PR's agent session**, then `verify_synced` + `apply_unblock` (dep-gated draft unbanner/ready, `sync_unblock` state machine) |
-| agent | 837–934 | `build_prompt`, `devin_flags`, `session_ids`/`new_session_id` (diff `devin list` before/after), `run_agent` (resume `devin -r` else start new) |
-| per-PR check | 935–1003 | `check_pr` — the per-PR round; `skip_reason` |
-| watcher | 1004–1147 | `watch_loop` (re-cd's to `repo_dir` each cycle), `is_running`, `pr_sig`, `cmd_on`/`cmd_off`, launchd plist install |
-| manual commands | 1148–1323 | `run`, `tell`/`_tell`, `attach`, `retry`, `peek`, `mark-seen`, `gc`, `sync`, `config`, `logs` |
-| status rendering | 1324–1713 | `fmt_*`, `draw_*`, `status_prs`, `review_cell`/`state_cell` (side effects: `H_*` hint buckets), `recent_events`, `render_hint`, `render_status` (row-budgeted table), `cmd_status` (alt-screen watch loop + fallback clip) |
-| dispatch | 1714–end | `case "$1"` router (`usage` sits just above the banner) — inline cases: `add`/`rm`, `pause`/`resume`, `reset`, `reset-rounds`, `map`, `version`, `help`; `_loop`/`_check`/`_tell` are internal entries |
+| header + bootstrap | 1–103 | Usage doc comment, `set -euo pipefail`, `VERSION`, `STATE_ROOT`, `DEVIN_BIN`, `SELF`, `die` |
+| per-repo state | 104–142 | repo-slug resolution (`slug_of`/`git_repo_name`/`resolve_repo_slug` → `repos/<owner>__<repo>`), `migrate_legacy_state`, `STATE_DIR` + `*_FILE` paths |
+| settings | 143–195 | `CFG_*` saved config → `PR_AGENT_*` env → default precedence; `save_config`, `log`, `notify` (osascript) |
+| repo context | 196–218 | `repo`/`repo_dir`/`me` accessors, `detect_repo` (writes repo, repo_dir, me, base into state) |
+| map | 219–247 | `map.json` accessors (`map_get/set/del/rm/num`) behind `with_map_lock` (mkdir lock, ~10 s stale break) |
+| PR list | 248–329 | `refresh_prs` — one `gh pr list` call → `prs.jsonl` cache (number, title, state, draft, review, updated, branch, head, base, mergeable, ci, ci_failed, body, cross, author); `backfill_prs` — one `gh pr view` per tracked PR missing from both caches → `prs_extra.jsonl` (once each ever); `pr_info` (list first, extras fallback), `targets` ("all" mode scoped by `PR_AUTHOR_FILTER` via `PR_AUTHOR_JQ`), `scope_label` (that scope as display text) |
+| feedback collection | 330–405 | `fetch_feedback` (3 `gh api` endpoints + `synthetic_feedback`), `seed_seen`, `filter_feedback` (seen/author/bot/skip rules), `pending_feedback` |
+| failed review runs | 406–525 | `handle_review_failure` + helpers — pings the review bot (`RETRY_MSG`) on `Review failed:` notices, `RETRY_MAX` cap, `retry_cutoff` keeps pre-existing failures manual-only |
+| formatting | 526–541 | `format_feedback` — jsonl → markdown prompt sections |
+| worktree | 542–632 | `ensure_worktree` (`<repo>-pr-<N>` next to the main checkout), `worktree_holding`/`still_blocked` (local-only `git worktree list` probes — `still_blocked` rc: 0 blocked / 1 confirmed free / 2 indeterminate), `setup_worktree` (copies `.env*`/`config.local.json`, reuses `node_modules` when manifests match else `bun install --frozen-lockfile`, husky prepare), `sync_worktree` |
+| main-sync | 633–889 | Post-merge catch-up: `sync_scan` → `check_sync` merges base into PR branch **via the PR's agent session**, then `verify_synced` + `apply_unblock` (dep-gated draft unbanner/ready, `sync_unblock` state machine); rc 4 defers like a busy session — no `sync_fails`; `sync_scan watch` skips `worktree_blocked` PRs outright |
+| agent | 890–991 | `build_prompt`, `devin_flags`, `session_ids`/`new_session_id` (diff `devin list` before/after), `run_agent` (resume `devin -r` else start new; `ensure_worktree` rc 4 → `worktree_blocked`) |
+| per-PR check | 992–1067 | `check_pr` — the per-PR round; `skip_reason` |
+| watcher | 1068–1221 | `watch_loop` (cd `repo_dir` per cycle; re-probes `worktree_blocked` PRs via `still_blocked`), `is_running`, `pr_sig`, `cmd_on`/`cmd_off`, launchd plist install |
+| manual commands | 1222–1401 | `run`, `tell`/`_tell`, `attach`, `retry`, `peek`, `mark-seen`, `gc`, `sync`, `config`, `logs` |
+| status rendering | 1402–1810 | `fmt_*`, `draw_*`, `status_prs`, `refresh_status_pending`, `refresh_blocked_flags` (lazy `still_blocked` re-probe — clears a freed flag even with the watcher off), `review_cell`/`state_cell` (side effects: `H_*` hint buckets), `recent_events`, `render_hint`, `render_status` (row-budgeted table), `cmd_status` (alt-screen watch loop + fallback clip) |
+| dispatch | 1811–end | `case "$1"` router (`usage` sits just above the banner) — inline cases: `add`/`rm`, `pause`/`resume`, `reset`, `reset-rounds`, `map`, `version`, `help`; `_loop`/`_check`/`_tell`/`_ensure`/`_blocked` are internal entries |
 
 ## On-disk state
 
@@ -61,7 +62,8 @@ Sections are delimited by `# --- name ---` banners, in file order:
 
 `map.json` → `{prs: {<pr>: {session_id, worktree, branch, rounds, fail_count,
 gave_up, sig, last_seen_ts, last_head_sha, last_run_at, paused, skip_logged,
-sync_*, retry_*}}}` — all values strings; `map_num` coerces empty → 0.
+worktree_blocked, blocked_logged, sync_*, retry_*}}}` — all values strings;
+`map_num` coerces empty → 0.
 
 Feedback items are jsonl `{key, ts, kind, author, body, url, …}` with
 `kind ∈ review|line|comment|ci|conflict`. `key` embeds id + body-length or
@@ -81,6 +83,9 @@ same script.
 ```
 refresh_prs 0                      # one gh pr list; failure → gh_error + warn once
 for pr in $(targets):              # all open non-draft PRs (PR_AUTHOR_FILTER scope), or explicit list
+    worktree_blocked → still_blocked (local `git worktree list` probe, no gh
+        calls): blocked or indeterminate (repo unreadable) → skip, flag kept;
+        confirmed free → clear flag + sig → fall through
     skip_reason → paused / round limit / approved / merged|closed
     pr_sig unchanged && cycle % 10 != 0 → skip   # cheap dedupe vs full fetch
     while jobs -rp >= CONCURRENCY: sleep 2       # cap parallel rounds
@@ -104,6 +109,12 @@ build_prompt → run_agent
   rc 1 → fail_count++; at MAX_FAILS: keys → seen (stop retrying), gave_up=1,
          escalates with a PR comment + notification
   rc 2/3 → session busy / stopped by user: feedback stays pending
+  rc 4 → worktree blocked (PR branch checked out in the main checkout):
+         not an agent failure — no fail_count/escalation; status shows
+         "worktree blocked" and notifies once per block. Freeing the branch
+         is local — invisible to pr_sig — so the watcher re-probes each poll
+         and runs the round the poll it frees. run_agent clears the flag on
+         any non-4 prep outcome; check_sync defers rc 4 like a busy session
 ```
 
 ### Agent run (`run_agent`)

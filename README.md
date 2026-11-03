@@ -86,7 +86,8 @@ recent activity  (full log: pr-agent logs · agent transcript: pr-agent logs N)
   runs). PRs that aged out of the live list keep their title/state from a
   side cache (`prs_extra.jsonl`).
 - **AGENT STATE** is the live verdict per PR: working, new items pending,
-  failed/retrying, paused, hit the round limit, gave up, waiting for review,
+  failed/retrying, worktree blocked (the PR branch is checked out in the main
+  checkout), paused, hit the round limit, gave up, waiting for review,
   all feedback handled, or done.
 - When the table is taller than the terminal, rows are dropped from the bottom
   (merged/closed history first) and collapsed into a `… N more` row, so the

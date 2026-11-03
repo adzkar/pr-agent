@@ -14,6 +14,7 @@
 | `docs/ARCHITECTURE.md` | Code structure map, state files, execution flows |
 | `release` | Maintainer script — cuts versioned GitHub releases (`./release [patch|minor|major|X.Y.Z]`) |
 | `tests/` | `release.sh` — scratch-repo + stubbed-`gh` harness for `release` |
+| `tests/smoke.sh` | Scratch-repo smoke for the worktree-blocked lifecycle (local git only) |
 | `AGENTS.md` | This file |
 
 ## Deploy model
@@ -37,13 +38,15 @@ mints the checked-in `VERSION` if it was never released.
 
 ## Verify before committing
 
-`tests/release.sh` is the only test suite — a scratch-repo + stubbed-`gh`
-harness covering the `release` state machine end-to-end. Minimum checks:
+Two scratch-repo harnesses cover what CI doesn't: `tests/smoke.sh` exercises
+the worktree-blocked lifecycle on local git alone; `tests/release.sh` drives
+the `release` state machine end-to-end with a stubbed `gh`. Minimum checks:
 
 ```sh
 bash -n pr-agent                       # syntax
 bash -n release                        # syntax
 shellcheck pr-agent release 2>/dev/null || true # lint if available
+tests/smoke.sh                         # worktree-blocked lifecycle in a scratch repo (no gh)
 ./tests/release.sh                     # release scenarios (run when `release` changes)
 cd /path/to/a/watched/repo             # then run READ-ONLY commands only:
 pr-agent status                        #   dashboard (renders table + activity)
@@ -83,6 +86,11 @@ them as a smoke test unless that's the intent.
 - **`state_cell`/`review_cell` have side effects** — they populate the `H_*`
   hint buckets that drive the bottom "what now" line. If you skip drawing a
   table row you must still call them, or the hint lies.
+- **`state_cell` precedence is deliberate** — working/interrupted →
+  merged/closed → `worktree_blocked` → `sync_blocked`/`sync_pending` →
+  `skip_reason` (paused/round-limit/approved) → pending items → idle. The
+  sync cells must stay above `skip_reason`: `sync_blocked` is a sticky
+  "needs you" state for approved/paused PRs the watcher itself skips.
 - **`render_status` row budget.** `status -w` passes terminal rows so the table
   caps itself; fixed chrome is `11 + the activity block` (`ACTIVITY_LINES>0`
   adds header + N + blank, i.e. N+2) `+ gh_error` lines. If you add/remove any
@@ -106,6 +114,21 @@ them as a smoke test unless that's the intent.
   clause in `filter_feedback`).
 - **`seen/<pr>` keys are content-derived** (`id:body-len` / `id:updated_at`) —
   an *edited* review or comment re-triggers. Don't switch to plain ids.
+- **`worktree_blocked` is a last-known flag, refreshed locally.** `run_agent`
+  sets it on `ensure_worktree` rc 4 and clears it on *any* other prep outcome
+  (success or failure) so a stale flag can't mask real state. Freeing the
+  branch is a local act `pr_sig` can't see, so `watch_loop` re-probes blocked
+  PRs each poll via `still_blocked` (`git worktree list`, prunable stale
+  registrations skipped — keep it gh-free) *before* `skip_reason`, so a
+  paused/limited/approved PR's flag can't go stale — and clears `sig` to
+  force the round on the poll the probe reports free. `still_blocked` has a
+  three-way rc: 0 still blocked, 1 confirmed free, **2 indeterminate** (empty
+  `repo_dir`/`branch`, moved/broken repo, `worktree list` failed) — callers
+  keep flag + sig and skip on rc 2, because forcing a round on a repo we
+  can't read would burn `fail_count`, the exact escalation class rc 4 exists
+  to avoid. `render_status` also re-probes flagged PRs (`refresh_blocked_flags`)
+  so the flag un-stales when the watcher is off, and `sync_scan watch` skips
+  flagged PRs since a blocked `check_sync` only defers anyway.
 - **Feedback `key` ≠ seen marker ≠ skip state.** Marking a key seen only stops
   *that* item; the PR may still have pending items.
 - **The `… N more` table row and the fallback `… N more lines` clip are
