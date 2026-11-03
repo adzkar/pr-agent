@@ -13,7 +13,7 @@
 | `README.md` | User docs: install, commands, dashboard, config |
 | `docs/ARCHITECTURE.md` | Code structure map, state files, execution flows |
 | `release` | Maintainer script — cuts versioned GitHub releases (`./release [patch|minor|major|X.Y.Z]`) |
-| `tests/` | `release.sh` — scratch-repo + stubbed-`gh` harness for `release`; `update-check.sh` — extracted-function harness for `maybe_update_check`/`pending_update_version` |
+| `tests/` | `release.sh` — scratch-repo + stubbed-`gh` harness for `release` and `update`; `update-check.sh` — extracted-function harness for `maybe_update_check`/`pending_update_version` |
 | `AGENTS.md` | This file |
 
 ## Deploy model
@@ -38,15 +38,15 @@ mints the checked-in `VERSION` if it was never released.
 ## Verify before committing
 
 `tests/release.sh` is a scratch-repo + stubbed-`gh` harness covering the
-`release` state machine end-to-end; `tests/update-check.sh` extracts the
-update-check functions from `pr-agent` and exercises the stamp/throttle edge
-cases. Minimum checks:
+`release` state machine and `cmd_update` end-to-end; `tests/update-check.sh`
+extracts the update-check functions from `pr-agent` and exercises the
+stamp/throttle edge cases. Minimum checks:
 
 ```sh
 bash -n pr-agent                       # syntax
 bash -n release                        # syntax
 shellcheck pr-agent release 2>/dev/null || true # lint if available
-./tests/release.sh                     # release scenarios (run when `release` changes)
+./tests/release.sh                     # release + update scenarios (run when `release` or `cmd_update` changes)
 ./tests/update-check.sh                # update-check edge cases (run when the check changes)
 cd /path/to/a/watched/repo             # then run READ-ONLY commands only:
 pr-agent status                        #   dashboard (renders table + activity)
@@ -120,6 +120,10 @@ the intent.
   what's being watched (`cmd_on` confirm, the status header, the `add`/`rm`
   dies) must use it — printing raw `PR_AUTHOR_FILTER` leaks the `@all`
   meta-token as a pseudo-author, and a blank filter means everyone.
+- **EXIT traps can't see function `local`s under `set -u`** — they fire after
+  the call stack unwinds, so cleanup vars a trap touches must be globals
+  (`UPDATE_TMP`/`UPDATE_STAGED` in `cmd_update`). Signal traps (INT/TERM)
+  fire inside the function and *do* see locals.
 - **A feature toggle must gate the read side, not just the writer.**
   `UPDATE_CHECK` originally only stopped `maybe_update_check` from refreshing
   `latest_release`, so a recorded pending update kept nagging forever. Gate
