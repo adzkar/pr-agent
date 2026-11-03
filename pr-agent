@@ -1230,7 +1230,9 @@ Run \`git status\` and \`git fetch origin\` first and re-read files before editi
 EOF
   nohup "$SELF" _tell "$pr" "$pf" >/dev/null 2>>"$LOG_FILE" &
   echo "sent to PR #$pr's agent (pid $!) — follow with: pr-agent logs $pr -f"
-  [ "$(map_get "$pr" worktree_blocked)" = "1" ] && echo "note: the worktree is marked blocked — if the branch is still in the main checkout the instruction won't be delivered (watch.log will say so)"
+  if [ "$(map_get "$pr" worktree_blocked)" = "1" ]; then
+    echo "note: the worktree is marked blocked — if the branch is still in the main checkout the instruction won't be delivered (watch.log will say so)"
+  fi
 }
 
 _tell() { # N prompt_file (internal, background)
