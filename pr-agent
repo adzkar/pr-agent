@@ -84,6 +84,9 @@
 #                         (default 6, 0 = hide — frees rows for the table)
 #   PR_AGENT_TITLE_W      Title column width in the status table (default 0 =
 #                         auto-fit the terminal, up to 100 chars)
+#   PR_AGENT_UPDATE_CHECK 1 = check for newer releases in the background; the notice
+#                             lands on a later run (default 1, 0 = fully off)
+#   PR_AGENT_UPDATE_CHECK_EVERY  Seconds between release checks (default 86400)
 #   PR_AGENT_REPO         owner/name to act on when not inside the repo
 #   PR_AGENT_STATE_DIR    State root (default ~/.local/state/pr-agent)
 #   DEVIN_BIN             Devin CLI binary (default devin)
@@ -176,9 +179,12 @@ ACTIVITY_LINES="${PR_AGENT_ACTIVITY_LINES:-${CFG_ACTIVITY_LINES:-6}}"         # 
 [[ "$ACTIVITY_LINES" =~ ^[0-9]+$ ]] || ACTIVITY_LINES=6
 TITLE_W="${PR_AGENT_TITLE_W:-${CFG_TITLE_W:-0}}"                              # status title column width; 0 = auto-fit (≤100)
 [[ "$TITLE_W" =~ ^[0-9]+$ ]] || TITLE_W=0
+UPDATE_CHECK="${PR_AGENT_UPDATE_CHECK:-${CFG_UPDATE_CHECK:-1}}"               # 1 = check for newer releases in the background
+UPDATE_CHECK_EVERY="${PR_AGENT_UPDATE_CHECK_EVERY:-${CFG_UPDATE_CHECK_EVERY:-86400}}"  # seconds between release checks
+[[ "$UPDATE_CHECK_EVERY" =~ ^[0-9]+$ ]] || UPDATE_CHECK_EVERY=86400
 FULL_CHECK_EVERY=10   # cycles; forces a full feedback fetch even if nothing looks changed
 
-SETTINGS="INTERVAL PERM_MODE SANDBOX AUTHOR_FILTER PR_AUTHOR_FILTER BOTS TRIGGER MAX_FAILS MAX_ROUNDS STOP_ON_APPROVE CONCURRENCY CI_TRIGGER CONFLICT_TRIGGER NOTIFY RETRY RETRY_MAX RETRY_RE RETRY_MSG SKIP_RE BOT_STATUS_RE SETUP_CMD MAIN_SYNC TABLE_ROWS ACTIVITY_LINES TITLE_W"
+SETTINGS="INTERVAL PERM_MODE SANDBOX AUTHOR_FILTER PR_AUTHOR_FILTER BOTS TRIGGER MAX_FAILS MAX_ROUNDS STOP_ON_APPROVE CONCURRENCY CI_TRIGGER CONFLICT_TRIGGER NOTIFY RETRY RETRY_MAX RETRY_RE RETRY_MSG SKIP_RE BOT_STATUS_RE SETUP_CMD MAIN_SYNC TABLE_ROWS ACTIVITY_LINES TITLE_W UPDATE_CHECK UPDATE_CHECK_EVERY"
 
 save_config() {
   local k; : >"$STATE_DIR/config"
@@ -1505,6 +1511,30 @@ cmd_update() { # [--check] [--force] [X.Y.Z] -> download a release and install i
   return 0
 }
 
+# OMZ-style update check: every invocation refreshes $STATE_ROOT/latest_release in a
+# detached, throttled background job; the NEXT invocation (or status badge) notices.
+# State is global, not per-repo — $STATE_ROOT/update_check.ts (epoch) + latest_release.
+
+maybe_update_check() { # -> spawn a background release check at most every UPDATE_CHECK_EVERY secs
+  [ "$UPDATE_CHECK" = "1" ] || return 0
+  local stamp="$STATE_ROOT/update_check.ts" now last
+  now="$(date +%s)"
+  last="$(cat "$stamp" 2>/dev/null || echo 0)"; [[ "$last" =~ ^[0-9]+$ ]] || last=0
+  [ "$last" -gt "$now" ] && last=0   # a future stamp is corrupt, not "recently checked"
+  [ $(( now - last )) -lt "$UPDATE_CHECK_EVERY" ] && return 0
+  echo "$now" 2>/dev/null >"$stamp" || return 0   # stamp first — no gh stampede; an unwritable stamp can't throttle, so bail
+  ( latest="$(latest_release_tag)" && [ -n "$latest" ] \
+      && printf '%s' "$latest" >"$STATE_ROOT/.latest_release.$$" \
+      && mv -f "$STATE_ROOT/.latest_release.$$" "$STATE_ROOT/latest_release" ) >/dev/null 2>&1 </dev/null &
+}
+
+pending_update_version() { # -> release version newer than VERSION from the last check, or nothing; empty when checks are disabled
+  [ "$UPDATE_CHECK" = "1" ] || return 1
+  local v; v="$(cat "$STATE_ROOT/latest_release" 2>/dev/null || true)"; v="${v#v}"
+  { [[ "$v" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] && [ "$v" != "$VERSION" ] && ver_gt "$v" "$VERSION"; } || return 1
+  echo "$v"
+}
+
 # --- status rendering -----------------------------------------------------------------
 
 fmt_ago() { # seconds -> 45s / 3m12s / 1h05m
@@ -1790,7 +1820,9 @@ render_status() { # ttl [term-rows] -> status screen; with term-rows the PR tabl
   [ "$CONFLICT_TRIGGER" = "1" ] && extras+=" · conflicts"
   [ "$MAIN_SYNC" = "1" ] && extras+=" · main-sync"
 
-  printf '%s  %s   %s\n' "${C_BOLD}${C_BLUE}pr-agent v${VERSION}${C_RESET}" "$badge" "${C_BOLD}$(repo)${C_RESET}"
+  local upd; upd="$(pending_update_version || true)"
+  printf '%s  %s   %s%s\n' "${C_BOLD}${C_BLUE}pr-agent v${VERSION}${C_RESET}" "$badge" "${C_BOLD}$(repo)${C_RESET}" \
+    "${upd:+ ${C_YELLOW}· update v$upd${C_RESET}}"
   printf '%s%s\n' "${C_DIM}watching ${t} · every $(fmt_dur "$INTERVAL") · mode ${PERM_MODE}${extras} · ${CONCURRENCY} parallel · max ${MAX_ROUNDS} rounds · reacts to ${reacts} · ${C_RESET}" "$poll"
   local gherr=0
   if [ -f "$STATE_DIR/gh_error" ]; then
@@ -1915,6 +1947,19 @@ cmd_status() {
 usage() { sed -n '2,/^$/p' "$SELF" | sed -e '/^set /d' -e 's/^# \{0,1\}//'; exit "${1:-1}"; }
 
 # --- dispatch ---------------------------------------------------------------------------
+
+# OMZ-style release check: refresh the record in the background; the notice lands on a
+# later run. Internal/machine-readable commands skip it; the watcher logs it instead.
+maybe_update_check
+case "${1:-}" in
+  _loop)  if upd="$(pending_update_version)"; then
+            log "pr-agent v$upd released upstream — 'pr-agent update' installs it"
+          fi ;;
+  _check|_tell|map|peek|config|status|st|version|update|help|-h|--help|--version|-v) ;;
+  *)      if [ -t 1 ] && upd="$(pending_update_version)"; then
+            printf '%s\n' "${C_DIM:-}→ pr-agent v$upd available — run 'pr-agent update'${C_RESET:-}"
+          fi ;;
+esac
 
 case "${1:-}" in
   on)        shift; cmd_on "$@" ;;
