@@ -12,6 +12,7 @@
 | `pr-agent` | The entire tool — a self-contained bash script, no build step |
 | `README.md` | User docs: install, commands, dashboard, config |
 | `docs/ARCHITECTURE.md` | Code structure map, state files, execution flows |
+| `docs/RELEASING.md` | Step-by-step release guide for maintainers |
 | `release` | Maintainer script — cuts versioned GitHub releases (`./release [patch|minor|major|X.Y.Z]`) |
 | `tests/` | `release.sh` — scratch-repo + stubbed-`gh` harness for `release` and `update`; `update-check.sh` — extracted-function harness for `maybe_update_check`/`pending_update_version` |
 | `tests/smoke.sh` | Scratch-repo smoke for the worktree-blocked lifecycle (local git only) |

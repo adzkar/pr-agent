@@ -186,6 +186,7 @@ The whole tool is one bash script — see [AGENTS.md](AGENTS.md) for
 edit/verify/install rules and [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for
 the code map and execution flows. Maintainers cut releases with
 `./release [patch|minor|major|X.Y.Z]`, which bumps `VERSION`, tags `vX.Y.Z`,
-and publishes a GitHub release with the script + checksum assets. It's
+and publishes a GitHub release with the script + checksum assets — see
+[docs/RELEASING.md](docs/RELEASING.md) for the step-by-step. It's
 resumable after an interrupted run, and `./release X.Y.Z` mints the
 checked-in `VERSION` if it was never released.
