@@ -38,9 +38,10 @@ not() { case "$2" in *"$3"*) bad "$1" "unwanted '$3' in: $2" ;; *) ok "$1" ;; es
 yes() { [ -e "$2" ] && ok "$1" || bad "$1" "missing $2"; }
 no()  { [ -e "$2" ] && bad "$1" "unexpected $2" || ok "$1"; }
 
-# try SCENARIODIR SCENARIO -> O=output RC
+# try SCENARIODIR SCENARIO [UPDATE_CHECK] -> O=output RC; the toggle is always
+# set explicitly so an exported ambient value can't leak in
 try() {
-  if O="$(UPDATE_CHECK="${UPDATE_CHECK:-1}" "$T/run.sh" "$1" "$2" 2>&1)"; then RC=0; else RC=$?; fi
+  if O="$(env UPDATE_CHECK="${3:-1}" "$T/run.sh" "$1" "$2" 2>&1)"; then RC=0; else RC=$?; fi
 }
 
 sr() { mkdir -p "$T/$1"; echo "$T/$1"; }
@@ -70,7 +71,7 @@ yes "gh called" "$d/.called"
 yes "latest_release written" "$d/latest_release"
 
 echo "== S5: UPDATE_CHECK=0 -> no stamp, no spawn =="
-d="$(sr s5)"; UPDATE_CHECK=0 try "$d" check
+d="$(sr s5)"; try "$d" check 0
 has "survived" "$O" survived
 no "gh not called" "$d/.called"
 no "no stamp" "$d/update_check.ts"
@@ -85,10 +86,14 @@ chmod 644 "$d/update_check.ts"  # let the trap clean up
 
 echo "== S7: pending_update_version respects the toggle =="
 d="$(sr s7)"; printf v9.9.9 >"$d/latest_release"
-UPDATE_CHECK=1 try "$d" pending; has "enabled prints" "$O" 9.9.9
-UPDATE_CHECK=0 try "$d" pending; not "disabled silent" "$O" 9.9.9
+try "$d" pending 1; has "enabled prints" "$O" 9.9.9
+try "$d" pending 0; not "disabled silent" "$O" 9.9.9
 d="$(sr s7b)"; try "$d" pending
 case "$O" in survived) ok "absent file silent" ;; *) bad "absent file" "got: $O" ;; esac
+d="$(sr s7c)"; printf v0.1.0 >"$d/latest_release"; try "$d" pending
+eq "equal version quiet" "$O" survived
+d="$(sr s7d)"; printf v0.0.9 >"$d/latest_release"; try "$d" pending
+eq "older version quiet" "$O" survived
 
 echo "== S8: malformed latest_release -> silent, no ver_gt noise =="
 d="$(sr s8)"; printf stable >"$d/latest_release"; try "$d" pending
