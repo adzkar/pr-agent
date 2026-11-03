@@ -43,9 +43,9 @@ release_notes() {
     title="$(printf '%s\n' "$prs" | sed -n "s/^$n\t//p" | head -1)"
     [ -n "$title" ] || title="pull request #$n"
     case "$title" in
-      feat:*|feat\(*) feats+="* $title — #$n"$'\n' ;;
-      fix:*|fix\(*)   fixes+="* $title — #$n"$'\n' ;;
-      *)              others+="* $title — #$n"$'\n' ;;
+      feat:*|feat\(*|feat\!:*) feats+="* $title — #$n"$'\n' ;;
+      fix:*|fix\(*|fix\!:*)    fixes+="* $title — #$n"$'\n' ;;
+      *)                       others+="* $title — #$n"$'\n' ;;
     esac
   done
   echo "## What's Changed"

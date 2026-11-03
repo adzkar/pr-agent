@@ -378,15 +378,21 @@ git commit -q --allow-empty -m 'feat: shiny thing'
 git checkout -q main
 git merge -q --no-ff side -m 'Merge pull request #7 from t/side'
 git commit -q --allow-empty -m 'fix: a typo (#9)'
+git commit -q --allow-empty -m 'feat!: drop old flag (#11)'
+git commit -q --allow-empty -m 'fix!: harder break (#13)'
+git commit -q --allow-empty -m 'feat(api)!: scoped break (#15)'
 git push -q origin main
-printf '7\tfeat: shiny thing\n9\tfix: a typo\n' >"$GH_STUB_STATE/prs"
+printf '7\tfeat: shiny thing\n9\tfix: a typo\n11\tfeat!: drop old flag\n13\tfix!: harder break\n15\tfeat(api)!: scoped break\n' >"$GH_STUB_STATE/prs"
 try_release o 0.1.0
 eq "rc 0" "$RC" 0
 notes="$(cat "$GH_STUB_STATE/v0.1.0.notes")"
 has "features group" "$notes" '### Features'
 has "feat line" "$notes" 'feat: shiny thing — #7'
+has "feat bang line" "$notes" 'feat!: drop old flag — #11'
+has "scoped bang line" "$notes" 'feat(api)!: scoped break — #15'
 has "fixes group" "$notes" '### Fixes'
 has "fix line" "$notes" 'fix: a typo — #9'
+has "fix bang line" "$notes" 'fix!: harder break — #13'
 
 echo "== S29: no PRs in range -> falls back to generated notes =="
 try_release o 0.1.1
