@@ -1385,10 +1385,12 @@ cmd_update() { # [--check] [--force] [X.Y.Z] -> download a release and install i
   local latest="${tag#v}"
 
   if [ "$check" = "1" ]; then
-    echo "installed $VERSION · latest $tag"
+    local what="latest"; [ -n "$want" ] && what="target"
+    echo "installed $VERSION · $what $tag"
     if [ "$latest" = "$VERSION" ]; then echo "up to date"
-    elif ver_gt "$latest" "$VERSION"; then echo "update available — run 'pr-agent update'"
-    else echo "newer than the latest release (dev build?)"; fi
+    elif ver_gt "$latest" "$VERSION"; then
+      echo "update available — run 'pr-agent update${want:+ $want}'"
+    else echo "newer than $what (dev build?)"; fi
     return 0
   fi
 
