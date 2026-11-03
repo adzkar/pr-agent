@@ -7,8 +7,8 @@
 # that session (`devin -r`) so the agent keeps context across review rounds.
 #
 # Usage:
-#   pr-agent on [--launchd] [all | N...]  Start watching (default: all open non-draft PRs)
-#                                         --launchd: run under launchd (survives reboot/crash)
+#   pr-agent on [--launchd] [all | N...]  Start watching (default: your open non-draft PRs —
+#                                         @all = everyone; --launchd survives reboot/crash)
 #   pr-agent off [--now]            Stop the watcher (--now also kills running agents)
 #   pr-agent status [-w [SECS]]     Dashboard (-w: live refresh, default 5s)
 #   pr-agent logs [N] [-f]          Event log, or PR N's latest agent transcript (-f follow)
@@ -44,7 +44,7 @@
 #   PR_AGENT_BOTS         Comma list of [bot] logins to react to (default: none);
 #                         other bots are ignored unless listed in PR_AGENT_AUTHOR
 #   PR_AGENT_PR_AUTHOR    Comma list of PR authors to watch in "all" mode
-#                         (@me = your login; default: all authors)
+#                         (@me = your login, @all = everyone; default @me)
 #   PR_AGENT_TRIGGER      Prefix that turns your own comment into feedback (default /agent)
 #   PR_AGENT_MAX_FAILS    Consecutive failed runs per round before giving up (default 3)
 #   PR_AGENT_MAX_ROUNDS   Stop auto-runs on a PR after this many rounds (default 10, 0 = off)
@@ -154,7 +154,7 @@ INTERVAL="${PR_AGENT_INTERVAL:-${CFG_INTERVAL:-120}}"
 PERM_MODE="${PR_AGENT_MODE:-${CFG_PERM_MODE:-dangerous}}"
 SANDBOX="${PR_AGENT_SANDBOX:-${CFG_SANDBOX:-0}}"
 AUTHOR_FILTER="${PR_AGENT_AUTHOR:-${CFG_AUTHOR_FILTER:-}}"
-PR_AUTHOR_FILTER="${PR_AGENT_PR_AUTHOR:-${CFG_PR_AUTHOR_FILTER:-}}"
+PR_AUTHOR_FILTER="${PR_AGENT_PR_AUTHOR:-${CFG_PR_AUTHOR_FILTER:-@me}}"
 BOTS="${PR_AGENT_BOTS:-${CFG_BOTS:-}}"
 TRIGGER="${PR_AGENT_TRIGGER:-${CFG_TRIGGER:-/agent}}"
 MAX_FAILS="${PR_AGENT_MAX_FAILS:-${CFG_MAX_FAILS:-3}}"
@@ -275,10 +275,11 @@ PR_JQ='([.statusCheckRollup[]? | {name: (.name // .context), url: (.detailsUrl /
 
 # jq fragment for "all"-mode author scoping (needs --arg pa $PR_AUTHOR_FILTER --arg me $(me)):
 # true when the object's .author is in the comma list — "@me" maps to your login;
-# a blank filter means any author, missing .author (or unresolvable @me) never matches.
+# "@all" or a blank filter means any author, missing .author (or unresolvable @me) never matches.
 PR_AUTHOR_JQ='($pa | split(",") | map(gsub("^ +| +$"; "")) | map(if . == "@me" then $me else . end)
               | map(select(length > 0))) as $A
-             | ($pa | gsub(" "; "") | length) == 0 or ((.author // "") as $a | any($A[]; . == $a))'
+             | ($pa | gsub(" "; "") | length) == 0 or ($A | index("@all")) != null
+               or ((.author // "") as $a | any($A[]; . == $a))'
 
 refresh_prs() { # ttl -> refresh prs.jsonl unless younger than ttl seconds; 1 on GitHub failure
   local ttl="$1" tmp
@@ -326,6 +327,14 @@ targets() { # -> PR numbers to watch (from prs.jsonl)
   else
     echo "$t"
   fi
+}
+
+scope_label() { # -> display label for the "all"-mode watch scope ("@all"/blank = "all open PRs")
+  local e
+  for e in ${PR_AUTHOR_FILTER//,/ }; do
+    [ "$e" = "@all" ] && { echo "all open PRs"; return; }
+  done
+  if [ -n "${PR_AUTHOR_FILTER// /}" ]; then echo "open PRs by $PR_AUTHOR_FILTER"; else echo "all open PRs"; fi
 }
 
 # --- feedback collection ------------------------------------------------------------------
@@ -795,7 +804,7 @@ check_sync() { # pr basesha base mode(watch|manual) -> merge the base into the P
 }
 
 sync_scan() { # mode(report|apply|watch) [dep-filter-pr] -> detect PRs behind base and act
-  local mode="$1" depf="${2:-}" rd pr head branch key bsha base shown=0 extra act
+  local mode="$1" depf="${2:-}" rd pr head branch key bsha base shown=0 extra act t what
   rd="$(repo_dir)"; [ -n "$rd" ] || { log "sync: no repo_dir — run 'pr-agent on' from the repo first"; return 1; }
   base="$(default_base)"
   fetch_base "$base" || { [ "$mode" != "watch" ] && echo "sync: can't fetch origin/$base" >&2; return 1; }
@@ -841,7 +850,11 @@ sync_scan() { # mode(report|apply|watch) [dep-filter-pr] -> detect PRs behind ba
       fi
     fi
   done
-  if [ "$mode" = "report" ] && [ "$shown" -eq 0 ]; then echo "all open PRs are current with origin/$base — nothing to sync"; fi
+  if [ "$mode" = "report" ] && [ "$shown" -eq 0 ]; then
+    t="$(cat "$STATE_DIR/targets" 2>/dev/null || true)"
+    if [ "$t" = "all" ] || [ -z "$t" ]; then what="$(scope_label)"; else what="watched PRs"; fi
+    echo "$what are current with origin/$base — nothing to sync"
+  fi
 }
 
 # --- agent -----------------------------------------------------------------------------
@@ -1117,7 +1130,7 @@ cmd_on() {
   if [ $# -eq 0 ] || [ "$1" = "all" ]; then echo "all" >"$STATE_DIR/targets"; else echo "$*" >"$STATE_DIR/targets"; fi
   save_config
   local what; what="$(cat "$STATE_DIR/targets")"
-  if [ "$what" = "all" ]; then what="all open PRs"; else what="$(hash_list "$what")"; fi
+  if [ "$what" = "all" ]; then what="$(scope_label)"; else what="$(hash_list "$what")"; fi
   if [ "$use_launchd" -eq 1 ]; then
     install_launchd
     echo "watching $what on $(repo) via launchd ($LAUNCHD_LABEL, every $(fmt_dur "$INTERVAL")) — pr-agent status to follow"
@@ -1704,7 +1717,7 @@ render_status() { # ttl [term-rows] -> status screen; with term-rows the PR tabl
   fi
   t="$(cat "$STATE_DIR/targets" 2>/dev/null || echo all)"
   if [ "$t" = "all" ] || [ -z "$t" ]; then
-    t="all open PRs"; [ -n "$PR_AUTHOR_FILTER" ] && t="open PRs by $PR_AUTHOR_FILTER"
+    t="$(scope_label)"
   else t="$(hash_list "$t")"; fi
   if [ -n "$AUTHOR_FILTER" ]; then reacts="$AUTHOR_FILTER"; else reacts="humans"; [ -n "$BOTS" ] && reacts+=" + $BOTS"; fi
   [ "$SANDBOX" = "1" ] && extras+=" · sandbox"
@@ -1861,13 +1874,13 @@ case "${1:-}" in
   add)
     shift; need_repo
     t="$(cat "$STATE_DIR/targets" 2>/dev/null || echo all)"
-    [ "$t" != "all" ] || die "watching all open PRs — nothing to add (use 'pr-agent on N...' for an explicit list)"
+    [ "$t" != "all" ] || die "watching $(scope_label) — nothing to add (use 'pr-agent on N...' for an explicit list)"
     echo "$t $*" | tr ' ' '\n' | { grep -E '^[0-9]+$' || true; } | sort -un | tr '\n' ' ' | sed 's/ $//' >"$STATE_DIR/targets"
     echo "targets: $(cat "$STATE_DIR/targets")" ;;
   rm)
     shift; need_repo
     t="$(cat "$STATE_DIR/targets" 2>/dev/null || echo all)"
-    [ "$t" != "all" ] || die "watching all open PRs — use 'pr-agent pause N' to skip one"
+    [ "$t" != "all" ] || die "watching $(scope_label) — use 'pr-agent pause N' to skip one"
     echo "$t" | tr ' ' '\n' | awk -v drop=" $* " 'NF && index(drop, " " $1 " ") == 0' | tr '\n' ' ' | sed 's/ $//' >"$STATE_DIR/targets"
     echo "targets: $(cat "$STATE_DIR/targets")" ;;
   run)       shift; need_repo; map_init; cmd_run "$@" ;;
