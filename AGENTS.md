@@ -13,7 +13,7 @@
 | `README.md` | User docs: install, commands, dashboard, config |
 | `docs/ARCHITECTURE.md` | Code structure map, state files, execution flows |
 | `release` | Maintainer script — cuts versioned GitHub releases (`./release [patch|minor|major|X.Y.Z]`) |
-| `tests/` | `release.sh` — scratch-repo + stubbed-`gh` harness for `release` |
+| `tests/` | `release.sh` — scratch-repo + stubbed-`gh` harness for `release` and `update` |
 | `tests/smoke.sh` | Scratch-repo smoke for the worktree-blocked lifecycle (local git only) |
 | `AGENTS.md` | This file |
 
@@ -40,14 +40,15 @@ mints the checked-in `VERSION` if it was never released.
 
 Two scratch-repo harnesses cover what CI doesn't: `tests/smoke.sh` exercises
 the worktree-blocked lifecycle on local git alone; `tests/release.sh` drives
-the `release` state machine end-to-end with a stubbed `gh`. Minimum checks:
+the `release` state machine and `cmd_update` end-to-end with a stubbed `gh`.
+Minimum checks:
 
 ```sh
 bash -n pr-agent                       # syntax
 bash -n release                        # syntax
 shellcheck pr-agent release 2>/dev/null || true # lint if available
 tests/smoke.sh                         # worktree-blocked lifecycle in a scratch repo (no gh)
-./tests/release.sh                     # release scenarios (run when `release` changes)
+./tests/release.sh                     # release + update scenarios (run when `release` or `cmd_update` changes)
 cd /path/to/a/watched/repo             # then run READ-ONLY commands only:
 pr-agent status                        #   dashboard (renders table + activity)
 pr-agent status -w 1 & sleep 4; kill %1  #   watch-mode frame
@@ -139,6 +140,10 @@ them as a smoke test unless that's the intent.
   what's being watched (`cmd_on` confirm, the status header, the `add`/`rm`
   dies) must use it — printing raw `PR_AUTHOR_FILTER` leaks the `@all`
   meta-token as a pseudo-author, and a blank filter means everyone.
+- **EXIT traps can't see function `local`s under `set -u`** — they fire after
+  the call stack unwinds, so cleanup vars a trap touches must be globals
+  (`UPDATE_TMP`/`UPDATE_STAGED` in `cmd_update`). Signal traps (INT/TERM)
+  fire inside the function and *do* see locals.
 
 ## Commit style
 

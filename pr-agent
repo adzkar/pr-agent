@@ -30,6 +30,9 @@
 #   pr-agent config                 Show effective settings
 #   pr-agent map                    Show the raw PR → session/worktree map
 #   pr-agent version                Print the installed version
+#   pr-agent update [--check] [--force] [X.Y.Z]  Self-update this script from a GitHub
+#                                                release (latest, or given; --force
+#                                                reinstalls / allows a repo copy)
 #
 # A PR comment by you that starts with "/agent" is treated as feedback.
 #
@@ -94,6 +97,7 @@
 set -euo pipefail
 
 VERSION="0.1.0"   # release identity — bumped by ./release, shown by 'pr-agent version'
+UPDATE_REPO="adzkar/pr-agent"   # upstream home of this script — where 'update' pulls releases from
 STATE_ROOT="${PR_AGENT_STATE_DIR:-$HOME/.local/state/pr-agent}"
 DEVIN_BIN="${DEVIN_BIN:-devin}"
 SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
@@ -1067,10 +1071,14 @@ skip_reason() { # pr -> why the watcher won't auto-run this PR (empty = eligible
 
 # --- watcher ---------------------------------------------------------------------------
 
+pid_is_watcher() { # pid -> 0 when pid is a live `pr-agent _loop` process
+  kill -0 "$1" 2>/dev/null && ps -p "$1" -o command= 2>/dev/null | grep -q "_loop"
+}
+
 is_running() {
   [ -f "$PID_FILE" ] || return 1
   local pid; pid="$(cat "$PID_FILE")"
-  kill -0 "$pid" 2>/dev/null && ps -p "$pid" -o command= 2>/dev/null | grep -q "_loop"
+  pid_is_watcher "$pid"
 }
 
 pr_sig() { # pr -> change signature (updatedAt + head + CI + mergeability)
@@ -1397,6 +1405,104 @@ cmd_logs() { # [N] [-f]
     if [ "${2:-}" = "-f" ]; then tail -n 50 -f "$f"; else cat "$f"; fi
   elif [ "${1:-}" = "-f" ]; then tail -f "$LOG_FILE"
   else tail -n 30 "$LOG_FILE"; fi
+}
+
+# --- self-update ---------------------------------------------------------------------
+# 'pr-agent update' pulls the pr-agent + pr-agent.sha256 assets published by ./release
+# and swaps them over $SELF atomically — a running watcher keeps its old inode until
+# restarted, so the swap is safe mid-run.
+
+ver_gt() { # a b -> 0 when a is a higher semver than b (bare X.Y.Z; BSD sort has no -V)
+  local a1 a2 a3 b1 b2 b3
+  IFS=. read -r a1 a2 a3 <<<"$1"; IFS=. read -r b1 b2 b3 <<<"$2"
+  a1=${a1:-0}; a2=${a2:-0}; a3=${a3:-0}; b1=${b1:-0}; b2=${b2:-0}; b3=${b3:-0}
+  [ "$a1" -ne "$b1" ] && { [ "$a1" -gt "$b1" ]; return; }
+  [ "$a2" -ne "$b2" ] && { [ "$a2" -gt "$b2" ]; return; }
+  [ "$a3" -gt "$b3" ]
+}
+
+latest_release_tag() { # -> tag of the newest upstream release; empty when none published, non-zero on gh failure
+  gh release list --repo "$UPDATE_REPO" --limit 1 --json tagName -q '.[0].tagName' \
+    --exclude-drafts --exclude-pre-releases 2>/dev/null
+}
+
+cmd_update() { # [--check] [--force] [X.Y.Z] -> download a release and install it over this script
+  local check=0 force=0 want="" a
+  for a in "$@"; do
+    case "$a" in
+      --check) check=1 ;;
+      --force) force=1 ;;
+      -*) die "unknown flag '$a'" ;;
+      *) [ -z "$want" ] || die "too many arguments"; want="${a#v}" ;;
+    esac
+  done
+  command -v gh >/dev/null || die "update needs gh (https://cli.github.com)"
+
+  local tag
+  if [ -n "$want" ]; then
+    [[ "$want" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "bad version '$want' — want X.Y.Z"
+    if ! gh release view "v$want" --repo "$UPDATE_REPO" >/dev/null 2>&1; then
+      gh release list --repo "$UPDATE_REPO" --limit 1 >/dev/null 2>&1 \
+        || die "can't reach releases for $UPDATE_REPO (gh auth ok?)"
+      die "no release v$want"
+    fi
+    tag="v$want"
+  else
+    tag="$(latest_release_tag)" || die "can't reach releases for $UPDATE_REPO (gh auth ok?)"
+    [ -n "$tag" ] || die "no releases published yet"
+    [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "unexpected release tag '$tag' — want vX.Y.Z"
+  fi
+  local latest="${tag#v}"
+
+  if [ "$check" = "1" ]; then
+    local what="latest"; [ -n "$want" ] && what="target"
+    echo "installed $VERSION · $what $tag"
+    if [ "$latest" = "$VERSION" ]; then echo "up to date"
+    elif ver_gt "$latest" "$VERSION"; then
+      echo "update available — run 'pr-agent update${want:+ $want}'"
+    else echo "newer than $what (dev build?)"; fi
+    return 0
+  fi
+
+  if [ "$latest" = "$VERSION" ] && [ "$force" = "0" ]; then
+    echo "already on $VERSION — nothing to do (--force to reinstall)"; return 0
+  fi
+
+  local dir self l; self="$SELF"
+  while [ -L "$self" ]; do   # installed via symlink: swap the real target, keep the link
+    l="$(readlink "$self")"; case "$l" in /*) self="$l" ;; *) self="$(dirname "$self")/$l" ;; esac
+  done
+  dir="$(dirname "$self")"
+  if [ "$force" = "0" ] && git -C "$dir" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    die "$self is inside a git worktree — refusing to overwrite it (--force to override)"
+  fi
+  [ -w "$dir" ] || die "$dir not writable — retry with: sudo pr-agent update $tag"
+
+  UPDATE_TMP="$(mktemp -d)"; UPDATE_STAGED="$dir/.pr-agent.new.$$"   # globals: EXIT traps can't see locals under set -u
+  trap 'rm -rf "$UPDATE_TMP"; rm -f "$UPDATE_STAGED"' EXIT
+  gh release download "$tag" --repo "$UPDATE_REPO" --dir "$UPDATE_TMP" --clobber \
+      -p pr-agent -p pr-agent.sha256 >/dev/null 2>&1 \
+    || die "couldn't download $tag assets"
+  (cd "$UPDATE_TMP" && shasum -a 256 -c pr-agent.sha256 >/dev/null 2>&1) \
+    || die "$tag checksum verification failed — not installing"
+
+  install -m 755 "$UPDATE_TMP/pr-agent" "$UPDATE_STAGED" 2>/dev/null \
+    || die "couldn't stage the new script in $dir"
+  mv -f "$UPDATE_STAGED" "$self" 2>/dev/null || die "couldn't install over $self"
+  rm -rf "$UPDATE_TMP"; trap - EXIT
+
+  if ver_gt "$latest" "$VERSION"; then echo "updated $VERSION → $latest at $self"
+  else echo "installed $tag at $self (was $VERSION)"; fi
+  local pf pid
+  for pf in "$STATE_ROOT"/repos/*/pid; do
+    [ -f "$pf" ] || continue
+    pid="$(cat "$pf" 2>/dev/null || true)"
+    if [ -n "$pid" ] && pid_is_watcher "$pid"; then
+      echo "note: a watcher still runs $VERSION — restart it: pr-agent off && pr-agent on"
+      break
+    fi
+  done
+  return 0
 }
 
 # --- status rendering -----------------------------------------------------------------
@@ -1854,6 +1960,7 @@ case "${1:-}" in
   config)    cmd_config ;;
   map)       map_init; jq . "$MAP_FILE" ;;
   version|--version|-v) echo "pr-agent $VERSION" ;;
+  update)    shift; cmd_update "$@" ;;
   _loop)     need_repo; watch_loop ;;
   help|-h|--help) usage 0 ;;
   *)         usage ;;
