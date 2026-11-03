@@ -16,6 +16,7 @@
 | `tests/` | `release.sh` — scratch-repo + stubbed-`gh` harness for `release` and `update`; `update-check.sh` — extracted-function harness for `maybe_update_check`/`pending_update_version` |
 | `tests/smoke.sh` | Scratch-repo smoke for the worktree-blocked lifecycle (local git only) |
 | `tests/review_verdict.sh` | Fixture checks for the `PR_JQ` `.review` verdict derivation (jq only) |
+| `tests/author_match.sh` | Extracted-function fixtures for case-insensitive author/login matching (jq only) |
 | `AGENTS.md` | This file |
 
 ## Deploy model
@@ -39,13 +40,14 @@ mints the checked-in `VERSION` if it was never released.
 
 ## Verify before committing
 
-Four scratch-repo harnesses cover what CI doesn't: `tests/smoke.sh`
+Five scratch-repo harnesses cover what CI doesn't: `tests/smoke.sh`
 exercises the worktree-blocked lifecycle on local git alone;
 `tests/review_verdict.sh` runs the `PR_JQ` verdict derivation over fixture
-payloads; `tests/release.sh` drives the `release` state machine and
-`cmd_update` end-to-end with a stubbed `gh`; `tests/update-check.sh` extracts
-the update-check functions from `pr-agent` and exercises the stamp/throttle
-edge cases. Minimum checks:
+payloads; `tests/author_match.sh` lifts the author-matching jq out of
+`pr-agent` and checks configured-vs-API login casing; `tests/release.sh`
+drives the `release` state machine and `cmd_update` end-to-end with a
+stubbed `gh`; `tests/update-check.sh` extracts the update-check functions
+from `pr-agent` and exercises the stamp/throttle edge cases. Minimum checks:
 
 ```sh
 bash -n pr-agent                       # syntax
@@ -53,6 +55,7 @@ bash -n release                        # syntax
 shellcheck pr-agent release 2>/dev/null || true # lint if available
 tests/smoke.sh                         # worktree-blocked lifecycle in a scratch repo (no gh)
 tests/review_verdict.sh                # .review verdict derivation fixtures (no gh)
+tests/author_match.sh                  # author/login matching fixtures (no gh)
 ./tests/release.sh                     # release + update scenarios (run when `release` or `cmd_update` changes)
 ./tests/update-check.sh                # update-check edge cases (run when the check changes)
 cd /path/to/a/watched/repo             # then run READ-ONLY commands only:
@@ -128,6 +131,17 @@ the intent.
   run on null input, silently stalling the PR's feedback. Guard with
   `($a // "")` before any string builtin on `.author` (see the `status_re`
   clause in `filter_feedback`).
+- **Author comparisons are case-insensitive and fail-closed** — GitHub logins
+  are case-insensitive, so every `.author`-vs-configured-login compare
+  normalizes via `ascii_downcase` (configured lists are lowercased once at
+  build; the item side binds `((.author // "") | ascii_downcase) as $a`).
+  `($a != "")` must stay in the `$me` checks: a missing `.author` lowers to
+  `""`, which would otherwise equal an unresolved empty `me` and leak a ghost
+  comment into the owner-trigger path. Configured lists also drop empty
+  entries (`select(length > 0)`) so a blank `BOTS` can't yield `[""]` and
+  match a ghost author. `@me`/`@all` tokens normalize too — keep
+  `scope_label`'s `@all` check in step or the label disagrees with the
+  filter. Fixtures: `tests/author_match.sh`.
 - **`seen/<pr>` keys are content-derived** (`id:body-len` / `id:updated_at`) —
   an *edited* review or comment re-triggers. Don't switch to plain ids.
 - **`worktree_blocked` is a last-known flag, refreshed locally.** `run_agent`
