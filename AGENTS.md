@@ -15,6 +15,7 @@
 | `release` | Maintainer script — cuts versioned GitHub releases (`./release [patch|minor|major|X.Y.Z]`) |
 | `tests/` | `release.sh` — scratch-repo + stubbed-`gh` harness for `release` |
 | `tests/smoke.sh` | Scratch-repo smoke for the worktree-blocked lifecycle (local git only) |
+| `tests/review_verdict.sh` | Fixture checks for the `PR_JQ` `.review` verdict derivation (jq only) |
 | `AGENTS.md` | This file |
 
 ## Deploy model
@@ -38,15 +39,18 @@ mints the checked-in `VERSION` if it was never released.
 
 ## Verify before committing
 
-Two scratch-repo harnesses cover what CI doesn't: `tests/smoke.sh` exercises
-the worktree-blocked lifecycle on local git alone; `tests/release.sh` drives
-the `release` state machine end-to-end with a stubbed `gh`. Minimum checks:
+Three harnesses cover what CI doesn't: `tests/smoke.sh` exercises the
+worktree-blocked lifecycle on local git alone; `tests/review_verdict.sh`
+runs the `PR_JQ` verdict derivation over fixture payloads; `tests/release.sh`
+drives the `release` state machine end-to-end with a stubbed `gh`. Minimum
+checks:
 
 ```sh
 bash -n pr-agent                       # syntax
 bash -n release                        # syntax
 shellcheck pr-agent release 2>/dev/null || true # lint if available
 tests/smoke.sh                         # worktree-blocked lifecycle in a scratch repo (no gh)
+tests/review_verdict.sh                # .review verdict derivation fixtures (no gh)
 ./tests/release.sh                     # release scenarios (run when `release` changes)
 cd /path/to/a/watched/repo             # then run READ-ONLY commands only:
 pr-agent status                        #   dashboard (renders table + activity)
