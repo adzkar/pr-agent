@@ -1367,7 +1367,8 @@ cmd_update() { # [--check] [--force] [X.Y.Z] -> download a release and install i
     case "$a" in
       --check) check=1 ;;
       --force) force=1 ;;
-      *) want="${a#v}" ;;
+      -*) die "unknown flag '$a'" ;;
+      *) [ -z "$want" ] || die "too many arguments"; want="${a#v}" ;;
     esac
   done
   command -v gh >/dev/null || die "update needs gh (https://cli.github.com)"
@@ -1375,7 +1376,11 @@ cmd_update() { # [--check] [--force] [X.Y.Z] -> download a release and install i
   local tag
   if [ -n "$want" ]; then
     [[ "$want" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "bad version '$want' — want X.Y.Z"
-    gh release view "v$want" --repo "$UPDATE_REPO" >/dev/null 2>&1 || die "no release v$want"
+    if ! gh release view "v$want" --repo "$UPDATE_REPO" >/dev/null 2>&1; then
+      gh release list --repo "$UPDATE_REPO" --limit 1 >/dev/null 2>&1 \
+        || die "can't reach releases for $UPDATE_REPO (gh auth ok?)"
+      die "no release v$want"
+    fi
     tag="v$want"
   else
     tag="$(latest_release_tag)" || die "can't reach releases for $UPDATE_REPO (gh auth ok?)"
