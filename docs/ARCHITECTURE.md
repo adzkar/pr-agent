@@ -1,6 +1,6 @@
 # Architecture
 
-`pr-agent` is a single bash script (~1850 lines). It polls GitHub for new PR
+`pr-agent` is a single bash script (~1870 lines). It polls GitHub for new PR
 feedback and hands each round to a **persistent Devin CLI session per PR**
 running inside that PR's dedicated git worktree — so the agent keeps context
 across review rounds and never touches your checkout.
@@ -19,18 +19,18 @@ Sections are delimited by `# --- name ---` banners, in file order:
 | settings | 147–199 | `CFG_*` saved config → `PR_AGENT_*` env → default precedence; `save_config`, `log`, `notify` (osascript) |
 | repo context | 200–222 | `repo`/`repo_dir`/`me` accessors, `need_repo`, `detect_repo` (writes repo, repo_dir, me, base into state) |
 | map | 223–251 | `map.json` accessors (`map_get/set/del/rm/num`) behind `with_map_lock` (mkdir lock, ~10 s stale break) |
-| PR list | 252–324 | `refresh_prs` — one `gh pr list` call → `prs.jsonl` cache (number, title, state, draft, review, updated, branch, head, base, mergeable, ci, ci_failed, body, cross, author); `backfill_prs` — one `gh pr view` per tracked PR missing from both caches → `prs_extra.jsonl` (once each ever); `pr_info` (list first, extras fallback), `targets` ("all" mode scoped by `PR_AUTHOR_FILTER` via `PR_AUTHOR_JQ`) |
-| feedback collection | 325–400 | `fetch_feedback` (3 `gh api` endpoints + `synthetic_feedback`), `seed_seen`, `filter_feedback` (seen/author/bot/skip rules), `pending_feedback` |
-| failed review runs | 401–534 | `handle_review_failure` + helpers (`retry_cutoff`, `review_failure_plan`, `retry_reset_if_reviewed`) — pings the review bot (`RETRY_MSG`) on `Review failed:` notices, `RETRY_MAX` cap, `retry_cutoff` keeps pre-existing failures manual-only; `format_feedback` — jsonl → markdown prompt sections |
-| worktree | 535–598 | `ensure_worktree` (`<repo>-pr-<N>` next to the main checkout), `setup_worktree` (copies `.env*`/`config.local.json`, reuses `node_modules` when manifests match else `bun install --frozen-lockfile`, husky prepare), `sync_worktree` |
-| main-sync | 599–840 | Post-merge catch-up: `sync_scan` → `check_sync` merges base into PR branch **via the PR's agent session**, then `verify_synced` + `apply_unblock` (dep-gated draft unbanner/ready, `sync_unblock` state machine) |
-| agent | 841–938 | `build_prompt`, `devin_flags`, `session_ids`/`new_session_id` (diff `devin list` before/after), `run_agent` (resume `devin -r` else start new) |
-| per-PR check | 939–1007 | `check_pr` — the per-PR round; `skip_reason` |
-| watcher | 1008–1155 | `watch_loop`, `pid_is_watcher`/`is_running`, `pr_sig`, `install_launchd` (launchd plist), `cmd_on`, `kill_agents`, `cmd_off` |
-| manual commands | 1156–1331 | `need_pr`, `run`, `tell`/`_tell`, `attach`, `retry`, `peek`, `mark-seen`, `gc`, `sync`, `config`, `logs` (`version` is a dispatch one-liner) |
-| self-update | 1332–1418 | `ver_gt`, `latest_release_tag`, `cmd_update` — downloads release assets from `UPDATE_REPO`, verifies sha256, atomic-installs over `$SELF` |
-| status rendering | 1419–1809 | `fmt_*`, `draw_*`, `status_prs`, `review_cell`/`state_cell` (side effects: `H_*` hint buckets), `recent_events`, `render_hint`, `render_status` (row-budgeted table), `cmd_status` (alt-screen watch loop + fallback clip), `usage` |
-| dispatch | 1810–end | `case "$1"` router — inline cases: `add`/`rm`, `pause`/`resume`, `reset`, `reset-rounds`, `map`, `version`, `help`; `_loop`/`_check`/`_tell` are internal entries |
+| PR list | 252–333 | `refresh_prs` — one `gh pr list` call → `prs.jsonl` cache (number, title, state, draft, review, updated, branch, head, base, mergeable, ci, ci_failed, body, cross, author); `backfill_prs` — one `gh pr view` per tracked PR missing from both caches → `prs_extra.jsonl` (once each ever); `pr_info` (list first, extras fallback), `targets` ("all" mode scoped by `PR_AUTHOR_FILTER` via `PR_AUTHOR_JQ`), `scope_label` (that scope as display text) |
+| feedback collection | 334–409 | `fetch_feedback` (3 `gh api` endpoints + `synthetic_feedback`), `seed_seen`, `filter_feedback` (seen/author/bot/skip rules), `pending_feedback` |
+| failed review runs | 410–543 | `handle_review_failure` + helpers (`retry_cutoff`, `review_failure_plan`, `retry_reset_if_reviewed`) — pings the review bot (`RETRY_MSG`) on `Review failed:` notices, `RETRY_MAX` cap, `retry_cutoff` keeps pre-existing failures manual-only; `format_feedback` — jsonl → markdown prompt sections |
+| worktree | 544–607 | `ensure_worktree` (`<repo>-pr-<N>` next to the main checkout), `setup_worktree` (copies `.env*`/`config.local.json`, reuses `node_modules` when manifests match else `bun install --frozen-lockfile`, husky prepare), `sync_worktree` |
+| main-sync | 608–853 | Post-merge catch-up: `sync_scan` → `check_sync` merges base into PR branch **via the PR's agent session**, then `verify_synced` + `apply_unblock` (dep-gated draft unbanner/ready, `sync_unblock` state machine) |
+| agent | 854–951 | `build_prompt`, `devin_flags`, `session_ids`/`new_session_id` (diff `devin list` before/after), `run_agent` (resume `devin -r` else start new) |
+| per-PR check | 952–1020 | `check_pr` — the per-PR round; `skip_reason` |
+| watcher | 1021–1168 | `watch_loop` (re-cd's to `repo_dir` each cycle), `pid_is_watcher`/`is_running`, `pr_sig`, `install_launchd` (launchd plist), `cmd_on`, `kill_agents`, `cmd_off` |
+| manual commands | 1169–1344 | `need_pr`, `run`, `tell`/`_tell`, `attach`, `retry`, `peek`, `mark-seen`, `gc`, `sync`, `config`, `logs` (`version` is a dispatch one-liner) |
+| self-update | 1345–1431 | `ver_gt`, `latest_release_tag`, `cmd_update` — downloads release assets from `UPDATE_REPO`, verifies sha256, atomic-installs over `$SELF` |
+| status rendering | 1432–1822 | `fmt_*`, `draw_*`, `status_prs`, `review_cell`/`state_cell` (side effects: `H_*` hint buckets), `recent_events`, `render_hint`, `render_status` (row-budgeted table), `cmd_status` (alt-screen watch loop + fallback clip), `usage` |
+| dispatch | 1823–end | `case "$1"` router — inline cases: `add`/`rm`, `pause`/`resume`, `reset`, `reset-rounds`, `map`, `version`, `help`; `_loop`/`_check`/`_tell` are internal entries |
 
 ## On-disk state
 

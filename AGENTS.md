@@ -112,6 +112,10 @@ them as a smoke test unless that's the intent.
   different mechanisms** — the first caps rows inside the table, the second is
   the last-resort bottom clip for wrapped lines and `TABLE_ROWS` overflow.
   Keep both.
+- **Watch-scope text goes through `scope_label`.** Any message that says
+  what's being watched (`cmd_on` confirm, the status header, the `add`/`rm`
+  dies) must use it — printing raw `PR_AUTHOR_FILTER` leaks the `@all`
+  meta-token as a pseudo-author, and a blank filter means everyone.
 
 ## Commit style
 
