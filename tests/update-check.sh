@@ -90,6 +90,14 @@ UPDATE_CHECK=0 try "$d" pending; not "disabled silent" "$O" 9.9.9
 d="$(sr s7b)"; try "$d" pending
 case "$O" in survived) ok "absent file silent" ;; *) bad "absent file" "got: $O" ;; esac
 
+echo "== S8: malformed latest_release -> silent, no ver_gt noise =="
+d="$(sr s8)"; printf stable >"$d/latest_release"; try "$d" pending
+eq "non-version tag quiet" "$O" survived
+d="$(sr s8b)"; printf v1 >"$d/latest_release"; try "$d" pending
+eq "partial version quiet" "$O" survived
+d="$(sr s8c)"; printf v1.2.3rc1 >"$d/latest_release"; try "$d" pending
+eq "suffixed version quiet" "$O" survived
+
 echo
 echo "$pass passed, $fail failed"
 [ "$fail" -eq 0 ]

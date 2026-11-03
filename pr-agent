@@ -1455,7 +1455,7 @@ maybe_update_check() { # -> spawn a background release check at most every UPDAT
 pending_update_version() { # -> release version newer than VERSION from the last check, or nothing; empty when checks are disabled
   [ "$UPDATE_CHECK" = "1" ] || return 1
   local v; v="$(cat "$STATE_ROOT/latest_release" 2>/dev/null)"; v="${v#v}"
-  { [ -n "$v" ] && [ "$v" != "$VERSION" ] && ver_gt "$v" "$VERSION"; } || return 1
+  { [[ "$v" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] && [ "$v" != "$VERSION" ] && ver_gt "$v" "$VERSION"; } || return 1
   echo "$v"
 }
 
