@@ -69,7 +69,7 @@ shows where every PR stands.
 it live on the terminal's alt screen.
 
 ```
-pr-agent  ● watching (pid 10391)   owner/repo
+pr-agent v0.1.0  ● watching (pid 10391)   owner/repo
 watching all open PRs · every 2m · mode dangerous · conflicts · 2 parallel · max 10 rounds · reacts to humans + review-bot[bot] · next poll in 34s
 
 ┌───────┬────────────┬────────────────┬────────────────────────┬────────┬──────────┐
@@ -144,6 +144,7 @@ Env vars always win over the per-repo config saved by `pr-agent on`
 | `PR_AGENT_RETRY_RE` | `^Review failed:` | jq regex on bot bodies marking a failed run |
 | `PR_AGENT_RETRY_MSG` | — | Ping comment template; `{reviewer}` → the bot's handle |
 | `PR_AGENT_SKIP_RE` | in-progress markers | Regex; matching feedback bodies are ignored |
+| `PR_AGENT_BOT_STATUS_RE` | `\b(underway\|already running\|queued)\b` | jq regex (case-insensitive, unanchored); top-level comments from `[bot]`/`BOTS` authors that are just status narration, not findings — reviews/line comments always pass, and "in progress" is deliberately absent (too common in findings prose) |
 | `PR_AGENT_SETUP` | — | Command run inside a new worktree instead of the built-in env-file + `node_modules`/bun setup |
 | `PR_AGENT_MAIN_SYNC` | `0` | Each poll also auto-syncs open PRs behind the default base |
 | `PR_AGENT_TABLE_ROWS` | `0` | Rows in the status table (`0` = fit the screen; can exceed it — the bottom of the frame gets clipped) |
@@ -181,4 +182,6 @@ The whole tool is one bash script — see [AGENTS.md](AGENTS.md) for
 edit/verify/install rules and [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for
 the code map and execution flows. Maintainers cut releases with
 `./release [patch|minor|major|X.Y.Z]`, which bumps `VERSION`, tags `vX.Y.Z`,
-and publishes a GitHub release with the script + checksum assets.
+and publishes a GitHub release with the script + checksum assets. It's
+resumable after an interrupted run, and `./release X.Y.Z` mints the
+checked-in `VERSION` if it was never released.

@@ -5,11 +5,23 @@
 #
 # Usage:
 #   ./release [patch|minor|major|X.Y.Z]    (default: patch)
+#
+# Safe to re-run: an interrupted run resumes where it stopped — the tag is
+# (re)anchored at HEAD, the release created if missing, and assets
+# (re)uploaded with --clobber. './release X.Y.Z' also mints the checked-in
+# VERSION when it was never released.
 
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")"
 
 die() { echo "release: $*" >&2; exit 1; }
+
+# assets_complete TAG -> 0 iff TAG's GitHub release exists with both assets
+assets_complete() {
+  local a
+  a="$(gh release view "$1" --json assets -q '.assets[].name' 2>/dev/null || true)"
+  printf '%s\n' "$a" | grep -qx 'pr-agent' && printf '%s\n' "$a" | grep -qx 'pr-agent.sha256'
+}
 
 # --- guards ------------------------------------------------------------------
 
@@ -20,7 +32,13 @@ branch="$(git branch --show-current)"
 [ "$branch" = "main" ] || die "must be on main (currently: $branch)"
 [ -z "$(git status --porcelain)" ] || die "working tree not clean — commit or stash first"
 git fetch origin --quiet
-[ "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)" ] || die "local main differs from origin/main — sync first"
+if [ "$(git rev-parse HEAD)" != "$(git rev-parse origin/main)" ]; then
+  # tolerate exactly one unpushed release commit — an interrupted run resumes
+  # at the publish step below
+  [ "$(git rev-parse 'HEAD^' 2>/dev/null)" = "$(git rev-parse origin/main)" ] \
+    && [[ "$(git log -1 --format=%s)" =~ ^chore:\ release\ v[0-9]+\.[0-9]+\.[0-9]+$ ]] \
+    || die "local main differs from origin/main — sync first"
+fi
 bash -n pr-agent || die "pr-agent has syntax errors"
 
 # --- version -----------------------------------------------------------------
@@ -28,36 +46,92 @@ bash -n pr-agent || die "pr-agent has syntax errors"
 cur="$(sed -nE 's/^VERSION="([0-9]+\.[0-9]+\.[0-9]+)".*/\1/p' pr-agent | head -1)"
 [ -n "$cur" ] || die 'no VERSION="x.y.z" line in pr-agent'
 
+[ $# -le 1 ] || die "too many arguments — want patch, minor, major, or X.Y.Z"
 arg="${1:-patch}"
 if [[ "$arg" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
   next="$arg"
 elif [[ "$arg" =~ ^(patch|minor|major)$ ]]; then
   IFS=. read -r maj min pat <<<"$cur"
   case "$arg" in
-    patch) pat=$(( pat + 1 )) ;;
-    minor) min=$(( min + 1 )); pat=0 ;;
-    major) maj=$(( maj + 1 )); min=0; pat=0 ;;
+    patch) pat=$(( 10#$pat + 1 )) ;;
+    minor) min=$(( 10#$min + 1 )); pat=0 ;;
+    major) maj=$(( 10#$maj + 1 )); min=0; pat=0 ;;
   esac
   next="$maj.$min.$pat"
 else
   die "bad version '$arg' — want patch, minor, major, or X.Y.Z"
 fi
-[ "$next" != "$cur" ] || die "already at $cur"
-git rev-parse -q --verify "refs/tags/v$next" >/dev/null 2>&1 && die "tag v$next already exists"
-gh release view "v$next" >/dev/null 2>&1 && die "release v$next already exists"
+
+# the target must not go backwards (patch/minor/major never do; X.Y.Z could);
+# 10# keeps zero-padded components out of octal, and canonicalizes next/curn
+IFS=. read -r nmaj nmin npat <<<"$next"
+IFS=. read -r cmaj cmin cpat <<<"$cur"
+nmaj=$((10#$nmaj)); nmin=$((10#$nmin)); npat=$((10#$npat))
+cmaj=$((10#$cmaj)); cmin=$((10#$cmin)); cpat=$((10#$cpat))
+next="$nmaj.$nmin.$npat"; curn="$cmaj.$cmin.$cpat"
+if [ "$nmaj" -lt "$cmaj" ] ||
+  { [ "$nmaj" -eq "$cmaj" ] && [ "$nmin" -lt "$cmin" ]; } ||
+  { [ "$nmaj" -eq "$cmaj" ] && [ "$nmin" -eq "$cmin" ] && [ "$npat" -lt "$cpat" ]; }; then
+  die "v$next would downgrade v$cur"
+fi
 
 # --- bump, tag, publish ------------------------------------------------------
 
 tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
+tagpush="refs/tags/v$next:refs/tags/v$next" # gains a '+' only if we re-anchor
 
-sed -i '' -E "s/^VERSION=\"[0-9]+\.[0-9]+\.[0-9]+\"/VERSION=\"$next\"/" pr-agent
-git add pr-agent
-git commit -m "chore: release v$next" >/dev/null
-git tag "v$next"
-git push origin main "v$next"
+# a release with both assets is done; one missing assets was interrupted
+# mid-upload — the idempotent tail below repairs it
+assets_complete "v$next" && die "release v$next already exists"
+
+if [ "$curn" = "$next" ]; then
+  # VERSION is already the target — an interrupted run's release commit at
+  # HEAD, or the checked-in version was never minted: tag HEAD and publish
+  if git rev-parse -q --verify "refs/tags/v$next" >/dev/null 2>&1; then
+    # a tag left on a pre-rebase commit would publish outside main's history
+    if [ "$(git rev-parse "v$next^{commit}")" != "$(git rev-parse HEAD)" ]; then
+      git tag -f "v$next" >/dev/null
+      tagpush="+$tagpush"   # we moved it — the remote ref must follow
+      echo "re-anchored stale tag v$next at HEAD"
+    fi
+  else
+    git tag "v$next"
+  fi
+  echo "releasing v$next"
+else
+  git rev-parse -q --verify "refs/tags/v$next" >/dev/null 2>&1 && die "tag v$next already exists"
+  # an unfinished 'chore: release vX.Y.Z' at HEAD is the same open-release
+  # state as a missing tag — finish it before bumping past it
+  if [[ "$(git log -1 --format=%s)" =~ ^chore:\ release\ (v[0-9]+\.[0-9]+\.[0-9]+)$ ]] \
+    && ! assets_complete "${BASH_REMATCH[1]}"; then
+    die "${BASH_REMATCH[1]} is committed but its release is unfinished — finish it first: ./release ${BASH_REMATCH[1]#v}"
+  fi
+  # a v$curn whose release is unfinished (missing or partial) means the
+  # previous release is still open — finish it rather than leapfrogging it
+  if git rev-parse -q --verify "refs/tags/v$curn" >/dev/null 2>&1 \
+    && ! assets_complete "v$curn"; then
+    die "v$curn is tagged but its release is unfinished — finish it first: ./release $curn"
+  fi
+  sed -i '' -E "s/^VERSION=\"[0-9]+\.[0-9]+\.[0-9]+\"/VERSION=\"$next\"/" pr-agent
+  git add pr-agent
+  git commit -m "chore: release v$next" >/dev/null
+  git tag "v$next"
+fi
+
+# the tag refspec only forces when this run re-anchored it, so a foreign
+# remote tag fails the push instead of being silently re-pointed; --atomic
+# keeps main+tag all-or-nothing
+git push --atomic origin main "$tagpush"
 
 shasum -a 256 pr-agent >"$tmp/pr-agent.sha256"
-gh release create "v$next" pr-agent "$tmp/pr-agent.sha256" \
-  --title "v$next" --generate-notes >/dev/null
+# create+upload are separate so a partial release (asset upload died) is
+# repairable: view skips the create, --clobber re-uploads missing assets
+gh release view "v$next" >/dev/null 2>&1 \
+  || gh release create "v$next" --title "v$next" --generate-notes >/dev/null
+gh release upload "v$next" pr-agent "$tmp/pr-agent.sha256" --clobber >/dev/null
 
-echo "released v$next (was $cur) — $(gh release view "v$next" --json url -q .url)"
+if [ "$curn" = "$next" ]; then
+  echo "released v$next — $(gh release view "v$next" --json url -q .url)"
+else
+  echo "released v$next (was $cur) — $(gh release view "v$next" --json url -q .url)"
+fi
