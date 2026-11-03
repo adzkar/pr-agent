@@ -23,6 +23,7 @@
 #   pr-agent reset N                Forget PR N's session (next round starts fresh)
 #   pr-agent reset-rounds N         Reset PR N's round counter (lifts the MAX_ROUNDS limit)
 #   pr-agent gc [--yes]             Clean up worktrees/branches/state of merged & closed PRs
+#                                   and stale state for numbers that aren't PRs
 #   pr-agent sync [--apply [N]]     Report open PRs whose branch is behind their base;
 #                                   --apply merges the base into them via their agent
 #                                   sessions. Optional N: only PRs whose 'do not review'
@@ -1370,12 +1371,25 @@ cmd_mark_seen() {
   echo "PR #$1: marked $n item(s) as handled — won't trigger a run"
 }
 
-cmd_gc() { # [--yes] -> remove worktrees/branches/state for merged & closed PRs
+forget_pr() { # pr -> drop all local state for one PR (map key, seen, feedback, transcripts)
+  map_rm "$1"; rm -rf "$STATE_DIR/seen/$1" "$STATE_DIR/feedback/$1".* "$STATE_DIR/logs/$1"
+}
+
+cmd_gc() { # [--yes] -> remove worktrees/branches/state for merged & closed PRs and stale non-PR keys
   need_repo; refresh_prs 0 || die "can't reach GitHub"
   local yes='' pr state wt branch rd planned=0; rd="$(repo_dir)"
   [ "${1:-}" = "--yes" ] && yes=1
   for pr in $(jq -r '.prs | keys[]' "$MAP_FILE"); do
     state="$(pr_info "$pr" state)"
+    if [ -z "$state" ]; then   # no cached object: keep real PRs the caches missed, forget keys that never were PRs
+      gh pr view "$pr" --repo "$(repo)" --json number >/dev/null 2>&1 && continue
+      [ -d "$STATE_DIR/locks/$pr" ] && { echo "#$pr: busy, skipping"; continue; }
+      planned=1
+      echo "#$pr (not a pull request):"
+      echo "  forget session/state"
+      [ -n "$yes" ] && forget_pr "$pr"
+      continue
+    fi
     [ "$state" = "MERGED" ] || [ "$state" = "CLOSED" ] || continue
     [ -d "$STATE_DIR/locks/$pr" ] && { echo "#$pr: busy, skipping"; continue; }
     wt="$(map_get "$pr" worktree)"; branch="$(map_get "$pr" branch)"; planned=1
@@ -1391,7 +1405,7 @@ cmd_gc() { # [--yes] -> remove worktrees/branches/state for merged & closed PRs
       [ -n "$yes" ] && { git -C "$rd" branch -D "$branch" >/dev/null || echo "  ! couldn't delete $branch"; }
     fi
     echo "  forget session/state"
-    if [ -n "$yes" ]; then map_rm "$pr"; rm -rf "$STATE_DIR/seen/$pr" "$STATE_DIR/feedback/$pr".* "$STATE_DIR/logs/$pr"; fi
+    if [ -n "$yes" ]; then forget_pr "$pr"; fi
   done
   if [ -n "$yes" ] && [ -f "$PRS_EXTRA" ]; then
     local keep tmp2

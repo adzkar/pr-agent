@@ -189,6 +189,15 @@ the intent.
   get `mv -f` (matches `cmd_update`) and `</dev/null` — explicit, so nothing
   ever inherits a tty or prompt-blocks. Reference: `tests/update-check.sh`
   S6/S9.
+- **User-supplied numbers go through `need_real_pr`, not `need_pr`.**
+  `need_pr` only checks digits; commands that write state or spawn an agent
+  must also confirm the number resolves to a pull request — `tell`/`pause`/
+  `reset` on an *issue* number used to mint a `.prs` key that rendered as a
+  permanent "?" status row (`pr_info` finds nothing; `gc` skipped the `""`
+  state). `gc` now forgets keys with no cached object that `gh pr view`
+  can't resolve — `refresh_prs 0` + `backfill_prs` already ran by then, so a
+  failed view means "not a PR", not "uncached". `need_pr` alone stays only
+  where a command does its own resolution (`sync --apply`).
 
 ## Commit style
 

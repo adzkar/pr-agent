@@ -94,5 +94,18 @@ else echo "  ok   no map key for a non-PR number"; fi
 if [ -e "$D/feedback/6.tell.md" ]; then echo "  FAIL tell prompt file left"; fail=1
 else echo "  ok   no tell prompt file"; fi
 
+echo hi >"$D/prompt.md"   # mint a phantom key the way the pre-fix _tell did — gc should forget it
+check "setup: legacy _tell mints key"          0 "$(try _tell 6 "$D/prompt.md")"
+rc=0; out="$(./pr-agent gc 2>&1)" || rc=$?
+check "gc dry-run rc"                          0 "$rc"
+case "$out" in *"not a pull request"*) echo "  ok   dry-run names the phantom" ;; *) echo "  FAIL gc output: $out"; fail=1 ;; esac
+if jq -e '.prs["6"]' "$D/map.json" >/dev/null 2>&1; then echo "  ok   dry-run keeps the key"
+else echo "  FAIL dry-run deleted early"; fail=1; fi
+check "gc --yes rc"                            0 "$(try gc --yes)"
+if jq -e '.prs["6"]' "$D/map.json" >/dev/null 2>&1; then echo "  FAIL phantom key survived gc --yes"; fail=1
+else echo "  ok   gc --yes forgot the phantom"; fi
+if jq -e '.prs["42"].paused' "$D/map.json" >/dev/null 2>&1; then echo "  ok   real PR key kept"
+else echo "  FAIL real PR key dropped"; fail=1; fi
+
 echo
 if [ "$fail" -eq 0 ]; then echo "smoke: all checks passed"; else echo "smoke: FAILURES"; exit 1; fi
