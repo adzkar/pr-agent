@@ -13,7 +13,7 @@
 | `README.md` | User docs: install, commands, dashboard, config |
 | `docs/ARCHITECTURE.md` | Code structure map, state files, execution flows |
 | `release` | Maintainer script — cuts versioned GitHub releases (`./release [patch|minor|major|X.Y.Z]`) |
-| `tests/` | `release.sh` — scratch-repo + stubbed-`gh` harness for `release` |
+| `tests/` | `release.sh` — scratch-repo + stubbed-`gh` harness for `release`; `update-check.sh` — extracted-function harness for `maybe_update_check`/`pending_update_version` |
 | `AGENTS.md` | This file |
 
 ## Deploy model
@@ -37,14 +37,17 @@ mints the checked-in `VERSION` if it was never released.
 
 ## Verify before committing
 
-`tests/release.sh` is the only test suite — a scratch-repo + stubbed-`gh`
-harness covering the `release` state machine end-to-end. Minimum checks:
+`tests/release.sh` is a scratch-repo + stubbed-`gh` harness covering the
+`release` state machine end-to-end; `tests/update-check.sh` extracts the
+update-check functions from `pr-agent` and exercises the stamp/throttle edge
+cases. Minimum checks:
 
 ```sh
 bash -n pr-agent                       # syntax
 bash -n release                        # syntax
 shellcheck pr-agent release 2>/dev/null || true # lint if available
 ./tests/release.sh                     # release scenarios (run when `release` changes)
+./tests/update-check.sh                # update-check edge cases (run when the check changes)
 cd /path/to/a/watched/repo             # then run READ-ONLY commands only:
 pr-agent status                        #   dashboard (renders table + activity)
 pr-agent status -w 1 & sleep 4; kill %1  #   watch-mode frame
@@ -124,6 +127,13 @@ the intent.
   consumer is covered in one place. Mind per-repo config vs global state: a
   `SETTINGS`-persisted toggle still reads global `$STATE_ROOT` files, so the
   disable only applies in the repo it's set in.
+- **Best-effort preamble must never kill dispatch.** `maybe_update_check`
+  runs before every command — an unguarded `echo >"$stamp"` under `set -e`
+  aborted *every* invocation once the stamp went unwritable (e.g. root-owned
+  after `sudo pr-agent update`). Any spawn/setup work that isn't the primary
+  command needs `|| return`/`|| true`, and put `2>/dev/null` *before* the
+  failing redirect so the EACCES noise is suppressed too. Reference:
+  `tests/update-check.sh` S6.
 
 ## Commit style
 
