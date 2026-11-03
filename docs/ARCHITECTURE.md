@@ -1,6 +1,6 @@
 # Architecture
 
-`pr-agent` is a single bash script (~1900 lines). It polls GitHub for new PR
+`pr-agent` is a single bash script (~2000 lines). It polls GitHub for new PR
 feedback and hands each round to a **persistent Devin CLI session per PR**
 running inside that PR's dedicated git worktree — so the agent keeps context
 across review rounds and never touches your checkout.
@@ -21,16 +21,17 @@ Sections are delimited by `# --- name ---` banners, in file order:
 | map | 229–257 | `map.json` accessors (`map_get/set/del/rm/num`) behind `with_map_lock` (mkdir lock, ~10 s stale break) |
 | PR list | 258–339 | `refresh_prs` — one `gh pr list` call → `prs.jsonl` cache (number, title, state, draft, review, updated, branch, head, base, mergeable, ci, ci_failed, body, cross, author); `backfill_prs` — one `gh pr view` per tracked PR missing from both caches → `prs_extra.jsonl` (once each ever); `pr_info` (list first, extras fallback), `targets` ("all" mode scoped by `PR_AUTHOR_FILTER` via `PR_AUTHOR_JQ`), `scope_label` (that scope as display text) |
 | feedback collection | 340–415 | `fetch_feedback` (3 `gh api` endpoints + `synthetic_feedback`), `seed_seen`, `filter_feedback` (seen/author/bot/skip rules), `pending_feedback` |
-| failed review runs | 416–549 | `handle_review_failure` + helpers (`retry_cutoff`, `review_failure_plan`, `retry_reset_if_reviewed`) — pings the review bot (`RETRY_MSG`) on `Review failed:` notices, `RETRY_MAX` cap, `retry_cutoff` keeps pre-existing failures manual-only; `format_feedback` — jsonl → markdown prompt sections |
-| worktree | 550–613 | `ensure_worktree` (`<repo>-pr-<N>` next to the main checkout), `setup_worktree` (copies `.env*`/`config.local.json`, reuses `node_modules` when manifests match else `bun install --frozen-lockfile`, husky prepare), `sync_worktree` |
-| main-sync | 614–859 | Post-merge catch-up: `sync_scan` → `check_sync` merges base into PR branch **via the PR's agent session**, then `verify_synced` + `apply_unblock` (dep-gated draft unbanner/ready, `sync_unblock` state machine) |
-| agent | 860–957 | `build_prompt`, `devin_flags`, `session_ids`/`new_session_id` (diff `devin list` before/after), `run_agent` (resume `devin -r` else start new) |
-| per-PR check | 958–1026 | `check_pr` — the per-PR round; `skip_reason` |
-| watcher | 1027–1174 | `watch_loop` (re-cd's to `repo_dir` each cycle), `pid_is_watcher`/`is_running`, `pr_sig`, `install_launchd` (launchd plist), `cmd_on`, `kill_agents`, `cmd_off` |
-| manual commands | 1175–1350 | `need_pr`, `run`, `tell`/`_tell`, `attach`, `retry`, `peek`, `mark-seen`, `gc`, `sync`, `config`, `logs` (`version` is a dispatch one-liner) |
-| self-update | 1351–1463 | `ver_gt`, `latest_release_tag`, `cmd_update` — downloads release assets from `UPDATE_REPO`, verifies sha256, atomic-installs over `$SELF`; `maybe_update_check`/`pending_update_version` — throttled background release check (OMZ-style), both gated on `UPDATE_CHECK` |
-| status rendering | 1464–1856 | `fmt_*`, `draw_*`, `status_prs`, `review_cell`/`state_cell` (side effects: `H_*` hint buckets), `recent_events`, `render_hint`, `render_status` (row-budgeted table), `cmd_status` (alt-screen watch loop + fallback clip), `usage` |
-| dispatch | 1857–end | `case "$1"` router — inline cases: `add`/`rm`, `pause`/`resume`, `reset`, `reset-rounds`, `map`, `version`, `help`; `_loop`/`_check`/`_tell` are internal entries. `maybe_update_check` runs just before dispatch; the notice is skipped for internal/machine-readable commands (`_loop` logs it) |
+| failed review runs | 416–535 | `handle_review_failure` + helpers (`retry_cutoff`, `review_failure_plan`, `retry_reset_if_reviewed`) — pings the review bot (`RETRY_MSG`) on `Review failed:` notices, `RETRY_MAX` cap, `retry_cutoff` keeps pre-existing failures manual-only |
+| formatting | 536–551 | `format_feedback` — jsonl → markdown prompt sections |
+| worktree | 552–642 | `ensure_worktree` (`<repo>-pr-<N>` next to the main checkout), `worktree_holding`/`still_blocked` (local-only `git worktree list` probes — `still_blocked` rc: 0 blocked / 1 confirmed free / 2 indeterminate), `setup_worktree` (copies `.env*`/`config.local.json`, reuses `node_modules` when manifests match else `bun install --frozen-lockfile`, husky prepare), `sync_worktree` |
+| main-sync | 643–899 | Post-merge catch-up: `sync_scan` → `check_sync` merges base into PR branch **via the PR's agent session**, then `verify_synced` + `apply_unblock` (dep-gated draft unbanner/ready, `sync_unblock` state machine); rc 4 defers like a busy session — no `sync_fails`; `sync_scan watch` skips `worktree_blocked` PRs outright |
+| agent | 900–1001 | `build_prompt`, `devin_flags`, `session_ids`/`new_session_id` (diff `devin list` before/after), `run_agent` (resume `devin -r` else start new; `ensure_worktree` rc 4 → `worktree_blocked`) |
+| per-PR check | 1002–1077 | `check_pr` — the per-PR round; `skip_reason` |
+| watcher | 1078–1235 | `watch_loop` (re-cd's to `repo_dir` each cycle; re-probes `worktree_blocked` PRs via `still_blocked`), `pid_is_watcher`/`is_running`, `pr_sig`, `install_launchd` (launchd plist), `cmd_on`, `kill_agents`, `cmd_off` |
+| manual commands | 1236–1415 | `need_pr`, `run`, `tell`/`_tell`, `attach`, `retry`, `peek`, `mark-seen`, `gc`, `sync`, `config`, `logs` (`version` is a dispatch one-liner) |
+| self-update | 1416–1537 | `ver_gt`, `latest_release_tag`, `cmd_update` — downloads release assets from `UPDATE_REPO`, verifies sha256, atomic-installs over the (symlink-resolved) install; `maybe_update_check`/`pending_update_version` — throttled background release check (OMZ-style), both gated on `UPDATE_CHECK` |
+| status rendering | 1538–1948 | `fmt_*`, `draw_*`, `status_prs`, `refresh_status_pending`, `refresh_blocked_flags` (lazy `still_blocked` re-probe — clears a freed flag even with the watcher off), `review_cell`/`state_cell` (side effects: `H_*` hint buckets), `recent_events`, `render_hint`, `render_status` (row-budgeted table), `cmd_status` (alt-screen watch loop + fallback clip), `usage` |
+| dispatch | 1949–end | `case "$1"` router (`usage` sits just above the banner) — inline cases: `add`/`rm`, `pause`/`resume`, `reset`, `reset-rounds`, `map`, `version`, `help`; `_loop`/`_check`/`_tell`/`_ensure`/`_blocked` are internal entries. `maybe_update_check` runs just before dispatch; the notice is skipped for internal/machine-readable commands (`_loop` logs it) |
 
 ## On-disk state
 
@@ -64,7 +65,8 @@ Sections are delimited by `# --- name ---` banners, in file order:
 
 `map.json` → `{prs: {<pr>: {session_id, worktree, branch, rounds, fail_count,
 gave_up, sig, last_seen_ts, last_head_sha, last_run_at, paused, skip_logged,
-sync_*, retry_*}}}` — all values strings; `map_num` coerces empty → 0.
+worktree_blocked, blocked_logged, sync_*, retry_*}}}` — all values strings;
+`map_num` coerces empty → 0.
 
 Feedback items are jsonl `{key, ts, kind, author, body, url, …}` with
 `kind ∈ review|line|comment|ci|conflict`. `key` embeds id + body-length or
@@ -84,6 +86,9 @@ same script.
 ```
 refresh_prs 0                      # one gh pr list; failure → gh_error + warn once
 for pr in $(targets):              # all open non-draft PRs (PR_AUTHOR_FILTER scope), or explicit list
+    worktree_blocked → still_blocked (local `git worktree list` probe, no gh
+        calls): blocked or indeterminate (repo unreadable) → skip, flag kept;
+        confirmed free → clear flag + sig → fall through
     skip_reason → paused / round limit / approved / merged|closed
     pr_sig unchanged && cycle % 10 != 0 → skip   # cheap dedupe vs full fetch
     while jobs -rp >= CONCURRENCY: sleep 2       # cap parallel rounds
@@ -107,6 +112,12 @@ build_prompt → run_agent
   rc 1 → fail_count++; at MAX_FAILS: keys → seen (stop retrying), gave_up=1,
          escalates with a PR comment + notification
   rc 2/3 → session busy / stopped by user: feedback stays pending
+  rc 4 → worktree blocked (PR branch checked out in the main checkout):
+         not an agent failure — no fail_count/escalation; status shows
+         "worktree blocked" and notifies once per block. Freeing the branch
+         is local — invisible to pr_sig — so the watcher re-probes each poll
+         and runs the round the poll it frees. run_agent clears the flag on
+         any non-4 prep outcome; check_sync defers rc 4 like a busy session
 ```
 
 ### Agent run (`run_agent`)

@@ -13,6 +13,7 @@ mkdir -p "$T/bin" "$T/state"
 cat >"$T/bin/gh" <<'EOF'
 #!/usr/bin/env bash
 state="${GH_STUB_STATE:?}"
+[ "${GH_STUB_DOWN:-0}" = "1" ] && exit 1   # simulate gh unreachable
 case "$1/$2" in
   auth/status) exit 0 ;;
   release/view)
@@ -275,7 +276,7 @@ try_update o "$T/upd/pr-agent"
 eq "update rc" "$RC" 0
 has "updated msg" "$o" 'updated 0.1.0 → 9.9.9'
 eq "installed VERSION" "$(uver "$T/upd/pr-agent")" "9.9.9"
-eq "no leftovers" "$(ls "$T/upd")" "pr-agent"
+eq "no leftovers" "$(ls -A "$T/upd")" "pr-agent"
 
 echo "== S21: bad checksum dies before install =="
 new_repo u21 0.1.0
@@ -315,6 +316,53 @@ has "none published" "$o" 'no releases published yet'
 touch "$GH_STUB_STATE/vbeta"       # newest marker, wrong shape
 try_update o "$T/u24-script"
 has "bad tag shape" "$o" "unexpected release tag 'vbeta' — want vX.Y.Z"
+
+echo "== S25: update arg-count and reachability errors =="
+new_repo u25 0.1.0
+seed_update 0.1.0 9.9.9
+try_update o "$T/upd/pr-agent" 9.9.9 8.8.8
+has "extra arg dies" "$o" 'too many arguments'
+try_update o "$T/upd/pr-agent" --bogus
+has "unknown flag dies" "$o" "unknown flag '--bogus'"
+try_update o "$T/upd/pr-agent" 8.8.8        # gh up, release missing
+has "missing release" "$o" 'no release v8.8.8'
+GH_STUB_DOWN=1 try_update o "$T/upd/pr-agent" 9.9.9
+has "gh down pinned" "$o" "can't reach releases"
+GH_STUB_DOWN=1 try_update o "$T/upd/pr-agent" --check
+has "gh down latest" "$o" "can't reach releases"
+
+echo "== S26: same-version, reinstall, and downgrade paths =="
+new_repo u26 0.1.0
+seed_update 0.1.0 0.1.0
+try_update o "$T/upd/pr-agent" --check
+has "up to date" "$o" 'up to date'
+try_update o "$T/upd/pr-agent"
+has "already on" "$o" 'already on 0.1.0 — nothing to do'
+try_update o "$T/upd/pr-agent" --force
+eq "reinstall rc" "$RC" 0
+has "reinstalled" "$o" 'installed v0.1.0'
+seed_update 9.9.9 0.1.0
+try_update o "$T/upd/pr-agent" --check
+has "newer than latest" "$o" 'newer than latest'
+try_update o "$T/upd/pr-agent"
+has "downgrade msg" "$o" 'installed v0.1.0'
+has "was 9.9.9" "$o" 'was 9.9.9'
+
+echo "== S27: update resolves a symlinked install =="
+new_repo u27 0.1.0
+seed_update 0.1.0 9.9.9
+ln -s "$T/upd/pr-agent" "$T/updl"          # absolute link
+try_update o "$T/updl"
+eq "link rc" "$RC" 0
+eq "real file updated" "$(uver "$T/upd/pr-agent")" "9.9.9"
+[ -L "$T/updl" ] && ok "link survives" || bad "link survives" "link gone"
+( cd "$T" && ln -s "upd/pr-agent" "$T/uprel" )   # relative link
+try_update o "$T/uprel"
+has "relative link sees real file" "$o" 'already on 9.9.9'
+cp "$REPO/pr-agent" "$T/u27/wt-copy"; chmod 755 "$T/u27/wt-copy"
+ln -s "$T/u27/wt-copy" "$T/wlink"
+try_update o "$T/wlink"
+has "linked worktree refused" "$o" 'inside a git worktree — refusing'
 
 echo
 echo "$pass passed, $fail failed"
