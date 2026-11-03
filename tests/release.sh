@@ -24,16 +24,23 @@ case "$1/$2" in
     esac
     exit 0 ;;
   release/list)
-    ls -t "$state" 2>/dev/null | grep '^v' | grep -vE '\.(assets|files)$' | head -1
+    ls -t "$state" 2>/dev/null | grep '^v' | grep -vE '\.(assets|files|notes)$' | head -1
     exit 0 ;;
   release/download)
     tag="$3"; dir=""; prev=""
     for a in "$@"; do [ "$prev" = "--dir" ] && dir="$a"; prev="$a"; done
     [ -n "$dir" ] && [ -d "$state/$tag.files" ] && cp "$state/$tag.files"/* "$dir/"
     exit ;;
+  pr/list) cat "$state/prs" 2>/dev/null || true; exit 0 ;;
   release/create)
     [ "${GH_STUB_FAIL_CREATE:-0}" = "1" ] && exit 1
-    touch "$state/$3"; exit 0 ;;
+    touch "$state/$3"; prev=""
+    for a in "$@"; do
+      [ "$prev" = "--notes-file" ] && cp "$a" "$state/$3.notes"
+      [ "$a" = "--generate-notes" ] && echo "generated" >"$state/$3.notes"
+      prev="$a"
+    done
+    exit 0 ;;
   release/upload)
     tag="$3"; shift 3; : >"$state/$tag.assets"
     if [ "${GH_STUB_FAIL_UPLOAD:-0}" = "1" ]; then
@@ -363,6 +370,35 @@ cp "$REPO/pr-agent" "$T/u27/wt-copy"; chmod 755 "$T/u27/wt-copy"
 ln -s "$T/u27/wt-copy" "$T/wlink"
 try_update o "$T/wlink"
 has "linked worktree refused" "$o" 'inside a git worktree — refusing'
+
+echo "== S28: notes grouped from merged PRs =="
+new_repo r28 0.1.0
+git checkout -qb side
+git commit -q --allow-empty -m 'feat: shiny thing'
+git checkout -q main
+git merge -q --no-ff side -m 'Merge pull request #7 from t/side'
+git commit -q --allow-empty -m 'fix: a typo (#9)'
+git commit -q --allow-empty -m 'feat!: drop old flag (#11)'
+git commit -q --allow-empty -m 'fix!: harder break (#13)'
+git commit -q --allow-empty -m 'feat(api)!: scoped break (#15)'
+git push -q origin main
+printf '7\tfeat: shiny thing\n9\tfix: a typo\n11\tfeat!: drop old flag\n13\tfix!: harder break\n15\tfeat(api)!: scoped break\n' >"$GH_STUB_STATE/prs"
+try_release o 0.1.0
+eq "rc 0" "$RC" 0
+notes="$(cat "$GH_STUB_STATE/v0.1.0.notes")"
+has "features group" "$notes" '### Features'
+has "feat line" "$notes" 'feat: shiny thing — #7'
+has "feat bang line" "$notes" 'feat!: drop old flag — #11'
+has "scoped bang line" "$notes" 'feat(api)!: scoped break — #15'
+has "fixes group" "$notes" '### Fixes'
+has "fix line" "$notes" 'fix: a typo — #9'
+has "fix bang line" "$notes" 'fix!: harder break — #13'
+eq "notes not a release" "$(gh release list --limit 1)" "v0.1.0"
+
+echo "== S29: no PRs in range -> falls back to generated notes =="
+try_release o 0.1.1
+eq "rc 0" "$RC" 0
+has "generated fallback" "$(cat "$GH_STUB_STATE/v0.1.1.notes")" 'generated'
 
 echo
 echo "$pass passed, $fail failed"
