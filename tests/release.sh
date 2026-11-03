@@ -24,7 +24,7 @@ case "$1/$2" in
     esac
     exit 0 ;;
   release/list)
-    ls -t "$state" 2>/dev/null | grep '^v' | grep -vE '\.(assets|files)$' | head -1
+    ls -t "$state" 2>/dev/null | grep '^v' | grep -vE '\.(assets|files|notes)$' | head -1
     exit 0 ;;
   release/download)
     tag="$3"; dir=""; prev=""
@@ -393,6 +393,7 @@ has "scoped bang line" "$notes" 'feat(api)!: scoped break — #15'
 has "fixes group" "$notes" '### Fixes'
 has "fix line" "$notes" 'fix: a typo — #9'
 has "fix bang line" "$notes" 'fix!: harder break — #13'
+eq "notes not a release" "$(gh release list --limit 1)" "v0.1.0"
 
 echo "== S29: no PRs in range -> falls back to generated notes =="
 try_release o 0.1.1
