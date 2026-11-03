@@ -331,6 +331,39 @@ has "gh down pinned" "$o" "can't reach releases"
 GH_STUB_DOWN=1 try_update o "$T/upd/pr-agent" --check
 has "gh down latest" "$o" "can't reach releases"
 
+echo "== S26: same-version, reinstall, and downgrade paths =="
+new_repo u26 0.1.0
+seed_update 0.1.0 0.1.0
+try_update o "$T/upd/pr-agent" --check
+has "up to date" "$o" 'up to date'
+try_update o "$T/upd/pr-agent"
+has "already on" "$o" 'already on 0.1.0 — nothing to do'
+try_update o "$T/upd/pr-agent" --force
+eq "reinstall rc" "$RC" 0
+has "reinstalled" "$o" 'installed v0.1.0'
+seed_update 9.9.9 0.1.0
+try_update o "$T/upd/pr-agent" --check
+has "newer than latest" "$o" 'newer than latest'
+try_update o "$T/upd/pr-agent"
+has "downgrade msg" "$o" 'installed v0.1.0'
+has "was 9.9.9" "$o" 'was 9.9.9'
+
+echo "== S27: update resolves a symlinked install =="
+new_repo u27 0.1.0
+seed_update 0.1.0 9.9.9
+ln -s "$T/upd/pr-agent" "$T/updl"          # absolute link
+try_update o "$T/updl"
+eq "link rc" "$RC" 0
+eq "real file updated" "$(uver "$T/upd/pr-agent")" "9.9.9"
+[ -L "$T/updl" ] && ok "link survives" || bad "link survives" "link gone"
+( cd "$T" && ln -s "upd/pr-agent" "$T/uprel" )   # relative link
+try_update o "$T/uprel"
+has "relative link sees real file" "$o" 'already on 9.9.9'
+cp "$REPO/pr-agent" "$T/u27/wt-copy"; chmod 755 "$T/u27/wt-copy"
+ln -s "$T/u27/wt-copy" "$T/wlink"
+try_update o "$T/wlink"
+has "linked worktree refused" "$o" 'inside a git worktree — refusing'
+
 echo
 echo "$pass passed, $fail failed"
 [ "$fail" -eq 0 ]
