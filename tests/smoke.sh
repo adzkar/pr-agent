@@ -15,7 +15,23 @@ try() { local rc=0; ./pr-agent "$@" >/dev/null 2>&1 || rc=$?; echo "$rc"; }
 PR_AGENT_STATE_DIR="$(mktemp -d /tmp/pr-agent-smoke-state.XXXXXX)"; export PR_AGENT_STATE_DIR
 export PR_AGENT_REPO=test/smoke
 R="$(mktemp -d /tmp/pr-agent-smoke-repo.XXXXXX)"
-trap 'rm -rf "$PR_AGENT_STATE_DIR" "$R" "$R"-*' EXIT   # "$R"-* = link + worktree dirs created next to it
+G="$(mktemp -d /tmp/pr-agent-smoke-gh.XXXXXX)"
+trap 'rm -rf "$PR_AGENT_STATE_DIR" "$R" "$R"-* "$G"' EXIT   # "$R"-* = link + worktree dirs created next to it
+
+# stub gh — hermetic: `pr view N` resolves iff N is in $GH_STUB_PRS, `pr list` prints $GH_STUB_LIST
+cat >"$G/gh" <<'STUB'
+#!/usr/bin/env bash
+case "$1/$2" in
+  pr/view) case " ${GH_STUB_PRS:-} " in
+             *" $3 "*) echo "{\"number\":$3,\"state\":\"OPEN\",\"title\":\"t\",\"updated\":\"2026-01-01\"}" ;;
+             *) echo "GraphQL: Could not resolve to a PullRequest with the number of $3." >&2; exit 1 ;;
+           esac ;;
+  pr/list) [ -n "${GH_STUB_LIST:-}" ] && printf '%s\n' "$GH_STUB_LIST" ;;
+esac
+exit 0
+STUB
+chmod +x "$G/gh"
+export PATH="$G:$PATH" GH_STUB_PRS="42"
 
 D="$PR_AGENT_STATE_DIR/repos/test__smoke"
 mkdir -p "$D"
@@ -63,6 +79,20 @@ check "probe: missing repo → 2 indeterminate" 2 "$(try _blocked 7)"
 echo "$R" >"$D/repo_dir"
 
 check "probe: stale branch ref fails open → 1" 1 "$(try _blocked 9)"
+
+echo "smoke: numbers that aren't PRs rejected; gc forgets stale keys"
+
+check "pause: non-PR number dies"              1 "$(try pause 6)"
+out="$(./pr-agent pause 6 2>&1 || true)"
+case "$out" in *"not a pull request"*) echo "  ok   die says why" ;; *) echo "  FAIL message: $out"; fail=1 ;; esac
+check "tell: non-PR number dies"               1 "$(try tell 6 hi)"
+check "run: non-PR number dies"                1 "$(try run 6)"
+check "reset: non-PR number dies"              1 "$(try reset 6)"
+check "pause: real PR accepted"                0 "$(try pause 42)"
+if jq -e '.prs["6"]' "$D/map.json" >/dev/null 2>&1; then echo "  FAIL stale map key written"; fail=1
+else echo "  ok   no map key for a non-PR number"; fi
+if [ -e "$D/feedback/6.tell.md" ]; then echo "  FAIL tell prompt file left"; fail=1
+else echo "  ok   no tell prompt file"; fi
 
 echo
 if [ "$fail" -eq 0 ]; then echo "smoke: all checks passed"; else echo "smoke: FAILURES"; exit 1; fi
