@@ -13,7 +13,7 @@
 | `README.md` | User docs: install, commands, dashboard, config |
 | `docs/ARCHITECTURE.md` | Code structure map, state files, execution flows |
 | `release` | Maintainer script — cuts versioned GitHub releases (`./release [patch|minor|major|X.Y.Z]`) |
-| `tests/` | `release.sh` — scratch-repo + stubbed-`gh` harness for `release` and `update` |
+| `tests/` | `release.sh` — scratch-repo + stubbed-`gh` harness for `release` and `update`; `update-check.sh` — extracted-function harness for `maybe_update_check`/`pending_update_version` |
 | `tests/smoke.sh` | Scratch-repo smoke for the worktree-blocked lifecycle (local git only) |
 | `tests/review_verdict.sh` | Fixture checks for the `PR_JQ` `.review` verdict derivation (jq only) |
 | `AGENTS.md` | This file |
@@ -39,11 +39,13 @@ mints the checked-in `VERSION` if it was never released.
 
 ## Verify before committing
 
-Three scratch-repo harnesses cover what CI doesn't: `tests/smoke.sh`
+Four scratch-repo harnesses cover what CI doesn't: `tests/smoke.sh`
 exercises the worktree-blocked lifecycle on local git alone;
 `tests/review_verdict.sh` runs the `PR_JQ` verdict derivation over fixture
 payloads; `tests/release.sh` drives the `release` state machine and
-`cmd_update` end-to-end with a stubbed `gh`. Minimum checks:
+`cmd_update` end-to-end with a stubbed `gh`; `tests/update-check.sh` extracts
+the update-check functions from `pr-agent` and exercises the stamp/throttle
+edge cases. Minimum checks:
 
 ```sh
 bash -n pr-agent                       # syntax
@@ -52,6 +54,7 @@ shellcheck pr-agent release 2>/dev/null || true # lint if available
 tests/smoke.sh                         # worktree-blocked lifecycle in a scratch repo (no gh)
 tests/review_verdict.sh                # .review verdict derivation fixtures (no gh)
 ./tests/release.sh                     # release + update scenarios (run when `release` or `cmd_update` changes)
+./tests/update-check.sh                # update-check edge cases (run when the check changes)
 cd /path/to/a/watched/repo             # then run READ-ONLY commands only:
 pr-agent status                        #   dashboard (renders table + activity)
 pr-agent status -w 1 & sleep 4; kill %1  #   watch-mode frame
@@ -60,8 +63,9 @@ pr-agent peek N / pr-agent logs N      #   per-PR inspection
 ```
 
 Commands with side effects — `on`, `off`, `run`, `tell`, `retry`, `sync --apply`,
-`gc` — spawn agent sessions, post PR comments, or delete worktrees. Don't run
-them as a smoke test unless that's the intent.
+`gc`, `update` — spawn agent sessions, post PR comments, delete worktrees, or
+overwrite the installed script. Don't run them as a smoke test unless that's
+the intent.
 
 ## Conventions (match what's there)
 
@@ -155,6 +159,22 @@ them as a smoke test unless that's the intent.
   the call stack unwinds, so cleanup vars a trap touches must be globals
   (`UPDATE_TMP`/`UPDATE_STAGED` in `cmd_update`). Signal traps (INT/TERM)
   fire inside the function and *do* see locals.
+- **A feature toggle must gate the read side, not just the writer.**
+  `UPDATE_CHECK` originally only stopped `maybe_update_check` from refreshing
+  `latest_release`, so a recorded pending update kept nagging forever. Gate
+  the reader (`pending_update_version`) instead — every current and future
+  consumer is covered in one place. Mind per-repo config vs global state: a
+  `SETTINGS`-persisted toggle still reads global `$STATE_ROOT` files, so the
+  disable only applies in the repo it's set in.
+- **Best-effort preamble must never kill dispatch.** `maybe_update_check`
+  runs before every command — an unguarded `echo >"$stamp"` under `set -e`
+  aborted *every* invocation once the stamp went unwritable (e.g. root-owned
+  after `sudo pr-agent update`). Any spawn/setup work that isn't the primary
+  command needs `|| return`/`|| true`, and put `2>/dev/null` *before* the
+  failing redirect so the EACCES noise is suppressed too. Detached jobs also
+  get `mv -f` (matches `cmd_update`) and `</dev/null` — explicit, so nothing
+  ever inherits a tty or prompt-blocks. Reference: `tests/update-check.sh`
+  S6/S9.
 
 ## Commit style
 
