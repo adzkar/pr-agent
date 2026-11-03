@@ -178,6 +178,13 @@ the intent.
   get `mv -f` (matches `cmd_update`) and `</dev/null` — explicit, so nothing
   ever inherits a tty or prompt-blocks. Reference: `tests/update-check.sh`
   S6/S9.
+- **Every `v*` file the `tests/release.sh` stub writes must join the
+  `release/list` exclusion.** The stub keeps sidecars next to the release
+  markers (`<tag>.assets`, `<tag>.files`, `<tag>.notes`) and its
+  `release/list` is `ls -t | grep '^v' | grep -vE '\.(assets|files|notes)$'`
+  — an unfiltered suffix passes the grep and, being newer than the
+  `touch`ed marker, surfaces as the "latest release" to `cmd_update`.
+  When the stub learns a new sidecar, extend the regex.
 
 ## Commit style
 
