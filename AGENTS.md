@@ -194,7 +194,10 @@ the intent.
   must also confirm the number resolves to a pull request — `tell`/`pause`/
   `reset` on an *issue* number used to mint a `.prs` key that rendered as a
   permanent "?" status row (`pr_info` finds nothing; `gc` skipped the `""`
-  state). `gc` now forgets keys with no cached object whose `gh pr view`
+  state). `on`/`add` took them into `targets` instead — same dead row plus
+  a `fetch_feedback` 404 every poll, and `gc` can't collect a targets entry
+  (only `rm` can) — so both validate each argument through `need_real_pr`
+  too. `gc` now forgets keys with no cached object whose `gh pr view`
   fails with "Could not resolve to a PullRequest" — `refresh_prs 0` +
   `backfill_prs` already ran by then, so that verdict means "not a PR", not
   "uncached". Only that exact stderr verdict is proof (`gh_err_not_pr` is

@@ -127,5 +127,19 @@ if jq -e '.prs["66"]' "$D/map.json" >/dev/null 2>&1; then echo "  FAIL locked ph
 else echo "  ok   stale lock didn't shield the phantom"; fi
 [ -d "$D/locks/66" ] && { echo "  FAIL stale lock dir left behind"; fail=1; } || echo "  ok   stale lock dir dropped"
 
+echo "smoke: on/add reject numbers that aren't PRs"
+
+check "on: non-PR number dies"              1 "$(try on 6)"
+if [ -e "$D/targets" ]; then echo "  FAIL on wrote targets before validating"; fail=1
+else echo "  ok   rejected on wrote no targets"; fi
+echo "42" >"$D/targets"
+check "add: non-PR number dies"             1 "$(try add 6)"
+check "add: non-numeric dies"               1 "$(try add abc)"
+if [ "$(cat "$D/targets")" = "42" ]; then echo "  ok   rejected add left targets alone"
+else echo "  FAIL targets changed: $(cat "$D/targets")"; fail=1; fi
+check "add: real PR accepted"               0 "$(try add 42)"
+if [ "$(cat "$D/targets")" = "42" ]; then echo "  ok   targets: $(cat "$D/targets")"
+else echo "  FAIL targets: $(cat "$D/targets")"; fail=1; fi
+
 echo
 if [ "$fail" -eq 0 ]; then echo "smoke: all checks passed"; else echo "smoke: FAILURES"; exit 1; fi

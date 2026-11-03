@@ -1210,7 +1210,12 @@ cmd_on() {
   is_running && die "already running (pid $(cat "$PID_FILE")) — 'pr-agent off' first"
   detect_repo
   map_init
-  if [ $# -eq 0 ] || [ "$1" = "all" ]; then echo "all" >"$STATE_DIR/targets"; else echo "$*" >"$STATE_DIR/targets"; fi
+  if [ $# -eq 0 ] || [ "$1" = "all" ]; then
+    echo "all" >"$STATE_DIR/targets"
+  else
+    local n; for n in "$@"; do need_real_pr "$n"; done   # validate before anything lands in targets
+    echo "$*" >"$STATE_DIR/targets"
+  fi
   save_config
   local what; what="$(cat "$STATE_DIR/targets")"
   if [ "$what" = "all" ]; then what="$(scope_label)"; else what="$(hash_list "$what")"; fi
@@ -2021,6 +2026,7 @@ case "${1:-}" in
     shift; need_repo
     t="$(cat "$STATE_DIR/targets" 2>/dev/null || echo all)"
     [ "$t" != "all" ] || die "watching $(scope_label) — nothing to add (use 'pr-agent on N...' for an explicit list)"
+    for n in "$@"; do need_real_pr "$n"; done
     echo "$t $*" | tr ' ' '\n' | { grep -E '^[0-9]+$' || true; } | sort -un | tr '\n' ' ' | sed 's/ $//' >"$STATE_DIR/targets"
     echo "targets: $(cat "$STATE_DIR/targets")" ;;
   rm)
