@@ -106,10 +106,14 @@ them as a smoke test unless that's the intent.
   PRs each poll via `still_blocked` (`git worktree list`, prunable stale
   registrations skipped — keep it gh-free) *before* `skip_reason`, so a
   paused/limited/approved PR's flag can't go stale — and clears `sig` to
-  force the round on the poll the probe reports free. `render_status` also
-  re-probes flagged PRs (`refresh_blocked_flags`) so the flag un-stales when
-  the watcher is off, and `sync_scan watch` skips flagged PRs since a blocked
-  `check_sync` only defers anyway.
+  force the round on the poll the probe reports free. `still_blocked` has a
+  three-way rc: 0 still blocked, 1 confirmed free, **2 indeterminate** (empty
+  `repo_dir`/`branch`, moved/broken repo, `worktree list` failed) — callers
+  keep flag + sig and skip on rc 2, because forcing a round on a repo we
+  can't read would burn `fail_count`, the exact escalation class rc 4 exists
+  to avoid. `render_status` also re-probes flagged PRs (`refresh_blocked_flags`)
+  so the flag un-stales when the watcher is off, and `sync_scan watch` skips
+  flagged PRs since a blocked `check_sync` only defers anyway.
 - **Feedback `key` ≠ seen marker ≠ skip state.** Marking a key seen only stops
   *that* item; the PR may still have pending items.
 - **The `… N more` table row and the fallback `… N more lines` clip are

@@ -83,7 +83,8 @@ same script.
 refresh_prs 0                      # one gh pr list; failure → gh_error + warn once
 for pr in $(targets):              # all open non-draft PRs (PR_AUTHOR_FILTER scope), or explicit list
     worktree_blocked → still_blocked (local `git worktree list` probe, no gh
-        calls): still blocked → skip; freed → clear flag + sig → fall through
+        calls): blocked or indeterminate (repo unreadable) → skip, flag kept;
+        confirmed free → clear flag + sig → fall through
     skip_reason → paused / round limit / approved / merged|closed
     pr_sig unchanged && cycle % 10 != 0 → skip   # cheap dedupe vs full fetch
     while jobs -rp >= CONCURRENCY: sleep 2       # cap parallel rounds

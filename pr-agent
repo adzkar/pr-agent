@@ -601,15 +601,16 @@ ensure_worktree() { # pr branch -> prints worktree abs path (never the main chec
   [ -d "$wt" ] && echo "$wt"
 }
 
-still_blocked() { # pr -> 0 while the worktree_blocked condition holds: PR branch checked out in the main checkout (local-only probe — no gh calls)
+still_blocked() { # pr -> 0 still blocked; 1 confirmed free; 2 indeterminate (callers: keep flag + sig, skip — a forced round would burn fail_count)
   local rd rd_real wt branch
   rd="$(repo_dir)"; branch="$(pr_info "$1" branch)"
-  [ -n "$rd" ] && [ -n "$branch" ] || return 1
+  [ -n "$rd" ] && [ -n "$branch" ] || return 2
+  git -C "$rd" rev-parse --git-dir >/dev/null 2>&1 || return 2   # moved/deleted repo or broken .git — a probe here would lie
   # a renamed branch name can freeze in prs_extra — don't trust a probe on a ref that isn't there
   git -C "$rd" show-ref --verify --quiet "refs/heads/$branch" \
     || git -C "$rd" show-ref --verify --quiet "refs/remotes/origin/$branch" || return 1
   rd_real="$(cd "$rd" 2>/dev/null && pwd -P || true)"; rd_real="${rd_real:-$rd}"
-  wt="$(worktree_holding "$rd" "$branch")"
+  wt="$(worktree_holding "$rd" "$branch")" || return 2   # worktree list failed on a live repo — can't determine
   printf '%s\n' "$wt" | grep -qxF "$rd" || printf '%s\n' "$wt" | grep -qxF "$rd_real"
 }
 
@@ -1068,7 +1069,7 @@ watch_loop() {
   echo $$ >"$PID_FILE"
   trap 'rm -f "$PID_FILE" "$STATE_DIR/cycle_active"; exit 0' TERM INT
   log "watcher started (repo=$(repo), every ${INTERVAL}s, mode=$PERM_MODE, concurrency=$CONCURRENCY)"
-  local cycle=0 pr reason sig gh_down=0
+  local cycle=0 pr reason sig gh_down=0 rc
   while true; do
     cd "$(repo_dir)" 2>/dev/null || cd /   # keep cwd valid — repo_dir itself may be deleted mid-run
     touch "$STATE_DIR/cycle_active"
@@ -1078,8 +1079,11 @@ watch_loop() {
         if [ "$(map_get "$pr" worktree_blocked)" = "1" ]; then
           # freeing the branch is a local act pr_sig can't see — re-probe every poll
           # (still_blocked is local-only), skipped PRs included so the flag can't go
-          # stale under a pause/limit; once free, drop sig so this poll's check runs
-          if still_blocked "$pr"; then continue; fi
+          # stale under a pause/limit. rc 2 = indeterminate (repo unreadable): keep
+          # the flag and skip — forcing a round would only burn fail_count. Only a
+          # confirmed-free probe clears flag + sig so this poll's check runs.
+          rc=0; still_blocked "$pr" || rc=$?
+          [ "$rc" -eq 1 ] || continue
           map_del "$pr" worktree_blocked; map_del "$pr" blocked_logged; map_del "$pr" sig
         fi
         reason="$(skip_reason "$pr")"
@@ -1484,10 +1488,11 @@ refresh_status_pending() { # ttl -> recount unprocessed feedback per open PR unl
   mv "$tmp" "$STATUS_PENDING"
 }
 
-refresh_blocked_flags() { # -> still_blocked re-probe per flagged PR so a freed branch un-stales the display when the watcher is off
-  local pr
+refresh_blocked_flags() { # -> still_blocked re-probe per flagged PR so a freed branch un-stales the display when the watcher is off; rc 2 (indeterminate) keeps the flag
+  local pr rc
   for pr in $(jq -r '.prs | to_entries[] | select(.value.worktree_blocked == "1") | .key' "$MAP_FILE" 2>/dev/null || true); do
-    still_blocked "$pr" || { map_del "$pr" worktree_blocked; map_del "$pr" blocked_logged; map_del "$pr" sig; }
+    rc=0; still_blocked "$pr" || rc=$?
+    if [ "$rc" -eq 1 ]; then map_del "$pr" worktree_blocked; map_del "$pr" blocked_logged; map_del "$pr" sig; fi
   done
 }
 
