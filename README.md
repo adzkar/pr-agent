@@ -21,6 +21,11 @@ starting cold.
 install -m 755 pr-agent /usr/local/bin/pr-agent
 ```
 
+Once installed, `pr-agent update` replaces it with the latest GitHub release
+(`--check` peeks first; releases are published by `./release`). `update` swaps
+whichever copy you invoke — it refuses one inside a git worktree, like this
+repo's editable file, unless `--force`.
+
 ## Quick start
 
 ```sh
@@ -56,6 +61,7 @@ shows where every PR stands.
 | `pr-agent config` | Show effective settings |
 | `pr-agent map` | Show the raw PR → session/worktree map (JSON) |
 | `pr-agent version` | Print the installed version |
+| `pr-agent update [--check] [--force] [X.Y.Z]` | Self-update the invoked copy to the latest (or given) release — `--force` reinstalls and permits a git-worktree copy |
 
 ## The dashboard
 
