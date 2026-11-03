@@ -1,7 +1,7 @@
 # pr-agent — agent rules
 
 > Read this before editing. The whole tool is **one file**: `pr-agent`
-> (~1600 lines of bash). The canonical docs are `README.md` (usage) and
+> (~1900 lines of bash). The canonical docs are `README.md` (usage) and
 > `docs/ARCHITECTURE.md` (code map + flows) — read the architecture doc
 > before touching anything past line 100.
 
@@ -15,6 +15,7 @@
 | `release` | Maintainer script — cuts versioned GitHub releases (`./release [patch|minor|major|X.Y.Z]`) |
 | `tests/` | `release.sh` — scratch-repo + stubbed-`gh` harness for `release` and `update`; `update-check.sh` — extracted-function harness for `maybe_update_check`/`pending_update_version` |
 | `tests/smoke.sh` | Scratch-repo smoke for the worktree-blocked lifecycle (local git only) |
+| `tests/review_verdict.sh` | Fixture checks for the `PR_JQ` `.review` verdict derivation (jq only) |
 | `AGENTS.md` | This file |
 
 ## Deploy model
@@ -38,17 +39,20 @@ mints the checked-in `VERSION` if it was never released.
 
 ## Verify before committing
 
-Three scratch-repo harnesses cover what CI doesn't: `tests/smoke.sh`
-exercises the worktree-blocked lifecycle on local git alone; `tests/release.sh`
-drives the `release` state machine and `cmd_update` end-to-end with a stubbed
-`gh`; `tests/update-check.sh` extracts the update-check functions from
-`pr-agent` and exercises the stamp/throttle edge cases. Minimum checks:
+Four scratch-repo harnesses cover what CI doesn't: `tests/smoke.sh`
+exercises the worktree-blocked lifecycle on local git alone;
+`tests/review_verdict.sh` runs the `PR_JQ` verdict derivation over fixture
+payloads; `tests/release.sh` drives the `release` state machine and
+`cmd_update` end-to-end with a stubbed `gh`; `tests/update-check.sh` extracts
+the update-check functions from `pr-agent` and exercises the stamp/throttle
+edge cases. Minimum checks:
 
 ```sh
 bash -n pr-agent                       # syntax
 bash -n release                        # syntax
 shellcheck pr-agent release 2>/dev/null || true # lint if available
 tests/smoke.sh                         # worktree-blocked lifecycle in a scratch repo (no gh)
+tests/review_verdict.sh                # .review verdict derivation fixtures (no gh)
 ./tests/release.sh                     # release + update scenarios (run when `release` or `cmd_update` changes)
 ./tests/update-check.sh                # update-check edge cases (run when the check changes)
 cd /path/to/a/watched/repo             # then run READ-ONLY commands only:
@@ -110,6 +114,14 @@ the intent.
   it so the status table keeps title/state, but `targets`/`pr_sig` must keep
   reading `prs.jsonl` alone — a stale OPEN entry would make a dead PR
   watchable forever, and a frozen `updated` would mask real changes.
+- **`reviewDecision` is empty without branch protection** — GitHub only
+  computes it relative to required reviewers, so an APPROVED PR on an
+  unprotected base still returns `""`. That's why `.review` falls back to
+  each non-author reviewer's latest *opinionated* `reviews` entry — only
+  `APPROVED`/`CHANGES_REQUESTED` count (a `COMMENTED` review can't erase a
+  standing verdict, a dismissed review reads `DISMISSED` so it drops out);
+  CHANGES_REQUESTED wins, else APPROVED counts. Never read `reviewDecision`
+  raw when the verdict matters.
 - **Feedback `.author` is nullable** — it's `.user.login` from the GitHub API,
   which is `null` for deleted/ghost accounts. jq string builtins (`endswith`,
   `startswith`, `test` on the value itself) abort the whole `filter_feedback`
