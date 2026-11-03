@@ -30,8 +30,9 @@
 #   pr-agent config                 Show effective settings
 #   pr-agent map                    Show the raw PR → session/worktree map
 #   pr-agent version                Print the installed version
-#   pr-agent update [--check] [X.Y.Z]  Self-update this script from a GitHub release
-#                                      (latest, or the given version)
+#   pr-agent update [--check] [--force] [X.Y.Z]  Self-update this script from a GitHub
+#                                                release (latest, or given; --force
+#                                                reinstalls / allows a repo copy)
 #
 # A PR comment by you that starts with "/agent" is treated as feedback.
 #
@@ -61,6 +62,15 @@
 #   PR_AGENT_SKIP_RE      Regex; feedback bodies matching it are ignored
 #                         (default: HTML "in-progress" markers, e.g. a review bot's
 #                          placeholder)
+#   PR_AGENT_BOT_STATUS_RE  jq regex marking a bot's "working on it" chatter —
+#                         applied only to top-level comments from [bot]/BOTS authors
+#                         (reviews and line comments always pass, so bot findings
+#                         can't be filtered). Case-insensitive and unanchored; the
+#                         default omits "in progress" — too common in findings
+#                         prose — but a comment using a shipped phrase mid-sentence
+#                         is still filtered. Tighten via env, or have bots mark
+#                         chatter with the SKIP_RE HTML marker
+#                         (default: \b(underway|already running|queued)\b)
 #   PR_AGENT_SETUP        Command run inside a newly created worktree instead of the
 #                         built-in setup (env files + node_modules/bun)
 #   PR_AGENT_MAIN_SYNC    1 = each poll also auto-syncs open PRs whose branch falls behind
@@ -155,6 +165,7 @@ CI_TRIGGER="${PR_AGENT_CI:-${CFG_CI_TRIGGER:-0}}"
 CONFLICT_TRIGGER="${PR_AGENT_CONFLICTS:-${CFG_CONFLICT_TRIGGER:-0}}"
 NOTIFY="${PR_AGENT_NOTIFY:-${CFG_NOTIFY:-1}}"
 SKIP_RE="${PR_AGENT_SKIP_RE:-${CFG_SKIP_RE:-in-progress -->}}"
+BOT_STATUS_RE="${PR_AGENT_BOT_STATUS_RE:-${CFG_BOT_STATUS_RE:-\b(underway|already running|queued)\b}}"
 SETUP_CMD="${PR_AGENT_SETUP:-${CFG_SETUP_CMD:-}}"
 MAIN_SYNC="${PR_AGENT_MAIN_SYNC:-${CFG_MAIN_SYNC:-0}}"               # 1 = poll also syncs PR branches that fall behind the base
 RETRY="${PR_AGENT_RETRY:-${CFG_RETRY:-1}}"                        # 1 = ping the review bot when its review run fails
@@ -173,7 +184,7 @@ UPDATE_CHECK_EVERY="${PR_AGENT_UPDATE_CHECK_EVERY:-${CFG_UPDATE_CHECK_EVERY:-864
 [[ "$UPDATE_CHECK_EVERY" =~ ^[0-9]+$ ]] || UPDATE_CHECK_EVERY=86400
 FULL_CHECK_EVERY=10   # cycles; forces a full feedback fetch even if nothing looks changed
 
-SETTINGS="INTERVAL PERM_MODE SANDBOX AUTHOR_FILTER PR_AUTHOR_FILTER BOTS TRIGGER MAX_FAILS MAX_ROUNDS STOP_ON_APPROVE CONCURRENCY CI_TRIGGER CONFLICT_TRIGGER NOTIFY RETRY RETRY_MAX RETRY_RE RETRY_MSG SKIP_RE SETUP_CMD MAIN_SYNC TABLE_ROWS ACTIVITY_LINES TITLE_W UPDATE_CHECK UPDATE_CHECK_EVERY"
+SETTINGS="INTERVAL PERM_MODE SANDBOX AUTHOR_FILTER PR_AUTHOR_FILTER BOTS TRIGGER MAX_FAILS MAX_ROUNDS STOP_ON_APPROVE CONCURRENCY CI_TRIGGER CONFLICT_TRIGGER NOTIFY RETRY RETRY_MAX RETRY_RE RETRY_MSG SKIP_RE BOT_STATUS_RE SETUP_CMD MAIN_SYNC TABLE_ROWS ACTIVITY_LINES TITLE_W UPDATE_CHECK UPDATE_CHECK_EVERY"
 
 save_config() {
   local k; : >"$STATE_DIR/config"
@@ -364,7 +375,7 @@ seed_seen() { # pr all_file -> create seen/<pr> on first sight, honouring the le
 filter_feedback() { # pr all_file -> new, actionable items (jsonl, oldest first)
   local seen="$STATE_DIR/seen/$1"; [ -f "$seen" ] || seen=/dev/null
   jq -c -s --arg me "$(me)" --arg only "$AUTHOR_FILTER" --arg bots "$BOTS" --arg skip "$SKIP_RE" \
-      --arg retry_re "$RETRY_RE" --arg trig "$TRIGGER" --rawfile seen "$seen" '
+      --arg retry_re "$RETRY_RE" --arg status_re "$BOT_STATUS_RE" --arg trig "$TRIGGER" --rawfile seen "$seen" '
     ($seen | split("\n") | map(select(length > 0) | {(.): true}) | add // {}) as $S
     | ($only | split(",") | map(gsub("^ +| +$"; "")) | map(select(length > 0))) as $O
     | ($bots | split(",") | map(gsub("^ +| +$"; ""))) as $B
@@ -373,11 +384,14 @@ filter_feedback() { # pr all_file -> new, actionable items (jsonl, oldest first)
         and ($skip == "" or ((.body // "") | test($skip) | not))
         and ($retry_re == "" or ((.author as $a | $B | map(. == $a) | any)
                                  and ((.body // "") | test($retry_re))) | not)
+        and ($status_re == "" or (.kind != "comment")
+                                 or ((.author as $a | (($a // "") | endswith("[bot]")) or ($B | map(. == $a) | any)) | not)
+                                 or ((.body // "") | test($status_re; "i") | not))
         and (.synthetic == true
              or (.author == $me and $trig != "" and ((.body // "") | ltrimstr(" ") | startswith($trig)))
              or (.author != $me and (.author as $a |
                    if ($O | length) > 0 then ($O | map(. == $a) | any)
-                   elif ($a | endswith("[bot]")) then ($B | map(. == $a) | any)
+                   elif (($a // "") | endswith("[bot]")) then ($B | map(. == $a) | any)
                    else true end)))))
     | sort_by(.ts) | .[]' "$2"
 }
@@ -999,10 +1013,14 @@ skip_reason() { # pr -> why the watcher won't auto-run this PR (empty = eligible
 
 # --- watcher ---------------------------------------------------------------------------
 
+pid_is_watcher() { # pid -> 0 when pid is a live `pr-agent _loop` process
+  kill -0 "$1" 2>/dev/null && ps -p "$1" -o command= 2>/dev/null | grep -q "_loop"
+}
+
 is_running() {
   [ -f "$PID_FILE" ] || return 1
   local pid; pid="$(cat "$PID_FILE")"
-  kill -0 "$pid" 2>/dev/null && ps -p "$pid" -o command= 2>/dev/null | grep -q "_loop"
+  pid_is_watcher "$pid"
 }
 
 pr_sig() { # pr -> change signature (updatedAt + head + CI + mergeability)
@@ -1010,6 +1028,7 @@ pr_sig() { # pr -> change signature (updatedAt + head + CI + mergeability)
 }
 
 watch_loop() {
+  cd "$(repo_dir)" 2>/dev/null || cd /   # a deleted launch dir spams getcwd errors on every job
   rm -rf "$STATE_DIR"/locks/*/ "$STATE_DIR"/running/* 2>/dev/null || true   # drop markers orphaned by a previous dead loop
   retry_cutoff >/dev/null   # set once on first start of this version; pre-existing failures stay manual-only
   echo $$ >"$PID_FILE"
@@ -1017,6 +1036,7 @@ watch_loop() {
   log "watcher started (repo=$(repo), every ${INTERVAL}s, mode=$PERM_MODE, concurrency=$CONCURRENCY)"
   local cycle=0 pr reason sig gh_down=0
   while true; do
+    cd "$(repo_dir)" 2>/dev/null || cd /   # keep cwd valid — repo_dir itself may be deleted mid-run
     touch "$STATE_DIR/cycle_active"
     if refresh_prs 0; then
       [ "$gh_down" -eq 1 ] && log "GitHub reachable again"; gh_down=0
@@ -1330,7 +1350,8 @@ ver_gt() { # a b -> 0 when a is a higher semver than b (bare X.Y.Z; BSD sort has
 }
 
 latest_release_tag() { # -> tag of the newest upstream release; empty when none published, non-zero on gh failure
-  gh release list --repo "$UPDATE_REPO" --limit 1 --json tagName -q '.[0].tagName' 2>/dev/null
+  gh release list --repo "$UPDATE_REPO" --limit 1 --json tagName -q '.[0].tagName' \
+    --exclude-drafts --exclude-pre-releases 2>/dev/null
 }
 
 cmd_update() { # [--check] [--force] [X.Y.Z] -> download a release and install it over this script
@@ -1352,6 +1373,7 @@ cmd_update() { # [--check] [--force] [X.Y.Z] -> download a release and install i
   else
     tag="$(latest_release_tag)" || die "can't reach releases for $UPDATE_REPO (gh auth ok?)"
     [ -n "$tag" ] || die "no releases published yet"
+    [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "unexpected release tag '$tag' — want vX.Y.Z"
   fi
   local latest="${tag#v}"
 
@@ -1368,29 +1390,36 @@ cmd_update() { # [--check] [--force] [X.Y.Z] -> download a release and install i
   fi
 
   local dir; dir="$(dirname "$SELF")"
+  if [ "$force" = "0" ] && git -C "$dir" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    die "$SELF is inside a git worktree — refusing to overwrite it (--force to override)"
+  fi
   [ -w "$dir" ] || die "$dir not writable — retry with: sudo pr-agent update $tag"
 
-  local tmp; tmp="$(mktemp -d)"
-  gh release download "$tag" --repo "$UPDATE_REPO" --dir "$tmp" --clobber \
+  UPDATE_TMP="$(mktemp -d)"; UPDATE_STAGED="$dir/.pr-agent.new.$$"   # globals: EXIT traps can't see locals under set -u
+  trap 'rm -rf "$UPDATE_TMP"; rm -f "$UPDATE_STAGED"' EXIT
+  gh release download "$tag" --repo "$UPDATE_REPO" --dir "$UPDATE_TMP" --clobber \
       -p pr-agent -p pr-agent.sha256 >/dev/null 2>&1 \
-    || { rm -rf "$tmp"; die "couldn't download $tag assets"; }
-  (cd "$tmp" && shasum -a 256 -c pr-agent.sha256 >/dev/null 2>&1) \
-    || { rm -rf "$tmp"; die "$tag checksum verification failed — not installing"; }
+    || die "couldn't download $tag assets"
+  (cd "$UPDATE_TMP" && shasum -a 256 -c pr-agent.sha256 >/dev/null 2>&1) \
+    || die "$tag checksum verification failed — not installing"
 
-  local staged="$dir/.pr-agent.new.$$"
-  if ! install -m 755 "$tmp/pr-agent" "$staged" 2>/dev/null; then
-    rm -rf "$tmp" "$staged"; die "couldn't stage the new script in $dir"
-  fi
-  if ! mv "$staged" "$SELF" 2>/dev/null; then
-    rm -rf "$tmp" "$staged"; die "couldn't install over $SELF"
-  fi
-  rm -rf "$tmp"
+  install -m 755 "$UPDATE_TMP/pr-agent" "$UPDATE_STAGED" 2>/dev/null \
+    || die "couldn't stage the new script in $dir"
+  mv -f "$UPDATE_STAGED" "$SELF" 2>/dev/null || die "couldn't install over $SELF"
+  rm -rf "$UPDATE_TMP"; trap - EXIT
 
   if ver_gt "$latest" "$VERSION"; then echo "updated $VERSION → $latest at $SELF"
   else echo "installed $tag at $SELF (was $VERSION)"; fi
-  if is_running; then
-    echo "note: the watcher still runs $VERSION — restart it: pr-agent off && pr-agent on"
-  fi
+  local pf pid
+  for pf in "$STATE_ROOT"/repos/*/pid; do
+    [ -f "$pf" ] || continue
+    pid="$(cat "$pf" 2>/dev/null || true)"
+    if [ -n "$pid" ] && pid_is_watcher "$pid"; then
+      echo "note: a watcher still runs $VERSION — restart it: pr-agent off && pr-agent on"
+      break
+    fi
+  done
+  return 0
 }
 
 # OMZ-style update check: every invocation refreshes $STATE_ROOT/latest_release in a
@@ -1712,8 +1741,9 @@ render_status() { # ttl [term-rows] -> status screen; with term-rows the PR tabl
     if [ -n "${2:-}" ]; then
       body=$(( $2 - chrome - gherr )); [ "$body" -lt 0 ] && body=0
     fi
-    if [ "$TABLE_ROWS" -gt 0 ] && [ "$TABLE_ROWS" -lt "$shown" ]; then
-      shown="$TABLE_ROWS"; cap_why="TABLE_ROWS" # explicit cap wins — overflow falls to the bottom clip
+    if [ "$TABLE_ROWS" -gt 0 ]; then
+      [ "$TABLE_ROWS" -lt "$shown" ] && { shown="$TABLE_ROWS"; cap_why="TABLE_ROWS"; }
+      # explicit size wins over terminal-fit — overflow falls to the bottom clip
     elif [ "$shown" -gt "$body" ]; then
       shown=$(( body - 1 )); [ "$shown" -lt 0 ] && shown=0; cap_why=term # reserve a line for "… more"
     fi

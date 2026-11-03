@@ -12,6 +12,8 @@
 | `pr-agent` | The entire tool — a self-contained bash script, no build step |
 | `README.md` | User docs: install, commands, dashboard, config |
 | `docs/ARCHITECTURE.md` | Code structure map, state files, execution flows |
+| `release` | Maintainer script — cuts versioned GitHub releases (`./release [patch|minor|major|X.Y.Z]`) |
+| `tests/` | `release.sh` — scratch-repo + stubbed-`gh` harness for `release` |
 | `AGENTS.md` | This file |
 
 ## Deploy model
@@ -29,15 +31,20 @@ or changes diverge silently. If it already drifted, diff before overwriting.
 Releases are cut with `./release [patch|minor|major|X.Y.Z]` from a clean
 `main`: it bumps the `VERSION=` line, commits, tags `vX.Y.Z`, pushes, and
 publishes a GitHub release with `pr-agent` + `pr-agent.sha256` assets — the
-artifacts `pr-agent update` downloads.
+artifacts `pr-agent update` downloads. Interrupted runs resume — the tag
+is (re)anchored at `HEAD` and assets (re)uploaded — and `./release X.Y.Z`
+mints the checked-in `VERSION` if it was never released.
 
 ## Verify before committing
 
-There is no test suite. Minimum checks:
+`tests/release.sh` is the only test suite — a scratch-repo + stubbed-`gh`
+harness covering the `release` state machine end-to-end. Minimum checks:
 
 ```sh
 bash -n pr-agent                       # syntax
-shellcheck pr-agent 2>/dev/null || true # lint if available
+bash -n release                        # syntax
+shellcheck pr-agent release 2>/dev/null || true # lint if available
+./tests/release.sh                     # release scenarios (run when `release` changes)
 cd /path/to/a/watched/repo             # then run READ-ONLY commands only:
 pr-agent status                        #   dashboard (renders table + activity)
 pr-agent status -w 1 & sleep 4; kill %1  #   watch-mode frame
@@ -70,6 +77,10 @@ the intent.
 
 ## Traps that have bitten before
 
+- **`watch_loop` re-`cd`s every cycle, on purpose.** The `cd "$(repo_dir)"`
+  at loop entry covers a deleted *launch* dir; repeating it at the top of
+  `while` covers `repo_dir` itself being deleted mid-run — forked jobs in
+  an unreachable cwd spam getcwd errors. Don't hoist the in-loop `cd`.
 - **`state_cell`/`review_cell` have side effects** — they populate the `H_*`
   hint buckets that drive the bottom "what now" line. If you skip drawing a
   table row you must still call them, or the hint lies.
@@ -88,6 +99,12 @@ the intent.
   it so the status table keeps title/state, but `targets`/`pr_sig` must keep
   reading `prs.jsonl` alone — a stale OPEN entry would make a dead PR
   watchable forever, and a frozen `updated` would mask real changes.
+- **Feedback `.author` is nullable** — it's `.user.login` from the GitHub API,
+  which is `null` for deleted/ghost accounts. jq string builtins (`endswith`,
+  `startswith`, `test` on the value itself) abort the whole `filter_feedback`
+  run on null input, silently stalling the PR's feedback. Guard with
+  `($a // "")` before any string builtin on `.author` (see the `status_re`
+  clause in `filter_feedback`).
 - **`seen/<pr>` keys are content-derived** (`id:body-len` / `id:updated_at`) —
   an *edited* review or comment re-triggers. Don't switch to plain ids.
 - **Feedback `key` ≠ seen marker ≠ skip state.** Marking a key seen only stops
@@ -109,4 +126,7 @@ the intent.
 Conventional-commit prefixes (`feat:`, `fix:`, `docs:`, `chore:`), one logical
 change per commit. When the README's usage table or the usage header comment
 at the top of the script changes, keep both in sync — `pr-agent help` prints
-the header verbatim.
+the header verbatim. Same for other docs that mirror behavior: the README
+dashboard example must match real `status` output, and the ARCHITECTURE.md
+code map must place a command in the section that implements it —
+dispatch-inline commands belong in the `dispatch` row, not `manual commands`.
