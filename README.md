@@ -56,7 +56,7 @@ shows where every PR stands.
 | `pr-agent retry N [--dry-run]` | Ping the review bot if its latest review run failed |
 | `pr-agent reset N` | Forget PR N's session — the next round starts a fresh session |
 | `pr-agent reset-rounds N` | Reset PR N's round counter — lifts the `PR_AGENT_MAX_ROUNDS` auto-run limit, keeps the session |
-| `pr-agent gc [--yes]` | Clean up worktrees/branches/state of merged & closed PRs |
+| `pr-agent gc [--yes]` | Clean up worktrees/branches/state of merged & closed PRs and stale non-PR state |
 | `pr-agent sync [--apply [N]]` | Report open PRs whose branch is behind their base; `--apply` merges the base into them via their agent sessions. Optional N: only PRs whose "do not review" banner depends on merged PR N. |
 | `pr-agent config` | Show effective settings |
 | `pr-agent map` | Show the raw PR → session/worktree map (JSON) |
@@ -177,7 +177,8 @@ PR_AGENT_TABLE_ROWS=10 pr-agent on
 - Commands run inside a repo act on that repo; elsewhere they act on the repo
   last started with `pr-agent on` (or `PR_AGENT_REPO`).
 - `pr-agent gc` removes worktrees, branches, and state for merged/closed PRs —
-  run it periodically to reclaim disk.
+  plus stale state for numbers that turn out not to be PRs. Run it periodically
+  to reclaim disk.
 
 ## Hacking on pr-agent
 

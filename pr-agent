@@ -23,6 +23,7 @@
 #   pr-agent reset N                Forget PR N's session (next round starts fresh)
 #   pr-agent reset-rounds N         Reset PR N's round counter (lifts the MAX_ROUNDS limit)
 #   pr-agent gc [--yes]             Clean up worktrees/branches/state of merged & closed PRs
+#                                   and stale state for numbers that aren't PRs
 #   pr-agent sync [--apply [N]]     Report open PRs whose branch is behind their base;
 #                                   --apply merges the base into them via their agent
 #                                   sessions. Optional N: only PRs whose 'do not review'
@@ -1209,7 +1210,12 @@ cmd_on() {
   is_running && die "already running (pid $(cat "$PID_FILE")) — 'pr-agent off' first"
   detect_repo
   map_init
-  if [ $# -eq 0 ] || [ "$1" = "all" ]; then echo "all" >"$STATE_DIR/targets"; else echo "$*" >"$STATE_DIR/targets"; fi
+  if [ $# -eq 0 ] || [ "$1" = "all" ]; then
+    echo "all" >"$STATE_DIR/targets"
+  else
+    local n; for n in "$@"; do need_real_pr "$n"; done   # validate before anything lands in targets
+    echo "$*" >"$STATE_DIR/targets"
+  fi
   save_config
   local what; what="$(cat "$STATE_DIR/targets")"
   if [ "$what" = "all" ]; then what="$(scope_label)"; else what="$(hash_list "$what")"; fi
@@ -1258,8 +1264,20 @@ cmd_off() {
 
 need_pr() { [[ "${1:-}" =~ ^[0-9]+$ ]] || die "expected a PR number"; }
 
+gh_err_not_pr() { # gh pr view stderr -> rc 0 iff it means the number is not a pull request (vs repo-level/transport errors)
+  case "$1" in *"Could not resolve to a PullRequest"*) return 0 ;; *) return 1 ;; esac
+}
+
+need_real_pr() { # N -> need_pr + dies unless the number resolves to a pull request (one gh call — manual commands only)
+  need_pr "${1:-}"; need_repo
+  local err
+  if err="$(gh pr view "$1" --repo "$(repo)" --json number 2>&1 >/dev/null)"; then return 0; fi
+  gh_err_not_pr "$err" && die "#$1 is not a pull request on $(repo) — that number may be an issue"
+  die "couldn't verify PR #$1 on $(repo): ${err:-gh failed}"
+}
+
 cmd_run() { # N [--force]
-  need_pr "${1:-}"; local force=''
+  need_real_pr "${1:-}"; local force=''
   [ "${2:-}" = "--force" ] && force=1
   refresh_prs 0 || die "can't reach GitHub"
   [ -d "$STATE_DIR/locks/$1" ] && die "PR #$1 is already being processed"
@@ -1270,7 +1288,7 @@ cmd_run() { # N [--force]
 }
 
 cmd_tell() { # N message... -> send an owner instruction to the PR's session in the background
-  need_pr "${1:-}"; local pr="$1"; shift
+  need_real_pr "${1:-}"; local pr="$1"; shift
   [ $# -gt 0 ] || die "usage: pr-agent tell N \"message\""
   [ -d "$STATE_DIR/locks/$pr" ] && die "agent is busy on PR #$pr — try again when it finishes"
   refresh_prs 60 || true
@@ -1302,7 +1320,7 @@ _tell() { # N prompt_file (internal, background)
 }
 
 cmd_attach() { # N -> interactive session in the PR's worktree
-  need_pr "${1:-}"
+  need_real_pr "${1:-}"
   local wt sid; wt="$(map_get "$1" worktree)"; sid="$(map_get "$1" session_id)"
   [ -n "$wt" ] && [ -d "$wt" ] || die "PR #$1 has no worktree yet — 'pr-agent run $1' first"
   [ -d "$STATE_DIR/locks/$1" ] && echo "warning: an automated run is in progress on #$1 — the session may be busy" >&2
@@ -1314,7 +1332,7 @@ cmd_attach() { # N -> interactive session in the PR's worktree
 }
 
 cmd_retry() { # N [--dry-run] -> ping the review bot if its latest review run failed (ignores the backlog cutoff)
-  need_pr "${1:-}"; need_repo; map_init
+  need_real_pr "${1:-}"; map_init
   local pr="$1" mode=manual lock="$STATE_DIR/locks/$1" all rc=0
   [ "${2:-}" = "--dry-run" ] && mode=dry
   mkdir "$lock" 2>/dev/null || die "PR #$pr is already being processed — try again when it finishes"
@@ -1329,7 +1347,7 @@ cmd_retry() { # N [--dry-run] -> ping the review bot if its latest review run fa
 }
 
 cmd_peek() {
-  need_pr "${1:-}"; need_repo; refresh_prs 60 || true
+  need_real_pr "${1:-}"; refresh_prs 60 || true
   local items plan reason
   items="$(pending_feedback "$1")" || die "can't reach GitHub"
   if [ -n "$RETRY" ] && [ "$RETRY" = "1" ]; then
@@ -1352,7 +1370,7 @@ cmd_peek() {
 }
 
 cmd_mark_seen() {
-  need_pr "${1:-}"; need_repo; refresh_prs 60 || true
+  need_real_pr "${1:-}"; refresh_prs 60 || true
   local all n; all="$(mktemp)"
   fetch_feedback "$1" >"$all" || die "can't reach GitHub"
   jq -r '.key' "$all" >"$STATE_DIR/seen/$1"; n="$(wc -l <"$all" | tr -d ' ')"; rm -f "$all"
@@ -1360,12 +1378,29 @@ cmd_mark_seen() {
   echo "PR #$1: marked $n item(s) as handled — won't trigger a run"
 }
 
-cmd_gc() { # [--yes] -> remove worktrees/branches/state for merged & closed PRs
+forget_pr() { # pr -> drop all local state for one PR (map key, seen, feedback, transcripts)
+  map_rm "$1"; rm -rf "$STATE_DIR/seen/$1" "$STATE_DIR/feedback/$1".* "$STATE_DIR/logs/$1"
+}
+
+cmd_gc() { # [--yes] -> remove worktrees/branches/state for merged & closed PRs and stale non-PR keys
   need_repo; refresh_prs 0 || die "can't reach GitHub"
   local yes='' pr state wt branch rd planned=0; rd="$(repo_dir)"
   [ "${1:-}" = "--yes" ] && yes=1
   for pr in $(jq -r '.prs | keys[]' "$MAP_FILE"); do
     state="$(pr_info "$pr" state)"
+    if [ -z "$state" ]; then   # no cached object: keep real PRs the caches missed, forget keys that never were PRs
+      local verr
+      if verr="$(gh pr view "$pr" --repo "$(repo)" --json number 2>&1 >/dev/null)"; then continue; fi
+      gh_err_not_pr "$verr" || { echo "#$pr: couldn't verify — skipping"; continue; }
+      planned=1
+      echo "#$pr (not a pull request):"
+      echo "  forget session/state"
+      if [ -n "$yes" ]; then
+        rmdir "$STATE_DIR/locks/$pr" 2>/dev/null || true   # orphaned — no live run can hold a lock on a non-PR number
+        forget_pr "$pr"
+      fi
+      continue
+    fi
     [ "$state" = "MERGED" ] || [ "$state" = "CLOSED" ] || continue
     [ -d "$STATE_DIR/locks/$pr" ] && { echo "#$pr: busy, skipping"; continue; }
     wt="$(map_get "$pr" worktree)"; branch="$(map_get "$pr" branch)"; planned=1
@@ -1381,7 +1416,7 @@ cmd_gc() { # [--yes] -> remove worktrees/branches/state for merged & closed PRs
       [ -n "$yes" ] && { git -C "$rd" branch -D "$branch" >/dev/null || echo "  ! couldn't delete $branch"; }
     fi
     echo "  forget session/state"
-    if [ -n "$yes" ]; then map_rm "$pr"; rm -rf "$STATE_DIR/seen/$pr" "$STATE_DIR/feedback/$pr".* "$STATE_DIR/logs/$pr"; fi
+    if [ -n "$yes" ]; then forget_pr "$pr"; fi
   done
   if [ -n "$yes" ] && [ -f "$PRS_EXTRA" ]; then
     local keep tmp2
@@ -1991,6 +2026,7 @@ case "${1:-}" in
     shift; need_repo
     t="$(cat "$STATE_DIR/targets" 2>/dev/null || echo all)"
     [ "$t" != "all" ] || die "watching $(scope_label) — nothing to add (use 'pr-agent on N...' for an explicit list)"
+    for n in "$@"; do need_real_pr "$n"; done
     echo "$t $*" | tr ' ' '\n' | { grep -E '^[0-9]+$' || true; } | sort -un | tr '\n' ' ' | sed 's/ $//' >"$STATE_DIR/targets"
     echo "targets: $(cat "$STATE_DIR/targets")" ;;
   rm)
@@ -2008,17 +2044,17 @@ case "${1:-}" in
   attach)    shift; need_repo; cmd_attach "$@" ;;
   peek)      shift; cmd_peek "$@" ;;
   mark-seen) shift; cmd_mark_seen "$@" ;;
-  pause)     shift; need_pr "${1:-}"; need_repo; map_set "$1" paused 1; log "PR #$1: paused" >/dev/null; echo "PR #$1: paused — no automatic runs until 'pr-agent resume $1'" ;;
-  resume)    shift; need_pr "${1:-}"; need_repo; map_del "$1" paused; map_del "$1" skip_logged; log "PR #$1: resumed" >/dev/null; echo "PR #$1: resumed" ;;
+  pause)     shift; need_real_pr "${1:-}"; map_set "$1" paused 1; log "PR #$1: paused" >/dev/null; echo "PR #$1: paused — no automatic runs until 'pr-agent resume $1'" ;;
+  resume)    shift; need_real_pr "${1:-}"; map_del "$1" paused; map_del "$1" skip_logged; log "PR #$1: resumed" >/dev/null; echo "PR #$1: resumed" ;;
   retry)     shift; cmd_retry "$@" ;;
-  reset)     shift; need_pr "${1:-}"; need_repo
+  reset)     shift; need_real_pr "${1:-}"
              map_del "$1" session_id; map_set "$1" fail_count 0; map_del "$1" gave_up
              map_del "$1" retry_count; map_del "$1" retry_gave_up; map_del "$1" retry_skip_logged; map_del "$1" retry_last_ping_ts
              map_del "$1" sync_pending; map_del "$1" sync_blocked; map_del "$1" sync_blocked_key
              map_del "$1" sync_done_key; map_del "$1" sync_fail_key; map_set "$1" sync_fails 0; map_del "$1" sync_unblock
              map_del "$1" worktree_blocked; map_del "$1" blocked_logged
              echo "PR #$1: session forgotten — the next round starts a fresh agent session" ;;
-  reset-rounds) shift; need_pr "${1:-}"; need_repo
+  reset-rounds) shift; need_real_pr "${1:-}"
              map_del "$1" rounds; map_del "$1" skip_logged
              echo "PR #$1: round counter reset — auto-runs resume at the next cycle" ;;
   gc)        shift; cmd_gc "$@" ;;

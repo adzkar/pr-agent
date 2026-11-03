@@ -192,6 +192,24 @@ the intent.
   get `mv -f` (matches `cmd_update`) and `</dev/null` — explicit, so nothing
   ever inherits a tty or prompt-blocks. Reference: `tests/update-check.sh`
   S6/S9.
+- **User-supplied numbers go through `need_real_pr`, not `need_pr`.**
+  `need_pr` only checks digits; commands that write state or spawn an agent
+  must also confirm the number resolves to a pull request — `tell`/`pause`/
+  `reset` on an *issue* number used to mint a `.prs` key that rendered as a
+  permanent "?" status row (`pr_info` finds nothing; `gc` skipped the `""`
+  state). `on`/`add` took them into `targets` instead — same dead row plus
+  a `fetch_feedback` 404 every poll, and `gc` can't collect a targets entry
+  (only `rm` can) — so both validate each argument through `need_real_pr`
+  too. `gc` now forgets keys with no cached object whose `gh pr view`
+  fails with "Could not resolve to a PullRequest" — `refresh_prs 0` +
+  `backfill_prs` already ran by then, so that verdict means "not a PR", not
+  "uncached". Only that exact stderr verdict is proof (`gh_err_not_pr` is
+  the shared check): rate limits, 5xxs, and repo-level "Could not resolve
+  to a Repository" failures mean "couldn't verify" — keep the key, never
+  let a transient failure delete state. A stale `locks/<n>` can't shield a
+  phantom either — no live run can hold a lock on a non-PR number, so
+  `gc --yes` drops the orphaned dir. `need_pr` alone stays only where a
+  command does its own resolution (`sync --apply`).
 - **Every `v*` file the `tests/release.sh` stub writes must join the
   `release/list` exclusion.** The stub keeps sidecars next to the release
   markers (`<tag>.assets`, `<tag>.files`, `<tag>.notes`) and its

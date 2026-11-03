@@ -15,7 +15,27 @@ try() { local rc=0; ./pr-agent "$@" >/dev/null 2>&1 || rc=$?; echo "$rc"; }
 PR_AGENT_STATE_DIR="$(mktemp -d /tmp/pr-agent-smoke-state.XXXXXX)"; export PR_AGENT_STATE_DIR
 export PR_AGENT_REPO=test/smoke
 R="$(mktemp -d /tmp/pr-agent-smoke-repo.XXXXXX)"
-trap 'rm -rf "$PR_AGENT_STATE_DIR" "$R" "$R"-*' EXIT   # "$R"-* = link + worktree dirs created next to it
+G="$(mktemp -d /tmp/pr-agent-smoke-gh.XXXXXX)"
+trap 'rm -rf "$PR_AGENT_STATE_DIR" "$R" "$R"-* "$G"' EXIT   # "$R"-* = link + worktree dirs created next to it
+
+# stub gh — hermetic: `pr view N` resolves iff N is in $GH_STUB_PRS (N in $GH_STUB_500 fails
+# transiently instead of "not a PR"), `pr list` prints $GH_STUB_LIST
+cat >"$G/gh" <<'STUB'
+#!/usr/bin/env bash
+case "$1/$2" in
+  pr/view) case " ${GH_STUB_500:-} " in
+             *" $3 "*) echo "gh: HTTP 500 Internal Server Error" >&2; exit 1 ;;
+           esac
+           case " ${GH_STUB_PRS:-} " in
+             *" $3 "*) echo "{\"number\":$3,\"state\":\"OPEN\",\"title\":\"t\",\"updated\":\"2026-01-01\"}" ;;
+             *) echo "GraphQL: Could not resolve to a PullRequest with the number of $3." >&2; exit 1 ;;
+           esac ;;
+  pr/list) [ -n "${GH_STUB_LIST:-}" ] && printf '%s\n' "$GH_STUB_LIST" ;;
+esac
+exit 0
+STUB
+chmod +x "$G/gh"
+export PATH="$G:$PATH" GH_STUB_PRS="42"
 
 D="$PR_AGENT_STATE_DIR/repos/test__smoke"
 mkdir -p "$D"
@@ -63,6 +83,63 @@ check "probe: missing repo → 2 indeterminate" 2 "$(try _blocked 7)"
 echo "$R" >"$D/repo_dir"
 
 check "probe: stale branch ref fails open → 1" 1 "$(try _blocked 9)"
+
+echo "smoke: numbers that aren't PRs rejected; gc forgets stale keys"
+
+check "pause: non-PR number dies"              1 "$(try pause 6)"
+out="$(./pr-agent pause 6 2>&1 || true)"
+case "$out" in *"not a pull request"*) echo "  ok   die says why" ;; *) echo "  FAIL message: $out"; fail=1 ;; esac
+check "tell: non-PR number dies"               1 "$(try tell 6 hi)"
+check "run: non-PR number dies"                1 "$(try run 6)"
+check "reset: non-PR number dies"              1 "$(try reset 6)"
+check "pause: real PR accepted"                0 "$(try pause 42)"
+if jq -e '.prs["6"]' "$D/map.json" >/dev/null 2>&1; then echo "  FAIL stale map key written"; fail=1
+else echo "  ok   no map key for a non-PR number"; fi
+if [ -e "$D/feedback/6.tell.md" ]; then echo "  FAIL tell prompt file left"; fail=1
+else echo "  ok   no tell prompt file"; fi
+
+echo hi >"$D/prompt.md"   # mint a phantom key the way the pre-fix _tell did — gc should forget it
+check "setup: legacy _tell mints key"          0 "$(try _tell 6 "$D/prompt.md")"
+rc=0; out="$(./pr-agent gc 2>&1)" || rc=$?
+check "gc dry-run rc"                          0 "$rc"
+case "$out" in *"not a pull request"*) echo "  ok   dry-run names the phantom" ;; *) echo "  FAIL gc output: $out"; fail=1 ;; esac
+if jq -e '.prs["6"]' "$D/map.json" >/dev/null 2>&1; then echo "  ok   dry-run keeps the key"
+else echo "  FAIL dry-run deleted early"; fail=1; fi
+check "gc --yes rc"                            0 "$(try gc --yes)"
+if jq -e '.prs["6"]' "$D/map.json" >/dev/null 2>&1; then echo "  FAIL phantom key survived gc --yes"; fail=1
+else echo "  ok   gc --yes forgot the phantom"; fi
+if jq -e '.prs["42"].paused' "$D/map.json" >/dev/null 2>&1; then echo "  ok   real PR key kept"
+else echo "  FAIL real PR key dropped"; fail=1; fi
+
+export GH_STUB_500=55                       # 55's gh pr view fails transiently — not "not a PR"
+check "setup: legacy _tell mints key"   0 "$(try _tell 55 "$D/prompt.md")"
+rc=0; out="$(./pr-agent gc --yes 2>&1)" || rc=$?
+check "gc --yes rc with unverifiable key" 0 "$rc"
+case "$out" in *"couldn't verify — skipping"*) echo "  ok   gc names the unverifiable key" ;; *) echo "  FAIL gc output: $out"; fail=1 ;; esac
+if jq -e '.prs["55"]' "$D/map.json" >/dev/null 2>&1; then echo "  ok   unverifiable key kept"
+else echo "  FAIL gc forgot a key it couldn't verify"; fail=1; fi
+
+check "setup: legacy _tell mints key"   0 "$(try _tell 66 "$D/prompt.md")"
+mkdir "$D/locks/66"                            # stale lock left by a crashed pre-upgrade run
+rc=0; out="$(./pr-agent gc --yes 2>&1)" || rc=$?
+check "gc --yes rc with locked phantom" 0 "$rc"
+if jq -e '.prs["66"]' "$D/map.json" >/dev/null 2>&1; then echo "  FAIL locked phantom survived gc --yes"; fail=1
+else echo "  ok   stale lock didn't shield the phantom"; fi
+[ -d "$D/locks/66" ] && { echo "  FAIL stale lock dir left behind"; fail=1; } || echo "  ok   stale lock dir dropped"
+
+echo "smoke: on/add reject numbers that aren't PRs"
+
+check "on: non-PR number dies"              1 "$(try on 6)"
+if [ -e "$D/targets" ]; then echo "  FAIL on wrote targets before validating"; fail=1
+else echo "  ok   rejected on wrote no targets"; fi
+echo "42" >"$D/targets"
+check "add: non-PR number dies"             1 "$(try add 6)"
+check "add: non-numeric dies"               1 "$(try add abc)"
+if [ "$(cat "$D/targets")" = "42" ]; then echo "  ok   rejected add left targets alone"
+else echo "  FAIL targets changed: $(cat "$D/targets")"; fail=1; fi
+check "add: real PR accepted"               0 "$(try add 42)"
+if [ "$(cat "$D/targets")" = "42" ]; then echo "  ok   targets: $(cat "$D/targets")"
+else echo "  FAIL targets: $(cat "$D/targets")"; fail=1; fi
 
 echo
 if [ "$fail" -eq 0 ]; then echo "smoke: all checks passed"; else echo "smoke: FAILURES"; exit 1; fi
