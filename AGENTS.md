@@ -109,10 +109,11 @@ them as a smoke test unless that's the intent.
 - **`reviewDecision` is empty without branch protection** — GitHub only
   computes it relative to required reviewers, so an APPROVED PR on an
   unprotected base still returns `""`. That's why `.review` falls back to
-  non-author `latestReviews` (CHANGES_REQUESTED wins, else APPROVED counts;
-  a dismissed review reads `DISMISSED`, so it stops blocking — same as
-  GitHub's dismissal semantics); never read `reviewDecision` raw when the
-  verdict matters.
+  each non-author reviewer's latest *opinionated* `reviews` entry — only
+  `APPROVED`/`CHANGES_REQUESTED` count (a `COMMENTED` review can't erase a
+  standing verdict, a dismissed review reads `DISMISSED` so it drops out);
+  CHANGES_REQUESTED wins, else APPROVED counts. Never read `reviewDecision`
+  raw when the verdict matters.
 - **Feedback `.author` is nullable** — it's `.user.login` from the GitHub API,
   which is `null` for deleted/ghost accounts. jq string builtins (`endswith`,
   `startswith`, `test` on the value itself) abort the whole `filter_feedback`

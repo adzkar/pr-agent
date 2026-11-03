@@ -249,18 +249,22 @@ map_num() { local v; v="$(map_get "$1" "$2")"; echo "${v:-0}"; }
 # prs.jsonl: one compact object per PR: number title state draft review updated head base
 #            mergeable ci (pass|fail|pending|none) ci_failed [{name,url}]
 #            review = reviewDecision; when empty (base has no required reviewers —
-#            GitHub only computes it for protected branches) falls back to the
-#            latest non-author review state: CHANGES_REQUESTED > APPROVED > none
+#            GitHub only computes it for protected branches) falls back to each
+#            non-author reviewer's latest opinionated state (APPROVED /
+#            CHANGES_REQUESTED — COMMENTED can't erase a verdict, DISMISSED
+#            drops out): CHANGES_REQUESTED > APPROVED > none
 # prs_extra.jsonl: same shape, for map/target PRs that aged out of the list's --limit
 #            window — backfilled once each by backfill_prs so status keeps title/state.
 #            Read by pr_info only; targets/pr_sig must NOT see it (stale state).
 
-PR_JSON_FIELDS='number,title,state,isDraft,reviewDecision,latestReviews,updatedAt,headRefName,headRefOid,baseRefName,mergeable,statusCheckRollup,body,isCrossRepository,author'
+PR_JSON_FIELDS='number,title,state,isDraft,reviewDecision,reviews,updatedAt,headRefName,headRefOid,baseRefName,mergeable,statusCheckRollup,body,isCrossRepository,author'
 PR_JQ='([.statusCheckRollup[]? | {name: (.name // .context), url: (.detailsUrl // .targetUrl // ""),
            bad: ((.conclusion // .state // "") | test("FAILURE|TIMED_OUT|CANCELLED|ACTION_REQUIRED|ERROR")),
            wait: ((.status // .state // "") | test("IN_PROGRESS|QUEUED|PENDING|EXPECTED|WAITING"))}]) as $c
        | (.author.login // "") as $al
-       | ([.latestReviews[]? | select(.author.login != $al) | .state]) as $lr
+       | ([.reviews[]? | select(.author.login != $al)
+           | select(.state == "APPROVED" or .state == "CHANGES_REQUESTED")]
+          | group_by(.author.login) | map(max_by(.submittedAt // "") | .state)) as $lr
        | {number, title, state, draft: .isDraft,
           review: (if (.reviewDecision // "") != "" then .reviewDecision
                    elif any($lr[]; . == "CHANGES_REQUESTED") then "CHANGES_REQUESTED"
