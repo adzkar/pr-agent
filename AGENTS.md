@@ -136,8 +136,10 @@ the intent.
   aborted *every* invocation once the stamp went unwritable (e.g. root-owned
   after `sudo pr-agent update`). Any spawn/setup work that isn't the primary
   command needs `|| return`/`|| true`, and put `2>/dev/null` *before* the
-  failing redirect so the EACCES noise is suppressed too. Reference:
-  `tests/update-check.sh` S6.
+  failing redirect so the EACCES noise is suppressed too. Detached jobs also
+  get `mv -f` (matches `cmd_update`) and `</dev/null` — explicit, so nothing
+  ever inherits a tty or prompt-blocks. Reference: `tests/update-check.sh`
+  S6/S9.
 
 ## Commit style
 
