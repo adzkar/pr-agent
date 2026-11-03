@@ -34,9 +34,12 @@ or changes diverge silently. If it already drifted, diff before overwriting.
 Releases are cut with `./release [patch|minor|major|X.Y.Z]` from a clean
 `main`: it bumps the `VERSION=` line, commits, tags `vX.Y.Z`, pushes, and
 publishes a GitHub release with `pr-agent` + `pr-agent.sha256` assets — the
-artifacts `pr-agent update` downloads. Interrupted runs resume — the tag
-is (re)anchored at `HEAD` and assets (re)uploaded — and `./release X.Y.Z`
-mints the checked-in `VERSION` if it was never released.
+artifacts `pr-agent update` downloads. Notes are grouped from the PRs
+merged since the previous tag (`feat:`/`fix:` sections, the rest under
+Other); a range with no merged PRs falls back to `--generate-notes`.
+Interrupted runs resume — the tag is (re)anchored at `HEAD` and assets
+(re)uploaded — and `./release X.Y.Z` mints the checked-in `VERSION` if it
+was never released.
 
 ## Verify before committing
 
@@ -189,6 +192,13 @@ the intent.
   get `mv -f` (matches `cmd_update`) and `</dev/null` — explicit, so nothing
   ever inherits a tty or prompt-blocks. Reference: `tests/update-check.sh`
   S6/S9.
+- **Every `v*` file the `tests/release.sh` stub writes must join the
+  `release/list` exclusion.** The stub keeps sidecars next to the release
+  markers (`<tag>.assets`, `<tag>.files`, `<tag>.notes`) and its
+  `release/list` is `ls -t | grep '^v' | grep -vE '\.(assets|files|notes)$'`
+  — an unfiltered suffix passes the grep and, being newer than the
+  `touch`ed marker, surfaces as the "latest release" to `cmd_update`.
+  When the stub learns a new sidecar, extend the regex.
 
 ## Commit style
 
