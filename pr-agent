@@ -1707,10 +1707,8 @@ draw_row() { # text1 style1 text2 style2 ... -> one bordered table row sized to 
   printf '%s\n' "$out"
 }
 
-draw_span() { # text style -> continuation row: blank PR cell + one cell spanning TITLE..last (absorbed " │ " boundaries count toward the width)
-  local i span=-2
-  for (( i = 1; i < ${#COL_W[@]}; i++ )); do span=$(( span + COL_W[i] + 2 )); done
-  printf '%s\n' "${C_DIM}│${C_RESET} $(pad '' "${COL_W[0]}")${C_DIM}│${C_RESET} $2$(pad "$1" "$span")$C_RESET${C_DIM}│${C_RESET}"
+draw_span() { # text style span -> continuation row: blank PR cell + one cell spanning TITLE..last at span chars
+  printf '%s\n' "${C_DIM}│${C_RESET} $(pad '' "${COL_W[0]}")${C_DIM}│${C_RESET} $2$(pad "$1" "$3")$C_RESET${C_DIM}│${C_RESET}"
 }
 
 status_prs() { # -> PR numbers shown in status, most recent activity first: watch targets ∪ agent history
@@ -2032,7 +2030,7 @@ render_status() { # ttl [term-rows] -> status screen; with term-rows the PR tabl
             fi
             draw_row "${row[@]}"
             for (( k = 1; k < cost; k++ )); do   # continuation lines of a wrapped title span the rest of the row
-              draw_span "${WRAP_LINES[$k]}" "$base"
+              draw_span "${WRAP_LINES[$k]}" "$base" "$span_w"
             done
             drawn=$(( drawn + 1 )); used=$(( used + cost ))
             continue
@@ -2046,11 +2044,9 @@ render_status() { # ttl [term-rows] -> status screen; with term-rows the PR tabl
     if [ "$hidden" -gt 0 ]; then
       local more="… ${hidden} more"
       [ "$hidden_open" -gt 0 ] && more="$more ($hidden_open open)"
-      if [ "$span_w" -ge 44 ]; then
-        if [ "$TABLE_ROWS" -gt 0 ]; then more="$more — TABLE_ROWS=$TABLE_ROWS"
-        else more="$more — make the terminal taller"; fi
-      fi
-      draw_span "$more" "$C_DIM"
+      if [ "$TABLE_ROWS" -gt 0 ]; then more="$more — TABLE_ROWS=$TABLE_ROWS"
+      else more="$more — make the terminal taller"; fi
+      draw_span "$more" "$C_DIM" "$span_w"
     fi
     draw_rule └ ┴ ┘
   fi
