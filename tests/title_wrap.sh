@@ -64,6 +64,11 @@ try "W2 lets words join"           "FULL=3|one|two three|four"        "one two t
 try "cap fold measures at W2"      "FULL=3|a bc|def ghij klm n…"      "a bc def ghij klm nop qrs" 5 2 15
 try "W2 default = W1"              "FULL=2|aaa|bbb"                   "aaa bbb" 3 0
 
+echo "== hard splits honor W2 =="
+try "long token lands whole at W2" "FULL=2|use the new billing endpoint|https://api.stripe.com/v2/charges/really/long" "use the new billing endpoint https://api.stripe.com/v2/charges/really/long" 32 3 90
+try "long token chunks at W2"      "FULL=3|$(printf 'a%.0s' {1..10})|$(printf 'a%.0s' {1..30})|$(printf 'a%.0s' {1..25})" "$(printf 'a%.0s' {1..65})" 10 0 30
+try "W2 < W1 shrinks the chunks"   "FULL=3|abcdefghijkl|mnopqrstuv|wxy" "abcdefghijklmnopqrstuvwxy" 12 0 10
+
 echo "== width guards =="
 try "w1 <= 0 floors to 1"          "FULL=3|a|b|c"                     "abc" 0 0
 try "w2 <= 0 falls back to w1"     "FULL=3|a|b|b"                     "a bb" 1 0 0

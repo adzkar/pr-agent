@@ -1638,7 +1638,7 @@ rep() { # char count -> char repeated count times
   printf '%s' "$out"
 }
 
-wrap() { # text width max [contw] -> WRAP_LINES: greedy word wrap — first line ≤width, continuation lines ≤contw (default width); hard-splits longer words; over max folds the rest into a …-ended last line (max 0 = no cap). WRAP_FULL = uncapped line count. widths floor at 1 — ≤0 would loop forever
+wrap() { # text width max [contw] -> WRAP_LINES: greedy word wrap — first line ≤width, continuation lines ≤contw (default width); a word wider than its line hard-splits at that line's width; over max folds the rest into a …-ended last line (max 0 = no cap). WRAP_FULL = uncapped line count. widths floor at 1 — ≤0 would loop forever
   local s w w2 wcur max line='' word i rest; local -a out=()
   s="$(printf '%s' "$1" | sed -E 's/[[:space:]]+/ /g; s/^ //; s/ $//')"
   w="$2"; max="${3:-0}"; w2="${4:-$w}"
@@ -1646,10 +1646,11 @@ wrap() { # text width max [contw] -> WRAP_LINES: greedy word wrap — first line
   while [ -n "$s" ]; do
     word="${s%% *}"
     if [ "$word" = "$s" ]; then s=''; else s="${s#* }"; fi
-    [ "${#out[@]}" -eq 0 ] && wcur="$w" || wcur="$w2"   # still building the first line?
-    while [ "${#word}" -gt "$wcur" ]; do   # word wider than the cell: split mid-word
-      [ -n "$line" ] && { out+=( "$line" ); line=''; }
-      out+=( "${word:0:$wcur}" ); word="${word:$wcur}"
+    while :; do   # too wide for its line: commit the pending line, then split at the width of the line each chunk lands on
+      [ "${#out[@]}" -eq 0 ] && wcur="$w" || wcur="$w2"   # first-line width only while nothing's emitted yet
+      [ "${#word}" -le "$wcur" ] && break
+      if [ -n "$line" ]; then out+=( "$line" ); line=''
+      else out+=( "${word:0:$wcur}" ); word="${word:$wcur}"; fi
     done
     if [ -z "$line" ]; then line="$word"
     elif [ $(( ${#line} + 1 + ${#word} )) -le "$wcur" ]; then line+=" $word"
