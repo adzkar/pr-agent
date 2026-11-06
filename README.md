@@ -72,15 +72,15 @@ it live on the terminal's alt screen.
 pr-agent v0.1.0  ● watching (pid 10391)   owner/repo
 watching open PRs by @me · every 2m · mode dangerous · conflicts · 2 parallel · max 10 rounds · reacts to humans + review-bot[bot] · next poll in 34s
 
-┌───────┬────────────┬────────────────┬────────────────────────┬────────┬──────────┐
-│ PR    │ TITLE      │ REVIEW         │ AGENT STATE            │ ROUNDS │ LAST RUN │
-├───────┼────────────┼────────────────┼────────────────────────┼────────┼──────────┤
-│ #266  │ payment    │ ✗ changes req. │ ↻ agent working 2m30s  │ 9      │ just now │
-│       │ changes    │                │                        │        │          │
-│       │ for the c… │                │                        │        │          │
-│ #252  │ activate/… │ ✓ approved     │ merged — done          │ 2      │ 6d ago   │
-│       │ … 56 more  │                │                        │        │          │
-└───────┴────────────┴────────────────┴────────────────────────┴────────┴──────────┘
+┌──────┬─────────────────────────────────┬───────────────┬───────────────────────┬───────┬─────────┐
+│ PR   │ TITLE                           │ REVIEW        │ AGENT STATE           │ ROUNDS│ LAST RUN│
+├──────┼─────────────────────────────────┼───────────────┼───────────────────────┼───────┼─────────┤
+│ #266 │ payment changes for the currency│ ✗ changes req.│ ↻ agent working 2m30s │ 9     │ just now│
+│      │ refactor — handling JPY rounding in invoices and credit notes           │
+│ #252 │ activate/auto-enable the watcher│ ✓ approved    │ merged — done         │ 2     │ 6d ago  │
+│      │ when a repo gets added                                                │
+│      │ … 56 more (12 open) — make the terminal taller                          │
+└──────┴─────────────────────────────────┴───────────────┴───────────────────────┴───────┴─────────┘
 
 recent activity  (full log: pr-agent logs · agent transcript: pr-agent logs N)
   18:51         #329   linked to session pumped-leaf
@@ -98,7 +98,8 @@ recent activity  (full log: pr-agent logs · agent transcript: pr-agent logs N)
   checkout), paused, hit the round limit, gave up, waiting for review,
   all feedback handled, or done.
 - Titles wrap over up to `PR_AGENT_TITLE_LINES` lines (default `3`; `1` =
-  truncate, `0` = no cap); the other cells render on the first line. In `-w`
+  truncate, `0` = no cap); the other cells render on the first line, while
+  continuation lines span the rest of the row (~3× the title width). In `-w`
   mode the cap shrinks automatically when wrapped titles would push PRs
   off-screen — visible rows beat title lines.
 - When the table is taller than the terminal, rows are dropped from the bottom
@@ -110,7 +111,8 @@ recent activity  (full log: pr-agent logs · agent transcript: pr-agent logs N)
 - **recent activity** tails the deduplicated event log; the last line is a
   contextual "what now" hint with the command to run.
 - A `SESSION` column (Devin session id per PR) appears when the terminal is
-  ≥ 125 columns wide.
+  ≥ 125 columns wide; on narrow terminals `LAST RUN`, then `ROUNDS` are
+  dropped to keep the title usable.
 
 ## What counts as feedback
 

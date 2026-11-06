@@ -10,15 +10,15 @@ REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 sed -n '/^trunc()/,/^}/p;/^wrap()/,/^}/p' "$REPO/pr-agent" >"$T/funcs.sh"
 
-# run.sh TEXT WIDTH MAX -> source funcs, wrap, print "FULL=<uncapped lines>"
-# then WRAP_LINES one per line
+# run.sh TEXT W1 MAX [W2] -> source funcs, wrap (line 1 at W1, continuations
+# at W2, defaulting to W1), print "FULL=<uncapped lines>" then WRAP_LINES
 cat >"$T/run.sh" <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
 export LC_ALL=en_US.UTF-8   # force \${#var} to count multibyte chars, not bytes
 WRAP_LINES=() WRAP_FULL=0
 . "$T/funcs.sh"
-wrap "\$1" "\$2" "\$3"
+wrap "\$1" "\$2" "\$3" "\${4:-\$2}"
 printf 'FULL=%s\n' "\$WRAP_FULL"
 printf '%s\n' "\${WRAP_LINES[@]}"
 EOF
@@ -29,11 +29,11 @@ ok()  { pass=$((pass+1)); echo "ok   $1"; }
 bad() { fail=$((fail+1)); echo "FAIL $1 — $2"; }
 eq()  { [ "$2" = "$3" ] && ok "$1" || bad "$1" "got '$2' want '$3'"; }
 
-# try NAME WANT -- TEXT WIDTH MAX: want is FULL=n then the wrapped lines |-joined
+# try NAME WANT -- TEXT W1 MAX [W2]: want is FULL=n then the wrapped lines |-joined
 try() {
   local name="$1" want="$2" got
   shift 2
-  got="$("$T/run.sh" "$1" "$2" "$3" | paste -sd'|' -)"
+  got="$("$T/run.sh" "$@" | paste -sd'|' -)"
   eq "$name" "$got" "$want"
 }
 
@@ -57,6 +57,12 @@ try "cap 1 = truncate"             "FULL=2|one two t…"                "one two
 try "cap 0 = no cap"               "FULL=5|a|a|a|a|a"                 "a a a a a" 1 0
 try "… lands on last allowed line" "FULL=3|aaa bbb|ccc ddd e…"        "aaa bbb ccc ddd eee" 10 2
 try "FULL stays uncapped"          "FULL=5|a|b|…"                     "a b c d e" 1 3
+
+echo "== continuation width (W2) =="
+try "cont lines use W2"            "FULL=3|alpha beta|gamma delta|epsilon" "alpha beta gamma delta epsilon" 10 3 15
+try "W2 lets words join"           "FULL=3|one|two three|four"        "one two three four" 3 0 10
+try "cap fold measures at W2"      "FULL=3|a bc|def ghij klm n…"      "a bc def ghij klm nop qrs" 5 2 15
+try "W2 default = W1"              "FULL=2|aaa|bbb"                   "aaa bbb" 3 0
 
 echo "== hostile input =="
 try "glob chars kept literally"    "FULL=2|a * ? [x]|y"               "a * ? [x] y" 10 0
