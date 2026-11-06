@@ -76,10 +76,10 @@ watching open PRs by @me · every 2m · mode dangerous · conflicts · 2 paralle
 │ PR   │ TITLE                           │ REVIEW        │ AGENT STATE           │ ROUNDS│ LAST RUN│
 ├──────┼─────────────────────────────────┼───────────────┼───────────────────────┼───────┼─────────┤
 │ #266 │ payment changes for the currency│ ✗ changes req.│ ↻ agent working 2m30s │ 9     │ just now│
-│      │ refactor — handling JPY rounding in invoices and credit notes           │
+│      │ refactor — handling JPY rounding in invoices and credit notes                             │
 │ #252 │ activate/auto-enable the watcher│ ✓ approved    │ merged — done         │ 2     │ 6d ago  │
-│      │ when a repo gets added                                                │
-│      │ … 56 more (12 open) — make the terminal taller                          │
+│      │ when a repo gets added                                                                    │
+│      │ … 56 more — TABLE_ROWS=2                                                                  │
 └──────┴─────────────────────────────────┴───────────────┴───────────────────────┴───────┴─────────┘
 
 recent activity  (full log: pr-agent logs · agent transcript: pr-agent logs N)
