@@ -100,19 +100,24 @@ the intent.
   at loop entry covers a deleted *launch* dir; repeating it at the top of
   `while` covers `repo_dir` itself being deleted mid-run — forked jobs in
   an unreachable cwd spam getcwd errors. Don't hoist the in-loop `cd`.
-- **`state_cell`/`review_cell` have side effects** — they populate the `H_*`
-  hint buckets that drive the bottom "what now" line. If you skip drawing a
-  table row you must still call them, or the hint lies.
+- **`state_cell`/`review_cell` have side effects** — `state_cell` populates
+  the `H_*` hint buckets that drive the bottom "what now" line. A pre-pass
+  calls both once per PR (open pass, then done pass) *before* the line budget
+  is fixed — the `o*` arrays cache the cells for the draw loop — so the hint
+  is composable early and stays accurate even for rows the screen won't fit.
 - **`state_cell` precedence is deliberate** — working/interrupted →
   merged/closed → `worktree_blocked` → `sync_blocked`/`sync_pending` →
   `skip_reason` (paused/round-limit/approved) → pending items → idle. The
   sync cells must stay above `skip_reason`: `sync_blocked` is a sticky
   "needs you" state for approved/paused PRs the watcher itself skips.
 - **`render_status` line budget.** `status -w` passes terminal rows so the table
-  caps itself; fixed chrome is `11 + the activity block` (`ACTIVITY_LINES>0`
-  adds header + N + blank, i.e. N+2) `+ gh_error` lines. If you add/remove any
-  non-table, non-activity line, update the `11` in `chrome` or the frame will
-  scroll/clip again. TITLE cells wrap over up to `TITLE_LINES` physical lines
+  caps itself; fixed chrome is a *measured* count — each composed header line,
+  the hint, the activity header and the `-w` footer go through `phys_lines`
+  (ANSI-stripped, soft-wrap at `cols`) plus fixed blanks/rules, the activity
+  block (`ACTIVITY_LINES>0` adds phys(header) + N + blank) and `gh_error`'s
+  phys. If you add/remove any non-table line, route it through `phys_lines`
+  into `chrome` the same way or the frame will scroll/clip again. TITLE cells
+  wrap over up to `TITLE_LINES` physical lines
   via `wrap` (result in `WRAP_LINES`, uncapped count in `WRAP_FULL`) — the
   first line is `title_w` wide, continuation lines span TITLE..last column via
   `draw_span` — so the term-fit budget counts *lines* — `rows − chrome − gherr
