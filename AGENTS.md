@@ -18,6 +18,7 @@
 | `tests/smoke.sh` | Scratch-repo smoke for the worktree-blocked lifecycle (local git only) |
 | `tests/review_verdict.sh` | Fixture checks for the `PR_JQ` `.review` verdict derivation (jq only) |
 | `tests/author_match.sh` | Extracted-function fixtures for case-insensitive author/login matching (jq only) |
+| `tests/title_wrap.sh` | Extracted-function fixtures for `wrap` — the status TITLE column's multi-line cell wrap (bash only) |
 | `AGENTS.md` | This file |
 
 ## Deploy model
@@ -60,6 +61,7 @@ shellcheck pr-agent release 2>/dev/null || true # lint if available
 tests/smoke.sh                         # worktree-blocked lifecycle in a scratch repo (no gh)
 tests/review_verdict.sh                # .review verdict derivation fixtures (no gh)
 tests/author_match.sh                  # author/login matching fixtures (no gh)
+tests/title_wrap.sh                    # TITLE-cell wrap fixtures (no gh)
 ./tests/release.sh                     # release + update scenarios (run when `release` or `cmd_update` changes)
 ./tests/update-check.sh                # update-check edge cases (run when the check changes)
 cd /path/to/a/watched/repo             # then run READ-ONLY commands only:
@@ -106,12 +108,15 @@ the intent.
   `skip_reason` (paused/round-limit/approved) → pending items → idle. The
   sync cells must stay above `skip_reason`: `sync_blocked` is a sticky
   "needs you" state for approved/paused PRs the watcher itself skips.
-- **`render_status` row budget.** `status -w` passes terminal rows so the table
+- **`render_status` line budget.** `status -w` passes terminal rows so the table
   caps itself; fixed chrome is `11 + the activity block` (`ACTIVITY_LINES>0`
   adds header + N + blank, i.e. N+2) `+ gh_error` lines. If you add/remove any
   non-table, non-activity line, update the `11` in `chrome` or the frame will
-  scroll/clip again. `TABLE_ROWS` overrides the budget — rows beyond it fall
-  to the bottom clip, not this cap.
+  scroll/clip again. TITLE cells wrap over up to `TITLE_LINES` physical lines
+  via `wrap` (result in `WRAP_LINES`), so the term-fit budget counts *lines* —
+  `rows − chrome − gherr − 1`, one kept for the `… N more` row — while
+  `TABLE_ROWS` still counts *rows*: its overflow falls to the bottom clip, not
+  this cap.
 - **`running/<pr>` marker = "stopped by user".** `run_agent` treats a deleted
   marker as an intentional stop (rc 3), not a crash — remove the marker before
   killing a pid, never after.

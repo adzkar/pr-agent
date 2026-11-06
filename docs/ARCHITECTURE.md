@@ -14,24 +14,24 @@ Sections are delimited by `# --- name ---` banners, in file order:
 
 | Section | Approx. lines | Contents |
 | --- | --- | --- |
-| header + bootstrap | 1–111 | Usage doc comment, `set -euo pipefail`, `VERSION`/`UPDATE_REPO`/`STATE_ROOT`/`DEVIN_BIN`/`SELF`, `die` |
-| per-repo state | 112–150 | `slug_of`, `git_repo_name`, `migrate_legacy_state` (pre-per-repo flat layout → `repos/<slug>`), `resolve_repo_slug` → `REPO_SLUG`, `STATE_DIR` + state paths (`PID_FILE`, `MAP_FILE`, `LOG_FILE`, `PRS_CACHE`, `PRS_EXTRA`) |
-| settings | 151–206 | `CFG_*` saved config → `PR_AGENT_*` env → default precedence; `save_config`, `log`, `notify` (osascript) |
-| repo context | 207–229 | `repo`/`repo_dir`/`me` accessors, `need_repo`, `detect_repo` (writes repo, repo_dir, me, base into state) |
-| map | 230–258 | `map.json` accessors (`map_get/set/del/rm/num`) behind `with_map_lock` (mkdir lock, ~10 s stale break) |
-| PR list | 259–356 | `refresh_prs` — one `gh pr list` call → `prs.jsonl` cache (number, title, state, draft, review, updated, branch, head, base, mergeable, ci, ci_failed, body, cross, author — `review` is `reviewDecision`, derived from non-author `reviews` (latest opinionated per reviewer) when empty); `backfill_prs` — one `gh pr view` per tracked PR missing from both caches → `prs_extra.jsonl` (once each ever); `pr_info` (list first, extras fallback), `targets` ("all" mode scoped by `PR_AUTHOR_FILTER` via `PR_AUTHOR_JQ`), `scope_label` (that scope as display text) |
-| feedback collection | 357–434 | `fetch_feedback` (3 `gh api` endpoints + `synthetic_feedback`), `seed_seen`, `filter_feedback` (seen/author/bot/skip rules), `pending_feedback` |
-| failed review runs | 435–556 | `handle_review_failure` + helpers (`retry_cutoff`, `review_failure_plan`, `retry_reset_if_reviewed`) — pings the review bot (`RETRY_MSG`) on `Review failed:` notices, `RETRY_MAX` cap, `retry_cutoff` keeps pre-existing failures manual-only |
-| formatting | 557–573 | `format_feedback` — jsonl → markdown prompt sections |
-| worktree | 574–664 | `ensure_worktree` (`<repo>-pr-<N>` next to the main checkout), `worktree_holding`/`still_blocked` (local-only `git worktree list` probes — `still_blocked` rc: 0 blocked / 1 confirmed free / 2 indeterminate), `setup_worktree` (copies `.env*`/`config.local.json`, reuses `node_modules` when manifests match else `bun install --frozen-lockfile`, husky prepare), `sync_worktree` |
-| main-sync | 665–921 | Post-merge catch-up: `sync_scan` → `check_sync` merges base into PR branch **via the PR's agent session**, then `verify_synced` + `apply_unblock` (dep-gated draft unbanner/ready, `sync_unblock` state machine); rc 4 defers like a busy session — no `sync_fails`; `sync_scan watch` skips `worktree_blocked` PRs outright |
-| agent | 922–1023 | `build_prompt`, `devin_flags`, `session_ids`/`new_session_id` (diff `devin list` before/after), `run_agent` (resume `devin -r` else start new; `ensure_worktree` rc 4 → `worktree_blocked`) |
-| per-PR check | 1024–1099 | `check_pr` — the per-PR round; `skip_reason` |
-| watcher | 1100–1262 | `watch_loop` (re-cd's to `repo_dir` each cycle; re-probes `worktree_blocked` PRs via `still_blocked`), `pid_is_watcher`/`is_running`, `pr_sig`, `install_launchd` (launchd plist), `cmd_on`, `kill_agents`, `cmd_off` |
-| manual commands | 1263–1471 | `need_pr`/`need_real_pr`/`gh_err_not_pr` (every command acting on a user-supplied N — `on`/`add` targets included — resolves it through `need_real_pr`'s `gh pr view` first, `sync --apply` excepted (own resolution); `gh_err_not_pr` reads the stderr — only "Could not resolve to a PullRequest" marks a non-PR), `run`, `tell`/`_tell`, `attach`, `retry`, `peek`, `mark-seen`, `forget_pr`, `gc`, `sync`, `config`, `logs` (`version` is a dispatch one-liner) |
-| self-update | 1472–1593 | `ver_gt`, `latest_release_tag`, `cmd_update` — downloads release assets from `UPDATE_REPO`, verifies sha256, atomic-installs over the (symlink-resolved) install; `maybe_update_check`/`pending_update_version` — throttled background release check (OMZ-style), both gated on `UPDATE_CHECK` |
-| status rendering | 1594–2004 | `fmt_*`, `draw_*`, `status_prs`, `refresh_status_pending`, `refresh_blocked_flags` (lazy `still_blocked` re-probe — clears a freed flag even with the watcher off), `review_cell`/`state_cell` (side effects: `H_*` hint buckets), `recent_events`, `render_hint`, `render_status` (row-budgeted table), `cmd_status` (alt-screen watch loop + fallback clip), `usage` |
-| dispatch | 2005–end | `case "$1"` router (`usage` sits just above the banner) — inline cases: `add`/`rm`, `pause`/`resume`, `reset`, `reset-rounds`, `map`, `version`, `help`; `_loop`/`_check`/`_tell`/`_ensure`/`_blocked` are internal entries. `maybe_update_check` runs just before dispatch; the notice is skipped for internal/machine-readable commands (`_loop` logs it) |
+| header + bootstrap | 1–113 | Usage doc comment, `set -euo pipefail`, `VERSION`/`UPDATE_REPO`/`STATE_ROOT`/`DEVIN_BIN`/`SELF`, `die` |
+| per-repo state | 114–152 | `slug_of`, `git_repo_name`, `migrate_legacy_state` (pre-per-repo flat layout → `repos/<slug>`), `resolve_repo_slug` → `REPO_SLUG`, `STATE_DIR` + state paths (`PID_FILE`, `MAP_FILE`, `LOG_FILE`, `PRS_CACHE`, `PRS_EXTRA`) |
+| settings | 153–210 | `CFG_*` saved config → `PR_AGENT_*` env → default precedence; `save_config`, `log`, `notify` (osascript) |
+| repo context | 211–233 | `repo`/`repo_dir`/`me` accessors, `need_repo`, `detect_repo` (writes repo, repo_dir, me, base into state) |
+| map | 234–262 | `map.json` accessors (`map_get/set/del/rm/num`) behind `with_map_lock` (mkdir lock, ~10 s stale break) |
+| PR list | 263–360 | `refresh_prs` — one `gh pr list` call → `prs.jsonl` cache (number, title, state, draft, review, updated, branch, head, base, mergeable, ci, ci_failed, body, cross, author — `review` is `reviewDecision`, derived from non-author `reviews` (latest opinionated per reviewer) when empty); `backfill_prs` — one `gh pr view` per tracked PR missing from both caches → `prs_extra.jsonl` (once each ever); `pr_info` (list first, extras fallback), `targets` ("all" mode scoped by `PR_AUTHOR_FILTER` via `PR_AUTHOR_JQ`), `scope_label` (that scope as display text) |
+| feedback collection | 361–438 | `fetch_feedback` (3 `gh api` endpoints + `synthetic_feedback`), `seed_seen`, `filter_feedback` (seen/author/bot/skip rules), `pending_feedback` |
+| failed review runs | 439–560 | `handle_review_failure` + helpers (`retry_cutoff`, `review_failure_plan`, `retry_reset_if_reviewed`) — pings the review bot (`RETRY_MSG`) on `Review failed:` notices, `RETRY_MAX` cap, `retry_cutoff` keeps pre-existing failures manual-only |
+| formatting | 561–577 | `format_feedback` — jsonl → markdown prompt sections |
+| worktree | 578–668 | `ensure_worktree` (`<repo>-pr-<N>` next to the main checkout), `worktree_holding`/`still_blocked` (local-only `git worktree list` probes — `still_blocked` rc: 0 blocked / 1 confirmed free / 2 indeterminate), `setup_worktree` (copies `.env*`/`config.local.json`, reuses `node_modules` when manifests match else `bun install --frozen-lockfile`, husky prepare), `sync_worktree` |
+| main-sync | 669–925 | Post-merge catch-up: `sync_scan` → `check_sync` merges base into PR branch **via the PR's agent session**, then `verify_synced` + `apply_unblock` (dep-gated draft unbanner/ready, `sync_unblock` state machine); rc 4 defers like a busy session — no `sync_fails`; `sync_scan watch` skips `worktree_blocked` PRs outright |
+| agent | 926–1027 | `build_prompt`, `devin_flags`, `session_ids`/`new_session_id` (diff `devin list` before/after), `run_agent` (resume `devin -r` else start new; `ensure_worktree` rc 4 → `worktree_blocked`) |
+| per-PR check | 1028–1103 | `check_pr` — the per-PR round; `skip_reason` |
+| watcher | 1104–1266 | `watch_loop` (re-cd's to `repo_dir` each cycle; re-probes `worktree_blocked` PRs via `still_blocked`), `pid_is_watcher`/`is_running`, `pr_sig`, `install_launchd` (launchd plist), `cmd_on`, `kill_agents`, `cmd_off` |
+| manual commands | 1267–1475 | `need_pr`/`need_real_pr`/`gh_err_not_pr` (every command acting on a user-supplied N — `on`/`add` targets included — resolves it through `need_real_pr`'s `gh pr view` first, `sync --apply` excepted (own resolution); `gh_err_not_pr` reads the stderr — only "Could not resolve to a PullRequest" marks a non-PR), `run`, `tell`/`_tell`, `attach`, `retry`, `peek`, `mark-seen`, `forget_pr`, `gc`, `sync`, `config`, `logs` (`version` is a dispatch one-liner) |
+| self-update | 1476–1597 | `ver_gt`, `latest_release_tag`, `cmd_update` — downloads release assets from `UPDATE_REPO`, verifies sha256, atomic-installs over the (symlink-resolved) install; `maybe_update_check`/`pending_update_version` — throttled background release check (OMZ-style), both gated on `UPDATE_CHECK` |
+| status rendering | 1598–2041 | `fmt_*`, `trunc`/`pad`/`wrap` (TITLE cells wrap to `TITLE_LINES` lines), `draw_*`, `status_prs`, `refresh_status_pending`, `refresh_blocked_flags` (lazy `still_blocked` re-probe — clears a freed flag even with the watcher off), `review_cell`/`state_cell` (side effects: `H_*` hint buckets), `recent_events`, `render_hint`, `render_status` (line-budgeted table), `cmd_status` (alt-screen watch loop + fallback clip), `usage` |
+| dispatch | 2042–end | `case "$1"` router (`usage` sits just above the banner) — inline cases: `add`/`rm`, `pause`/`resume`, `reset`, `reset-rounds`, `map`, `version`, `help`; `_loop`/`_check`/`_tell`/`_ensure`/`_blocked` are internal entries. `maybe_update_check` runs just before dispatch; the notice is skipped for internal/machine-readable commands (`_loop` logs it) |
 
 ## On-disk state
 
@@ -162,16 +162,22 @@ the `H_*` buckets that pick the one-line `render_hint`. Then a blank line,
 `recent activity` (last `ACTIVITY_LINES` deduped `watch.log` events — the
 whole section is hidden when `ACTIVITY_LINES=0`), and the hint.
 
+Each TITLE cell wraps over up to `TITLE_LINES` physical lines (default 3, `1`
+= truncate, `0` = no cap) via `wrap` — word-boundary greedy, longer words
+hard-split, over-cap remainder folded into a `…`-ended last line — while the
+other cells render on the row's first line.
+
 `-w` mode repaints on the alt screen: `cmd_status` passes `tput lines` so
-`render_status` caps table body rows at `rows − chrome − gh_error`, collapsing
-the rest into a `… N more` row (open PRs first — merged history drops out
-first). `chrome` is `11 + the activity block` (header + `ACTIVITY_LINES` +
-blank, or `0` when `ACTIVITY_LINES=0`): badge, watching line, blank, 3 rules +
-header, blank, hint, blank, footer — adjust the `11` if you add or remove any
-non-table, non-activity line. `TABLE_ROWS` (default 0 = off) sets an exact row
-count in both modes that *overrides* the terminal budget — when it doesn't
-fit, the bottom of the frame (footer, hint, activity) is cut by the fallback
-clip (`… N more lines`); the `… N more` row names the binding cap ("make the
+`render_status` caps table body *lines* at `rows − chrome − gh_error − 1`
+(the `-1` reserves a `… N more` row), collapsing the rest into it (open PRs
+first — merged history drops out first; `N` counts PRs, not lines). `chrome`
+is `11 + the activity block` (header + `ACTIVITY_LINES` + blank, or `0` when
+`ACTIVITY_LINES=0`): badge, watching line, blank, 3 rules + header, blank,
+hint, blank, footer — adjust the `11` if you add or remove any non-table,
+non-activity line. `TABLE_ROWS` (default 0 = off) sets an exact *row* count
+in both modes that *overrides* the terminal budget — when it doesn't fit,
+the bottom of the frame (footer, hint, activity) is cut by the fallback clip
+(`… N more lines`); the `… N more` row names the binding cap ("make the
 terminal taller" vs `TABLE_ROWS=N`). A wrapped line can also push the frame
 over; the clip catches that too.
 
