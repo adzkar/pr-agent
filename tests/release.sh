@@ -310,7 +310,7 @@ cp "$REPO/pr-agent" "$T/u23/pr-agent"; chmod 755 "$T/u23/pr-agent"
 seed_update 0.1.0 9.9.9
 try_update o "$T/u23/pr-agent"
 has "refusal" "$o" 'inside a git worktree — refusing'
-eq "copy untouched" "$(uver "$T/u23/pr-agent")" "0.1.0"
+eq "copy untouched" "$(uver "$T/u23/pr-agent")" "$(uver "$REPO/pr-agent")"
 try_update o "$T/u23/pr-agent" --force
 eq "force rc" "$RC" 0
 eq "force installed" "$(uver "$T/u23/pr-agent")" "9.9.9"
