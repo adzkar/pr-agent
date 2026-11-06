@@ -30,8 +30,8 @@ Sections are delimited by `# --- name ---` banners, in file order:
 | watcher | 1107–1269 | `watch_loop` (re-cd's to `repo_dir` each cycle; re-probes `worktree_blocked` PRs via `still_blocked`), `pid_is_watcher`/`is_running`, `pr_sig`, `install_launchd` (launchd plist), `cmd_on`, `kill_agents`, `cmd_off` |
 | manual commands | 1270–1478 | `need_pr`/`need_real_pr`/`gh_err_not_pr` (every command acting on a user-supplied N — `on`/`add` targets included — resolves it through `need_real_pr`'s `gh pr view` first, `sync --apply` excepted (own resolution); `gh_err_not_pr` reads the stderr — only "Could not resolve to a PullRequest" marks a non-PR), `run`, `tell`/`_tell`, `attach`, `retry`, `peek`, `mark-seen`, `forget_pr`, `gc`, `sync`, `config`, `logs` (`version` is a dispatch one-liner) |
 | self-update | 1479–1600 | `ver_gt`, `latest_release_tag`, `cmd_update` — downloads release assets from `UPDATE_REPO`, verifies sha256, atomic-installs over the (symlink-resolved) install; `maybe_update_check`/`pending_update_version` — throttled background release check (OMZ-style), both gated on `UPDATE_CHECK` |
-| status rendering | 1601–2092 | `fmt_*`, `trunc`/`pad`/`wrap` (TITLE cells wrap to `TITLE_LINES` lines), `draw_*`, `status_prs`, `refresh_status_pending`, `refresh_blocked_flags` (lazy `still_blocked` re-probe — clears a freed flag even with the watcher off), `review_cell`/`state_cell` (side effects: `H_*` hint buckets), `recent_events`, `render_hint`, `render_status` (line-budgeted table), `cmd_status` (alt-screen watch loop + fallback clip), `usage` |
-| dispatch | 2093–end | `case "$1"` router (`usage` sits just above the banner) — inline cases: `add`/`rm`, `pause`/`resume`, `reset`, `reset-rounds`, `map`, `version`, `help`; `_loop`/`_check`/`_tell`/`_ensure`/`_blocked` are internal entries. `maybe_update_check` runs just before dispatch; the notice is skipped for internal/machine-readable commands (`_loop` logs it) |
+| status rendering | 1601–2132 | `fmt_*`, `trunc`/`pad`/`wrap` (TITLE cells wrap to `TITLE_LINES` lines), `vis_len`/`phys_lines` (ANSI-stripped soft-wrap count), `draw_*`, `status_prs`, `refresh_status_pending`, `refresh_blocked_flags` (lazy `still_blocked` re-probe — clears a freed flag even with the watcher off), `review_cell`/`state_cell` (side effects: `H_*` hint buckets), `recent_events`, `render_hint`, `render_status` (line-budgeted table), `cmd_status` (alt-screen watch loop + fallback clip), `usage` |
+| dispatch | 2133–end | `case "$1"` router (`usage` sits just above the banner) — inline cases: `add`/`rm`, `pause`/`resume`, `reset`, `reset-rounds`, `map`, `version`, `help`; `_loop`/`_check`/`_tell`/`_ensure`/`_blocked` are internal entries. `maybe_update_check` runs just before dispatch; the notice is skipped for internal/machine-readable commands (`_loop` logs it) |
 
 ## On-disk state
 
@@ -151,16 +151,19 @@ one of:
 - authored by someone else where `AUTHOR_FILTER` includes them — empty filter
   means anyone except `[bot]` logins not listed in `BOTS`.
 
-### Status screen (`render_status [ttl] [term-rows]`)
+### Status screen (`render_status [ttl] [term-rows] [watch-every]`)
 
 Header (watcher state, targets, settings, poll countdown) → PR table:
 `status_prs` = watch targets ∪ PRs with map history, **most recent activity
 first** (max of `updated`, `last_seen_ts`, `last_run_at`), then **open first,
-merged/closed dimmed** via the two render passes. `state_cell` renders the
-AGENT STATE column and fills
-the `H_*` buckets that pick the one-line `render_hint`. Then a blank line,
+merged/closed dimmed** via the two render passes. One pre-pass walks the PRs
+in that draw order: `review_cell`/`state_cell` render the REVIEW and AGENT
+STATE cells once each (cached in the `o*` arrays for the draw loop) and fill
+the `H_*` buckets that pick the one-line `render_hint` — the hint text is
+therefore known before the line budget is fixed. Then a blank line,
 `recent activity` (last `ACTIVITY_LINES` deduped `watch.log` events — the
-whole section is hidden when `ACTIVITY_LINES=0`), and the hint.
+whole section is hidden when `ACTIVITY_LINES=0`), the hint, and in `-w` mode
+the `live · refresh` footer.
 
 Cells pad to `width+2` (`␣content│`). The TITLE column auto-fits the space the
 fixed columns leave (`cols − fixed − 2n − 1`, ≤100); when that would fall
@@ -172,24 +175,29 @@ a `…`-ended last line — while the other cells render on the row's first line
 The first wrapped line is capped at `title_w`; continuation lines wrap at a
 *merged-cell* width (`draw_span` draws one cell over TITLE..last column) so
 a title typically completes in 2 lines. `wrap` also reports `WRAP_FULL` (the
-uncapped line count): in `-w` mode `render_status` pre-wraps every row at no
-cap, then picks the largest cap ≤ `TITLE_LINES` that still shows the maximum
-achievable number of PRs (each row costs `min(WRAP_FULL, cap)` lines) —
-visible rows beat title lines.
+uncapped line count): the pre-pass wraps every row at no cap, then the
+largest cap ≤ `TITLE_LINES` that still shows the maximum achievable number
+of PRs is picked (each row costs `min(WRAP_FULL, cap)` lines) — visible rows
+beat title lines.
 
-`-w` mode repaints on the alt screen: `cmd_status` passes `tput lines` so
-`render_status` caps table body *lines* at `rows − chrome − gh_error − 1`
+`-w` mode repaints on the alt screen: `cmd_status` passes `tput lines` (and
+the refresh interval, for the footer) so `render_status` caps table body
+*lines* at `rows − chrome − gh_error − 1`
 (the `-1` reserves a `… N more` row), collapsing the rest into it (open PRs
 first — merged history drops out first; `N` counts PRs, not lines). `chrome`
-is `11 + the activity block` (header + `ACTIVITY_LINES` + blank, or `0` when
-`ACTIVITY_LINES=0`): badge, watching line, blank, 3 rules + header, blank,
-hint, blank, footer — adjust the `11` if you add or remove any non-table,
-non-activity line. `TABLE_ROWS` (default 0 = off) sets an exact *row* count
+is a **measured physical-line count**, not a constant: every composed
+header line (badge, watching line, `gh_error`, hint, `-w` footer, activity
+header) goes through `phys_lines` — ANSI-stripped, soft-wrap counted at
+`cols` — plus the fixed blanks, the 4 table rules/header, and
+`ACTIVITY_LINES`; add any new non-table line through `phys_lines`/`chrome`
+the same way. `TABLE_ROWS` (default 0 = off) sets an exact *row* count
 in both modes that *overrides* the terminal budget — when it doesn't fit,
 the bottom of the frame (footer, hint, activity) is cut by the fallback clip
 (`… N more lines`); the `… N more` row names the binding cap ("make the
-terminal taller" vs `TABLE_ROWS=N`). A wrapped line can also push the frame
-over; the clip catches that too.
+terminal taller" vs `TABLE_ROWS=N`). The clip itself also counts physical
+lines (`phys_lines` per frame line, keeping the prefix that fits
+`rows − 1`), so a soft-wrapped header or a pinned-wide `TITLE_W` table
+overflows into the clip instead of scrolling.
 
 ### Concurrency & locking
 

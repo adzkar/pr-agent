@@ -1638,6 +1638,19 @@ rep() { # char count -> char repeated count times
   printf '%s' "$out"
 }
 
+vis_len() { # text -> display chars: ANSI escapes stripped; counts like pad/wrap do
+  local s
+  s="$(printf '%s' "$1" | sed -E $'s/\033\\[[0-9;]*[A-Za-z]//g')"
+  printf '%s' "${#s}"
+}
+
+phys_lines() { # text width -> physical lines the text occupies on the terminal (soft wrap; min 1)
+  local n w="$2"
+  [ "$w" -gt 0 ] 2>/dev/null || w=1
+  n="$(vis_len "$1")"
+  printf '%s' "$(( n > 0 ? (n + w - 1) / w : 1 ))"
+}
+
 wrap() { # text width max [contw] -> WRAP_LINES: greedy word wrap — first line ≤width, continuation lines ≤contw (default width); a word wider than its line hard-splits at that line's width; over max folds the rest into a …-ended last line (max 0 = no cap). WRAP_FULL = uncapped line count. widths floor at 1 — ≤0 would loop forever
   local s w w2 wcur max line='' word i rest; local -a out=()
   s="$(printf '%s' "$1" | sed -E 's/[[:space:]]+/ /g; s/^ //; s/ $//')"
@@ -1883,7 +1896,7 @@ render_hint() { # running -> one contextual "what now" line
   printf '%s\n' "$hint"
 }
 
-render_status() { # ttl [term-rows] -> status screen; with term-rows the PR table is capped so the bottom stays visible
+render_status() { # ttl [term-rows [watch-every]] -> status screen; term-rows caps the PR table so the bottom stays visible; watch-every adds the live footer
   if ! need_repo 2>/dev/null; then
     printf '%s\n' "${C_BOLD}${C_BLUE}pr-agent${C_RESET}  ${C_DIM}○ never started for this repo${C_RESET}" \
       "cd into a repo and run ${C_BOLD}pr-agent on${C_RESET}"
@@ -1924,31 +1937,93 @@ render_status() { # ttl [term-rows] -> status screen; with term-rows the PR tabl
   [ "$MAIN_SYNC" = "1" ] && extras+=" · main-sync"
 
   local upd; upd="$(pending_update_version || true)"
-  printf '%s  %s   %s%s\n' "${C_BOLD}${C_BLUE}pr-agent v${VERSION}${C_RESET}" "$badge" "${C_BOLD}$(repo)${C_RESET}" \
-    "${upd:+ ${C_YELLOW}· update v$upd${C_RESET}}"
-  printf '%s%s\n' "${C_DIM}watching ${t} · every $(fmt_dur "$INTERVAL") · mode ${PERM_MODE}${extras} · ${CONCURRENCY} parallel · max ${MAX_ROUNDS} rounds · reacts to ${reacts} · ${C_RESET}" "$poll"
+  cols="${COLS:-$(term_cols)}"
+  local line1 line2 gherr_line='' foot_line='' act_hdr=''
+  line1="${C_BOLD}${C_BLUE}pr-agent v${VERSION}${C_RESET}  ${badge}   ${C_BOLD}$(repo)${C_RESET}${upd:+ ${C_YELLOW}· update v$upd${C_RESET}}"
+  line2="${C_DIM}watching ${t} · every $(fmt_dur "$INTERVAL") · mode ${PERM_MODE}${extras} · ${CONCURRENCY} parallel · max ${MAX_ROUNDS} rounds · reacts to ${reacts} · ${C_RESET}${poll}"
+  printf '%s\n' "$line1" "$line2"
   local gherr=0
   if [ -f "$STATE_DIR/gh_error" ]; then
-    gherr=1
-    printf '%s\n' "${C_YELLOW}⚠ couldn't reach GitHub — showing cached data (check: gh auth status)${C_RESET}"
+    gherr_line="${C_YELLOW}⚠ couldn't reach GitHub — showing cached data (check: gh auth status)${C_RESET}"
+    printf '%s\n' "$gherr_line"
+    gherr="$(phys_lines "$gherr_line" "$cols")"
   fi
   echo
 
-  cols="${COLS:-$(term_cols)}"
+  local foot_phys=0 act_phys=0
+  if [ -n "${3:-}" ]; then   # -w: the live footer is part of the frame — composed here so chrome can count it
+    foot_line="${C_DIM}live · refresh ${3}s (GitHub data every 30s) · updated $(date +%H:%M:%S) · Ctrl-C to exit${C_RESET}"
+    foot_phys="$(phys_lines "$foot_line" "$cols")"
+  fi
+  if [ "$ACTIVITY_LINES" -gt 0 ]; then
+    act_hdr="${C_BOLD}recent activity${C_RESET}${C_DIM}  (full log: pr-agent logs · agent transcript: pr-agent logs N)${C_RESET}"
+    act_phys="$(phys_lines "$act_hdr" "$cols")"
+  fi
+
   local prs; prs="$(status_prs)"
+  local show_session=0 show_lastrun=1 show_rounds=1 fixed title_w span_w n=6 i
+  [ "$cols" -ge 125 ] && show_session=1
+  fixed=$(( 5 + 14 + 22 + 6 + 8 ))
+  if [ "$show_session" -eq 1 ]; then fixed=$(( fixed + 16 )); n=7; fi
+  # drop low-priority columns until the title gets a usable width — TITLE_W pins the width instead
+  if [ "$TITLE_W" -le 0 ]; then
+    while [ $(( cols - fixed - 2 * n - 1 )) -lt 25 ]; do
+      if [ "$show_lastrun" -eq 1 ]; then show_lastrun=0; fixed=$(( fixed - 8 ))
+      elif [ "$show_rounds" -eq 1 ]; then show_rounds=0; fixed=$(( fixed - 6 ))
+      else break; fi
+      n=$(( n - 1 ))
+    done
+  fi
+  title_w=$(( cols - fixed - 2 * n - 1 ))
+  if [ "$TITLE_W" -gt 0 ]; then title_w="$TITLE_W"; elif [ "$title_w" -gt 100 ]; then title_w=100; fi
+  [ "$title_w" -lt 10 ] && title_w=10
+  COL_W=( 5 "$title_w" 14 22 )
+  local -a hdr row
+  hdr=( PR "$C_BOLD" TITLE "$C_BOLD" REVIEW "$C_BOLD" "AGENT STATE" "$C_BOLD" )
+  [ "$show_rounds" -eq 1 ] && { COL_W+=( 6 ); hdr+=( ROUNDS "$C_BOLD" ); }
+  [ "$show_lastrun" -eq 1 ] && { COL_W+=( 8 ); hdr+=( "LAST RUN" "$C_BOLD" ); }
+  if [ "$show_session" -eq 1 ]; then COL_W+=( 16 ); hdr+=( SESSION "$C_BOLD" ); fi
+  span_w=-2
+  for i in "${COL_W[@]:1}"; do span_w=$(( span_w + i + 2 )); done   # TITLE..last merged-cell width for title continuation lines
+
+  # one pass in draw order (open first, done dimmed): caches each row's cells,
+  # fills the H_* hint buckets for rows that won't fit too, and records every
+  # title's uncapped wrap cost — the hint and the line budget both see final state
+  local -a order=() ostate=() obase=() ort=() orc=() ost=() osc=() otit=() pcost=()
+  local num title review state draft pending pass base rt rc pmax=0
+  for pass in open done; do
+    for num in $prs; do
+      state="$(pr_info "$num" state)"; [ -n "$state" ] || state=OPEN
+      if [ "$pass" = open ]; then [ "$state" = OPEN ] || continue; base=''
+      else [ "$state" != OPEN ] || continue; base="$C_DIM"; fi
+      pending="$(awk -v n="$num" '$1 == n { print $2 }' "$STATUS_PENDING" 2>/dev/null)"
+      review="$(pr_info "$num" review)"; draft="$(pr_info "$num" draft)"
+      review_cell "$review" "$draft"; rt="$CELL_T" rc="$CELL_C"
+      state_cell "$num" "$state" "${pending:-0}"
+      title="$(title_disp "$(pr_info "$num" title)")"   # conventional-commit prefix dropped
+      wrap "$title" "$title_w" 0 "$span_w"
+      order+=( "$num" ); ostate+=( "$state" ); obase+=( "$base" )
+      ort+=( "$rt" ); orc+=( "$rc" ); ost+=( "$CELL_T" ); osc+=( "$CELL_C" )
+      otit+=( "$title" ); pcost+=( "$WRAP_FULL" )
+      [ "$WRAP_FULL" -gt "$pmax" ] && pmax="$WRAP_FULL"
+    done
+  done
+  local hint_line; hint_line="$(render_hint "$running" || true)"
+
   if [ -z "$prs" ]; then
     printf '%s\n' "${C_DIM}no PRs to show — no open non-draft PRs and no agent history yet${C_RESET}"
   else
-    local show_session=0 show_lastrun=1 show_rounds=1 fixed title_w span_w n=6 num title review state draft pending pass base rt rc sid
-    local total shown hidden=0 hidden_open=0 drawn=0 used=0 full=0 budget=-1 cost k
-    local title_lines pmax=0 fit1 fit u i l
-    local -a row hdr pcost=()
+    local total shown hidden=0 hidden_open=0 drawn=0 used=0 full=0 budget=-1 cost k l sid
+    local title_lines fit1 fit u chrome
     total="$(printf '%s\n' "$prs" | wc -l | tr -d ' ')"
     shown="$total"
-    # fixed chrome: badge, watching line, blank, 3 rules + header, blank, hint, blank, footer = 11,
-    # plus the activity block (header + lines + blank) when shown — adjust when the layout changes
-    local chrome=11
-    [ "$ACTIVITY_LINES" -gt 0 ] && chrome=$(( chrome + ACTIVITY_LINES + 2 ))
+    # fixed chrome in physical lines — header/hint/footer text can soft-wrap past
+    # cols, so each composed line is measured, not assumed; the +1s are blanks,
+    # the +4 the table rules and header. Adjust when the layout changes.
+    chrome=$(( $(phys_lines "$line1" "$cols") + $(phys_lines "$line2" "$cols") \
+      + 1 + 4 + 1 + $(phys_lines "$hint_line" "$cols") ))
+    [ "$ACTIVITY_LINES" -gt 0 ] && chrome=$(( chrome + act_phys + ACTIVITY_LINES + 1 ))
+    [ -n "$foot_line" ] && chrome=$(( chrome + 1 + foot_phys ))
     if [ "$TABLE_ROWS" -gt 0 ]; then
       [ "$TABLE_ROWS" -lt "$shown" ] && shown="$TABLE_ROWS"
       # explicit size wins over terminal-fit — overflow falls to the bottom clip
@@ -1956,43 +2031,11 @@ render_status() { # ttl [term-rows] -> status screen; with term-rows the PR tabl
       # term-fit budget counts physical lines — a wrapped TITLE cell costs >1 — with one line kept for "… more"
       budget=$(( $2 - chrome - gherr - 1 )); [ "$budget" -lt 0 ] && budget=0
     fi
-    [ "$cols" -ge 125 ] && show_session=1
-    fixed=$(( 5 + 14 + 22 + 6 + 8 ))
-    if [ "$show_session" -eq 1 ]; then fixed=$(( fixed + 16 )); n=7; fi
-    # drop low-priority columns until the title gets a usable width — TITLE_W pins the width instead
-    if [ "$TITLE_W" -le 0 ]; then
-      while [ $(( cols - fixed - 2 * n - 1 )) -lt 25 ]; do
-        if [ "$show_lastrun" -eq 1 ]; then show_lastrun=0; fixed=$(( fixed - 8 ))
-        elif [ "$show_rounds" -eq 1 ]; then show_rounds=0; fixed=$(( fixed - 6 ))
-        else break; fi
-        n=$(( n - 1 ))
-      done
-    fi
-    title_w=$(( cols - fixed - 2 * n - 1 ))
-    if [ "$TITLE_W" -gt 0 ]; then title_w="$TITLE_W"; elif [ "$title_w" -gt 100 ]; then title_w=100; fi
-    [ "$title_w" -lt 10 ] && title_w=10
-    COL_W=( 5 "$title_w" 14 22 )
-    hdr=( PR "$C_BOLD" TITLE "$C_BOLD" REVIEW "$C_BOLD" "AGENT STATE" "$C_BOLD" )
-    [ "$show_rounds" -eq 1 ] && { COL_W+=( 6 ); hdr+=( ROUNDS "$C_BOLD" ); }
-    [ "$show_lastrun" -eq 1 ] && { COL_W+=( 8 ); hdr+=( "LAST RUN" "$C_BOLD" ); }
-    if [ "$show_session" -eq 1 ]; then COL_W+=( 16 ); hdr+=( SESSION "$C_BOLD" ); fi
-    span_w=-2
-    for i in "${COL_W[@]:1}"; do span_w=$(( span_w + i + 2 )); done   # TITLE..last merged-cell width for title continuation lines
 
     # term-fit: shrink the title-line cap until it stops costing rows — a PR on
     # screen beats a longer title. title_lines = largest cap keeping that count.
     title_lines="$TITLE_LINES"
     if [ "$budget" -ge 0 ] && [ "$TITLE_LINES" -gt 1 ]; then
-      for pass in open done; do   # same order/filter the draw loop uses
-        for num in $prs; do
-          state="$(pr_info "$num" state)"; [ -n "$state" ] || state=OPEN
-          if [ "$pass" = open ]; then [ "$state" = OPEN ] || continue
-          else [ "$state" != OPEN ] || continue; fi
-          title="$(title_disp "$(pr_info "$num" title)")"
-          wrap "$title" "$title_w" 0 "$span_w"
-          pcost+=( "$WRAP_FULL" ); [ "$WRAP_FULL" -gt "$pmax" ] && pmax="$WRAP_FULL"
-        done
-      done
       fit1="$total"; [ "$budget" -lt "$fit1" ] && fit1="$budget"   # at cap 1 every row costs 1 line
       title_lines=1
       for (( l = 2; l <= pmax && l <= TITLE_LINES; l++ )); do
@@ -2009,37 +2052,28 @@ render_status() { # ttl [term-rows] -> status screen; with term-rows the PR tabl
     draw_rule ┌ ┬ ┐
     draw_row "${hdr[@]}"
     draw_rule ├ ┼ ┤
-    for pass in open done; do
-      for num in $prs; do
-        state="$(pr_info "$num" state)"; [ -n "$state" ] || state=OPEN
-        if [ "$pass" = open ]; then [ "$state" = OPEN ] || continue; base=''
-        else [ "$state" != OPEN ] || continue; base="$C_DIM"; fi
-        title="$(pr_info "$num" title)"; review="$(pr_info "$num" review)"; draft="$(pr_info "$num" draft)"
-        pending="$(awk -v n="$num" '$1 == n { print $2 }' "$STATUS_PENDING" 2>/dev/null)"
-        review_cell "$review" "$draft"; rt="$CELL_T" rc="$CELL_C"
-        state_cell "$num" "$state" "${pending:-0}" # runs for hidden rows too so the hint stays accurate
-        if [ "$full" -eq 0 ] && [ "$drawn" -lt "$shown" ]; then
-          title="$(title_disp "$title")"   # drop conventional-commit prefix
-          wrap "$title" "$title_w" "$title_lines" "$span_w"; cost=${#WRAP_LINES[@]}
-          if [ "$budget" -lt 0 ] || [ $(( used + cost )) -le "$budget" ]; then
-            row=( "#$num" "$C_BOLD$base" "${WRAP_LINES[0]}" "$base" "$rt" "$rc" "$CELL_T" "$CELL_C" )
-            [ "$show_rounds" -eq 1 ] && row+=( "$(map_num "$num" rounds)" "$base" )
-            [ "$show_lastrun" -eq 1 ] && row+=( "$(fmt_rel "$(last_run_epoch "$num")")" "$base" )
-            if [ "$show_session" -eq 1 ]; then
-              sid="$(map_get "$num" session_id)"; row+=( "${sid:-—}" "$C_DIM" )
-            fi
-            draw_row "${row[@]}"
-            for (( k = 1; k < cost; k++ )); do   # continuation lines of a wrapped title span the rest of the row
-              draw_span "${WRAP_LINES[$k]}" "$base" "$span_w"
-            done
-            drawn=$(( drawn + 1 )); used=$(( used + cost ))
-            continue
+    for (( i = 0; i < ${#order[@]}; i++ )); do
+      num="${order[$i]}"
+      if [ "$full" -eq 0 ] && [ "$drawn" -lt "$shown" ]; then
+        wrap "${otit[$i]}" "$title_w" "$title_lines" "$span_w"; cost=${#WRAP_LINES[@]}
+        if [ "$budget" -lt 0 ] || [ $(( used + cost )) -le "$budget" ]; then
+          row=( "#$num" "$C_BOLD${obase[$i]}" "${WRAP_LINES[0]}" "${obase[$i]}" "${ort[$i]}" "${orc[$i]}" "${ost[$i]}" "${osc[$i]}" )
+          [ "$show_rounds" -eq 1 ] && row+=( "$(map_num "$num" rounds)" "${obase[$i]}" )
+          [ "$show_lastrun" -eq 1 ] && row+=( "$(fmt_rel "$(last_run_epoch "$num")")" "${obase[$i]}" )
+          if [ "$show_session" -eq 1 ]; then
+            sid="$(map_get "$num" session_id)"; row+=( "${sid:-—}" "$C_DIM" )
           fi
-          full=1   # budget blown — every later row is hidden too; skip wrapping them
+          draw_row "${row[@]}"
+          for (( k = 1; k < cost; k++ )); do   # continuation lines of a wrapped title span the rest of the row
+            draw_span "${WRAP_LINES[$k]}" "${obase[$i]}" "$span_w"
+          done
+          drawn=$(( drawn + 1 )); used=$(( used + cost ))
+          continue
         fi
-        [ "$state" = OPEN ] && hidden_open=$(( hidden_open + 1 ))
-        hidden=$(( hidden + 1 ))
-      done
+        full=1   # budget blown — every later row is hidden too; skip wrapping them
+      fi
+      [ "${ostate[$i]}" = OPEN ] && hidden_open=$(( hidden_open + 1 ))
+      hidden=$(( hidden + 1 ))
     done
     if [ "$hidden" -gt 0 ]; then
       local more="… ${hidden} more"
@@ -2053,18 +2087,19 @@ render_status() { # ttl [term-rows] -> status screen; with term-rows the PR tabl
 
   echo
   if [ "$ACTIVITY_LINES" -gt 0 ]; then
-    printf '%s%s\n' "${C_BOLD}recent activity${C_RESET}" "${C_DIM}  (full log: pr-agent logs · agent transcript: pr-agent logs N)${C_RESET}"
+    printf '%s\n' "$act_hdr"
     recent_events "$ACTIVITY_LINES" "$cols"
     echo
   fi
-  render_hint "$running"
+  printf '%s\n' "$hint_line"
+  if [ -n "$foot_line" ]; then printf '\n%s' "$foot_line"; fi
 }
 
 cmd_status() {
   setup_colors
   case "${1:-}" in
     -w|--watch)
-      local every="${2:-5}" frame rows nlines
+      local every="${2:-5}" frame rows nlines fl p keep kept_phys
       if [ -t 1 ]; then
         tput smcup 2>/dev/null || printf '\033[?1049h' # alt screen: repaints stay out of scrollback
         tput civis 2>/dev/null
@@ -2075,12 +2110,16 @@ cmd_status() {
       while true; do
         COLS="$(term_cols)"
         rows="$(tput lines 2>/dev/null || true)"; rows="${rows:-24}"
-        frame="$(render_status 30 "$rows"; printf '\n%s' "${C_DIM}live · refresh ${every}s (GitHub data every 30s) · updated $(date +%H:%M:%S) · Ctrl-C to exit${C_RESET}")"
-        nlines=$(( $(printf '%s\n' "$frame" | wc -l) ))
+        frame="$(render_status 30 "$rows" "$every")"
+        nlines=0 keep=0 kept_phys=0   # physical height — a soft-wrapped line overflows too
+        while IFS= read -r fl; do
+          p="$(phys_lines "$fl" "$COLS")"; nlines=$(( nlines + p ))
+          [ "$nlines" -le $(( rows - 1 )) ] && { keep=$(( keep + 1 )); kept_phys="$nlines"; }
+        done <<< "$frame"
         if [ "$nlines" -gt "$rows" ]; then # frame taller than the screen: clip — printing it would scroll
           local clip_hint="make the terminal taller"
           [ "$TABLE_ROWS" -gt 0 ] && clip_hint="lower TABLE_ROWS or make the terminal taller"
-          frame="$(printf '%s\n' "$frame" | sed -n "1,$((rows-1))p")"$'\n'"${C_DIM}… $((nlines-rows+1)) more lines — ${clip_hint}${C_RESET}"
+          frame="$(printf '%s\n' "$frame" | sed -n "1,${keep}p")"$'\n'"${C_DIM}… $(( nlines - kept_phys )) more lines — ${clip_hint}${C_RESET}"
         fi
         printf '\033[H%s\033[0m\033[J' "${frame//$'\n'/$'\033[K\n'}"
         sleep "$every"
