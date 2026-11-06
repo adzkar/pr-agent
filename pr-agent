@@ -105,7 +105,7 @@
 
 set -euo pipefail
 
-VERSION="0.2.1"   # release identity — bumped by ./release, shown by 'pr-agent version'
+VERSION="0.3.0"   # release identity — bumped by ./release, shown by 'pr-agent version'
 UPDATE_REPO="adzkar/pr-agent"   # upstream home of this script — where 'update' pulls releases from
 STATE_ROOT="${PR_AGENT_STATE_DIR:-$HOME/.local/state/pr-agent}"
 DEVIN_BIN="${DEVIN_BIN:-devin}"
