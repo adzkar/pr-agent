@@ -64,6 +64,10 @@ try "W2 lets words join"           "FULL=3|one|two three|four"        "one two t
 try "cap fold measures at W2"      "FULL=3|a bc|def ghij klm n…"      "a bc def ghij klm nop qrs" 5 2 15
 try "W2 default = W1"              "FULL=2|aaa|bbb"                   "aaa bbb" 3 0
 
+echo "== width guards =="
+try "w1 <= 0 floors to 1"          "FULL=3|a|b|c"                     "abc" 0 0
+try "w2 <= 0 falls back to w1"     "FULL=3|a|b|b"                     "a bb" 1 0 0
+
 echo "== hostile input =="
 try "glob chars kept literally"    "FULL=2|a * ? [x]|y"               "a * ? [x] y" 10 0
 try "tabs collapse to spaces"      "FULL=3|a|b|c"                     "$(printf 'a\tb\tc')" 1 0

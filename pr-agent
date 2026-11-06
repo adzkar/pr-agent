@@ -1638,10 +1638,11 @@ rep() { # char count -> char repeated count times
   printf '%s' "$out"
 }
 
-wrap() { # text width max [contw] -> WRAP_LINES: greedy word wrap — first line ≤width, continuation lines ≤contw (default width); hard-splits longer words; over max folds the rest into a …-ended last line (max 0 = no cap). WRAP_FULL = uncapped line count
+wrap() { # text width max [contw] -> WRAP_LINES: greedy word wrap — first line ≤width, continuation lines ≤contw (default width); hard-splits longer words; over max folds the rest into a …-ended last line (max 0 = no cap). WRAP_FULL = uncapped line count. widths floor at 1 — ≤0 would loop forever
   local s w w2 wcur max line='' word i rest; local -a out=()
   s="$(printf '%s' "$1" | sed -E 's/[[:space:]]+/ /g; s/^ //; s/ $//')"
   w="$2"; max="${3:-0}"; w2="${4:-$w}"
+  [ "$w" -gt 0 ] || w=1; [ "$w2" -gt 0 ] || w2="$w"
   while [ -n "$s" ]; do
     word="${s%% *}"
     if [ "$word" = "$s" ]; then s=''; else s="${s#* }"; fi
@@ -1665,6 +1666,10 @@ wrap() { # text width max [contw] -> WRAP_LINES: greedy word wrap — first line
     out=( "${out[@]:0:$(( max - 1 ))}" "$rest" )
   fi
   WRAP_LINES=( "${out[@]}" )
+}
+
+title_disp() { # raw title -> display title (conventional-commit prefix stripped, ? when empty)
+  printf '%s' "${1:-?}" | sed -E 's/^[a-z]+(\([^)]*\))?!?: //'
 }
 
 fmt_rel() { # epoch -> "just now" / "4m ago" / "3h ago" / "2d ago" (empty -> —)
@@ -1984,8 +1989,7 @@ render_status() { # ttl [term-rows] -> status screen; with term-rows the PR tabl
           state="$(pr_info "$num" state)"; [ -n "$state" ] || state=OPEN
           if [ "$pass" = open ]; then [ "$state" = OPEN ] || continue
           else [ "$state" != OPEN ] || continue; fi
-          title="$(pr_info "$num" title)"
-          title="$(printf '%s' "${title:-?}" | sed -E 's/^[a-z]+(\([^)]*\))?!?: //')"
+          title="$(title_disp "$(pr_info "$num" title)")"
           wrap "$title" "$title_w" 0 "$span_w"
           pcost+=( "$WRAP_FULL" ); [ "$WRAP_FULL" -gt "$pmax" ] && pmax="$WRAP_FULL"
         done
@@ -2016,7 +2020,7 @@ render_status() { # ttl [term-rows] -> status screen; with term-rows the PR tabl
         review_cell "$review" "$draft"; rt="$CELL_T" rc="$CELL_C"
         state_cell "$num" "$state" "${pending:-0}" # runs for hidden rows too so the hint stays accurate
         if [ "$full" -eq 0 ] && [ "$drawn" -lt "$shown" ]; then
-          title="$(printf '%s' "${title:-?}" | sed -E 's/^[a-z]+(\([^)]*\))?!?: //')"   # drop conventional-commit prefix
+          title="$(title_disp "$title")"   # drop conventional-commit prefix
           wrap "$title" "$title_w" "$title_lines" "$span_w"; cost=${#WRAP_LINES[@]}
           if [ "$budget" -lt 0 ] || [ $(( used + cost )) -le "$budget" ]; then
             row=( "#$num" "$C_BOLD$base" "${WRAP_LINES[0]}" "$base" "$rt" "$rc" "$CELL_T" "$CELL_C" )
