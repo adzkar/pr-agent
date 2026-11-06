@@ -84,7 +84,12 @@
 #   PR_AGENT_ACTIVITY_LINES  Lines in the status "recent activity" section
 #                         (default 6, 0 = hide — frees rows for the table)
 #   PR_AGENT_TITLE_W      Title column width in the status table (default 0 =
-#                         auto-fit the terminal, up to 100 chars)
+#                         auto-fit the terminal, up to 100 chars; LAST RUN and
+#                         ROUNDS columns drop out on narrow terminals first)
+#   PR_AGENT_TITLE_LINES  Max lines a TITLE cell wraps over in the status table
+#                         (default 3; 1 = truncate to one line, 0 = no cap).
+#                         `status -w` shrinks it automatically when wrapped
+#                         titles would push PRs off-screen
 #   PR_AGENT_UPDATE_CHECK 1 = check for newer releases in the background; the notice
 #                             lands on a later run (default 1, 0 = fully off)
 #   PR_AGENT_UPDATE_CHECK_EVERY  Seconds between release checks (default 86400)
@@ -180,12 +185,14 @@ ACTIVITY_LINES="${PR_AGENT_ACTIVITY_LINES:-${CFG_ACTIVITY_LINES:-6}}"         # 
 [[ "$ACTIVITY_LINES" =~ ^[0-9]+$ ]] || ACTIVITY_LINES=6
 TITLE_W="${PR_AGENT_TITLE_W:-${CFG_TITLE_W:-0}}"                              # status title column width; 0 = auto-fit (≤100)
 [[ "$TITLE_W" =~ ^[0-9]+$ ]] || TITLE_W=0
+TITLE_LINES="${PR_AGENT_TITLE_LINES:-${CFG_TITLE_LINES:-3}}"                  # max lines a TITLE cell wraps over; 1 = truncate, 0 = no cap
+[[ "$TITLE_LINES" =~ ^[0-9]+$ ]] || TITLE_LINES=3
 UPDATE_CHECK="${PR_AGENT_UPDATE_CHECK:-${CFG_UPDATE_CHECK:-1}}"               # 1 = check for newer releases in the background
 UPDATE_CHECK_EVERY="${PR_AGENT_UPDATE_CHECK_EVERY:-${CFG_UPDATE_CHECK_EVERY:-86400}}"  # seconds between release checks
 [[ "$UPDATE_CHECK_EVERY" =~ ^[0-9]+$ ]] || UPDATE_CHECK_EVERY=86400
 FULL_CHECK_EVERY=10   # cycles; forces a full feedback fetch even if nothing looks changed
 
-SETTINGS="INTERVAL PERM_MODE SANDBOX AUTHOR_FILTER PR_AUTHOR_FILTER BOTS TRIGGER MAX_FAILS MAX_ROUNDS STOP_ON_APPROVE CONCURRENCY CI_TRIGGER CONFLICT_TRIGGER NOTIFY RETRY RETRY_MAX RETRY_RE RETRY_MSG SKIP_RE BOT_STATUS_RE SETUP_CMD MAIN_SYNC TABLE_ROWS ACTIVITY_LINES TITLE_W UPDATE_CHECK UPDATE_CHECK_EVERY"
+SETTINGS="INTERVAL PERM_MODE SANDBOX AUTHOR_FILTER PR_AUTHOR_FILTER BOTS TRIGGER MAX_FAILS MAX_ROUNDS STOP_ON_APPROVE CONCURRENCY CI_TRIGGER CONFLICT_TRIGGER NOTIFY RETRY RETRY_MAX RETRY_RE RETRY_MSG SKIP_RE BOT_STATUS_RE SETUP_CMD MAIN_SYNC TABLE_ROWS ACTIVITY_LINES TITLE_W TITLE_LINES UPDATE_CHECK UPDATE_CHECK_EVERY"
 
 save_config() {
   local k; : >"$STATE_DIR/config"
@@ -1600,6 +1607,7 @@ fmt_ago() { # seconds -> 45s / 3m12s / 1h05m
 
 STATUS_PENDING="$STATE_DIR/status_pending"
 COL_W=() COLS='' NEXT_POLL='' CELL_T='' CELL_C=''
+WRAP_LINES=() WRAP_FULL=0
 H_PENDING='' H_FAILED='' H_GAVEUP='' H_DIED='' H_WORKING='' H_PAUSED='' H_LIMIT='' H_BOTFAIL='' H_SYNCFAIL='' H_BLOCKED=''
 
 setup_colors() { # enable ANSI styling only when stdout is a terminal and NO_COLOR is unset
@@ -1630,6 +1638,41 @@ rep() { # char count -> char repeated count times
   printf '%s' "$out"
 }
 
+wrap() { # text width max [contw] -> WRAP_LINES: greedy word wrap — first line ≤width, continuation lines ≤contw (default width); a word wider than its line hard-splits at that line's width; over max folds the rest into a …-ended last line (max 0 = no cap). WRAP_FULL = uncapped line count. widths floor at 1 — ≤0 would loop forever
+  local s w w2 wcur max line='' word i rest; local -a out=()
+  s="$(printf '%s' "$1" | sed -E 's/[[:space:]]+/ /g; s/^ //; s/ $//')"
+  w="$2"; max="${3:-0}"; w2="${4:-$w}"
+  [ "$w" -gt 0 ] || w=1; [ "$w2" -gt 0 ] || w2="$w"
+  while [ -n "$s" ]; do
+    word="${s%% *}"
+    if [ "$word" = "$s" ]; then s=''; else s="${s#* }"; fi
+    while :; do   # too wide for its line: commit the pending line, then split at the width of the line each chunk lands on
+      [ "${#out[@]}" -eq 0 ] && wcur="$w" || wcur="$w2"   # first-line width only while nothing's emitted yet
+      [ "${#word}" -le "$wcur" ] && break
+      if [ -n "$line" ]; then out+=( "$line" ); line=''
+      else out+=( "${word:0:$wcur}" ); word="${word:$wcur}"; fi
+    done
+    if [ -z "$line" ]; then line="$word"
+    elif [ $(( ${#line} + 1 + ${#word} )) -le "$wcur" ]; then line+=" $word"
+    else out+=( "$line" ); line="$word"; fi
+  done
+  [ -n "$line" ] && out+=( "$line" )
+  [ "${#out[@]}" -eq 0 ] && out+=( '' )
+  WRAP_FULL=${#out[@]}
+  if [ "$max" -gt 0 ] && [ "${#out[@]}" -gt "$max" ]; then
+    rest="${out[$(( max - 1 ))]}"
+    for (( i = max; i < ${#out[@]}; i++ )); do rest+=" ${out[$i]}"; done
+    local lw; [ "$max" -gt 1 ] && lw="$w2" || lw="$w"   # the last shown line is a continuation line when max>1
+    if [ "${#rest}" -ge "$lw" ]; then rest="$(trunc "$rest" "$lw")"; else rest+="…"; fi
+    out=( "${out[@]:0:$(( max - 1 ))}" "$rest" )
+  fi
+  WRAP_LINES=( "${out[@]}" )
+}
+
+title_disp() { # raw title -> display title (conventional-commit prefix stripped, ? when empty)
+  printf '%s' "${1:-?}" | sed -E 's/^[a-z]+(\([^)]*\))?!?: //'
+}
+
 fmt_rel() { # epoch -> "just now" / "4m ago" / "3h ago" / "2d ago" (empty -> —)
   [ -z "$1" ] && { echo "—"; return; }
   local s=$(( $(date +%s) - $1 ))
@@ -1649,7 +1692,7 @@ first_of() { echo $1 | cut -d' ' -f1; }
 draw_rule() { # left mid right -> horizontal border sized to COL_W
   local out="$1" i n=${#COL_W[@]}
   for (( i = 0; i < n; i++ )); do
-    out+="$(rep ─ $(( COL_W[i] + 2 )))"
+    out+="$(rep ─ $(( COL_W[i] + 1 )))"
     if [ "$i" -lt $(( n - 1 )) ]; then out+="$2"; else out+="$3"; fi
   done
   printf '%s%s%s\n' "$C_DIM" "$out" "$C_RESET"
@@ -1658,10 +1701,14 @@ draw_rule() { # left mid right -> horizontal border sized to COL_W
 draw_row() { # text1 style1 text2 style2 ... -> one bordered table row sized to COL_W
   local out="${C_DIM}│${C_RESET}" i=0
   while [ $# -gt 0 ]; do
-    out+=" $2$(pad "$1" "${COL_W[i]}")$C_RESET ${C_DIM}│${C_RESET}"
+    out+=" $2$(pad "$1" "${COL_W[i]}")$C_RESET${C_DIM}│${C_RESET}"
     shift 2; i=$(( i + 1 ))
   done
   printf '%s\n' "$out"
+}
+
+draw_span() { # text style span -> continuation row: blank PR cell + one cell spanning TITLE..last at span chars
+  printf '%s\n' "${C_DIM}│${C_RESET} $(pad '' "${COL_W[0]}")${C_DIM}│${C_RESET} $2$(pad "$1" "$3")$C_RESET${C_DIM}│${C_RESET}"
 }
 
 status_prs() { # -> PR numbers shown in status, most recent activity first: watch targets ∪ agent history
@@ -1892,35 +1939,72 @@ render_status() { # ttl [term-rows] -> status screen; with term-rows the PR tabl
   if [ -z "$prs" ]; then
     printf '%s\n' "${C_DIM}no PRs to show — no open non-draft PRs and no agent history yet${C_RESET}"
   else
-    local show_session=0 fixed title_w n=6 num title review state draft pending pass base rt rc sid
-    local total shown hidden=0 hidden_open=0 drawn=0
-    local -a row hdr
+    local show_session=0 show_lastrun=1 show_rounds=1 fixed title_w span_w n=6 num title review state draft pending pass base rt rc sid
+    local total shown hidden=0 hidden_open=0 drawn=0 used=0 full=0 budget=-1 cost k
+    local title_lines pmax=0 fit1 fit u i l
+    local -a row hdr pcost=()
     total="$(printf '%s\n' "$prs" | wc -l | tr -d ' ')"
     shown="$total"
     # fixed chrome: badge, watching line, blank, 3 rules + header, blank, hint, blank, footer = 11,
     # plus the activity block (header + lines + blank) when shown — adjust when the layout changes
     local chrome=11
     [ "$ACTIVITY_LINES" -gt 0 ] && chrome=$(( chrome + ACTIVITY_LINES + 2 ))
-    local body="$total" cap_why='' # body lines the terminal can spare (PR rows + a "… more" row)
-    if [ -n "${2:-}" ]; then
-      body=$(( $2 - chrome - gherr )); [ "$body" -lt 0 ] && body=0
-    fi
     if [ "$TABLE_ROWS" -gt 0 ]; then
-      [ "$TABLE_ROWS" -lt "$shown" ] && { shown="$TABLE_ROWS"; cap_why="TABLE_ROWS"; }
+      [ "$TABLE_ROWS" -lt "$shown" ] && shown="$TABLE_ROWS"
       # explicit size wins over terminal-fit — overflow falls to the bottom clip
-    elif [ "$shown" -gt "$body" ]; then
-      shown=$(( body - 1 )); [ "$shown" -lt 0 ] && shown=0; cap_why=term # reserve a line for "… more"
+    elif [ -n "${2:-}" ]; then
+      # term-fit budget counts physical lines — a wrapped TITLE cell costs >1 — with one line kept for "… more"
+      budget=$(( $2 - chrome - gherr - 1 )); [ "$budget" -lt 0 ] && budget=0
     fi
-    [ "$shown" -lt "$total" ] && hidden=$(( total - shown ))
     [ "$cols" -ge 125 ] && show_session=1
     fixed=$(( 5 + 14 + 22 + 6 + 8 ))
     if [ "$show_session" -eq 1 ]; then fixed=$(( fixed + 16 )); n=7; fi
-    title_w=$(( cols - fixed - 3 * n - 1 ))
+    # drop low-priority columns until the title gets a usable width — TITLE_W pins the width instead
+    if [ "$TITLE_W" -le 0 ]; then
+      while [ $(( cols - fixed - 2 * n - 1 )) -lt 25 ]; do
+        if [ "$show_lastrun" -eq 1 ]; then show_lastrun=0; fixed=$(( fixed - 8 ))
+        elif [ "$show_rounds" -eq 1 ]; then show_rounds=0; fixed=$(( fixed - 6 ))
+        else break; fi
+        n=$(( n - 1 ))
+      done
+    fi
+    title_w=$(( cols - fixed - 2 * n - 1 ))
     if [ "$TITLE_W" -gt 0 ]; then title_w="$TITLE_W"; elif [ "$title_w" -gt 100 ]; then title_w=100; fi
     [ "$title_w" -lt 10 ] && title_w=10
-    COL_W=( 5 "$title_w" 14 22 6 8 )
-    hdr=( PR "$C_BOLD" TITLE "$C_BOLD" REVIEW "$C_BOLD" "AGENT STATE" "$C_BOLD" ROUNDS "$C_BOLD" "LAST RUN" "$C_BOLD" )
+    COL_W=( 5 "$title_w" 14 22 )
+    hdr=( PR "$C_BOLD" TITLE "$C_BOLD" REVIEW "$C_BOLD" "AGENT STATE" "$C_BOLD" )
+    [ "$show_rounds" -eq 1 ] && { COL_W+=( 6 ); hdr+=( ROUNDS "$C_BOLD" ); }
+    [ "$show_lastrun" -eq 1 ] && { COL_W+=( 8 ); hdr+=( "LAST RUN" "$C_BOLD" ); }
     if [ "$show_session" -eq 1 ]; then COL_W+=( 16 ); hdr+=( SESSION "$C_BOLD" ); fi
+    span_w=-2
+    for i in "${COL_W[@]:1}"; do span_w=$(( span_w + i + 2 )); done   # TITLE..last merged-cell width for title continuation lines
+
+    # term-fit: shrink the title-line cap until it stops costing rows — a PR on
+    # screen beats a longer title. title_lines = largest cap keeping that count.
+    title_lines="$TITLE_LINES"
+    if [ "$budget" -ge 0 ] && [ "$TITLE_LINES" -gt 1 ]; then
+      for pass in open done; do   # same order/filter the draw loop uses
+        for num in $prs; do
+          state="$(pr_info "$num" state)"; [ -n "$state" ] || state=OPEN
+          if [ "$pass" = open ]; then [ "$state" = OPEN ] || continue
+          else [ "$state" != OPEN ] || continue; fi
+          title="$(title_disp "$(pr_info "$num" title)")"
+          wrap "$title" "$title_w" 0 "$span_w"
+          pcost+=( "$WRAP_FULL" ); [ "$WRAP_FULL" -gt "$pmax" ] && pmax="$WRAP_FULL"
+        done
+      done
+      fit1="$total"; [ "$budget" -lt "$fit1" ] && fit1="$budget"   # at cap 1 every row costs 1 line
+      title_lines=1
+      for (( l = 2; l <= pmax && l <= TITLE_LINES; l++ )); do
+        fit=0; u=0
+        for i in "${pcost[@]}"; do
+          [ $(( u + (i < l ? i : l) )) -le "$budget" ] || break
+          u=$(( u + (i < l ? i : l) )); fit=$(( fit + 1 ))
+        done
+        [ "$fit" -eq "$fit1" ] || break
+        title_lines="$l"
+      done
+    fi
 
     draw_rule ┌ ┬ ┐
     draw_row "${hdr[@]}"
@@ -1934,30 +2018,35 @@ render_status() { # ttl [term-rows] -> status screen; with term-rows the PR tabl
         pending="$(awk -v n="$num" '$1 == n { print $2 }' "$STATUS_PENDING" 2>/dev/null)"
         review_cell "$review" "$draft"; rt="$CELL_T" rc="$CELL_C"
         state_cell "$num" "$state" "${pending:-0}" # runs for hidden rows too so the hint stays accurate
-        if [ "$drawn" -ge "$shown" ]; then
-          [ "$state" = OPEN ] && hidden_open=$(( hidden_open + 1 ))
-          continue
+        if [ "$full" -eq 0 ] && [ "$drawn" -lt "$shown" ]; then
+          title="$(title_disp "$title")"   # drop conventional-commit prefix
+          wrap "$title" "$title_w" "$title_lines" "$span_w"; cost=${#WRAP_LINES[@]}
+          if [ "$budget" -lt 0 ] || [ $(( used + cost )) -le "$budget" ]; then
+            row=( "#$num" "$C_BOLD$base" "${WRAP_LINES[0]}" "$base" "$rt" "$rc" "$CELL_T" "$CELL_C" )
+            [ "$show_rounds" -eq 1 ] && row+=( "$(map_num "$num" rounds)" "$base" )
+            [ "$show_lastrun" -eq 1 ] && row+=( "$(fmt_rel "$(last_run_epoch "$num")")" "$base" )
+            if [ "$show_session" -eq 1 ]; then
+              sid="$(map_get "$num" session_id)"; row+=( "${sid:-—}" "$C_DIM" )
+            fi
+            draw_row "${row[@]}"
+            for (( k = 1; k < cost; k++ )); do   # continuation lines of a wrapped title span the rest of the row
+              draw_span "${WRAP_LINES[$k]}" "$base" "$span_w"
+            done
+            drawn=$(( drawn + 1 )); used=$(( used + cost ))
+            continue
+          fi
+          full=1   # budget blown — every later row is hidden too; skip wrapping them
         fi
-        title="$(printf '%s' "${title:-?}" | sed -E 's/^[a-z]+(\([^)]*\))?!?: //')"   # drop conventional-commit prefix
-        row=( "#$num" "$C_BOLD$base" "$title" "$base" "$rt" "$rc" "$CELL_T" "$CELL_C"
-              "$(map_num "$num" rounds)" "$base" "$(fmt_rel "$(last_run_epoch "$num")")" "$base" )
-        if [ "$show_session" -eq 1 ]; then
-          sid="$(map_get "$num" session_id)"; row+=( "${sid:-—}" "$C_DIM" )
-        fi
-        draw_row "${row[@]}"
-        drawn=$(( drawn + 1 ))
+        [ "$state" = OPEN ] && hidden_open=$(( hidden_open + 1 ))
+        hidden=$(( hidden + 1 ))
       done
     done
     if [ "$hidden" -gt 0 ]; then
       local more="… ${hidden} more"
       [ "$hidden_open" -gt 0 ] && more="$more ($hidden_open open)"
-      if [ "$title_w" -ge 42 ]; then
-        if [ "$cap_why" = term ]; then more="$more — make the terminal taller"
-        else more="$more — TABLE_ROWS=$TABLE_ROWS"; fi
-      fi
-      row=( "" "" "$more" "$C_DIM" "" "" "" "" "" "" "" "" )
-      [ "$show_session" -eq 1 ] && row+=( "" "" )
-      draw_row "${row[@]}"
+      if [ "$TABLE_ROWS" -gt 0 ]; then more="$more — TABLE_ROWS=$TABLE_ROWS"
+      else more="$more — make the terminal taller"; fi
+      draw_span "$more" "$C_DIM" "$span_w"
     fi
     draw_rule └ ┴ ┘
   fi

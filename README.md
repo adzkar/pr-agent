@@ -72,13 +72,15 @@ it live on the terminal's alt screen.
 pr-agent v0.1.0  ● watching (pid 10391)   owner/repo
 watching open PRs by @me · every 2m · mode dangerous · conflicts · 2 parallel · max 10 rounds · reacts to humans + review-bot[bot] · next poll in 34s
 
-┌───────┬────────────┬────────────────┬────────────────────────┬────────┬──────────┐
-│ PR    │ TITLE      │ REVIEW         │ AGENT STATE            │ ROUNDS │ LAST RUN │
-├───────┼────────────┼────────────────┼────────────────────────┼────────┼──────────┤
-│ #266  │ payment c… │ ✗ changes req. │ ↻ agent working 2m30s  │ 9      │ just now │
-│ #252  │ activate/… │ ✓ approved     │ merged — done          │ 2      │ 6d ago   │
-│       │ … 56 more  │                │                        │        │          │
-└───────┴────────────┴────────────────┴────────────────────────┴────────┴──────────┘
+┌──────┬─────────────────────────────────┬───────────────┬───────────────────────┬───────┬─────────┐
+│ PR   │ TITLE                           │ REVIEW        │ AGENT STATE           │ ROUNDS│ LAST RUN│
+├──────┼─────────────────────────────────┼───────────────┼───────────────────────┼───────┼─────────┤
+│ #266 │ payment changes for the currency│ ✗ changes req.│ ↻ agent working 2m30s │ 9     │ just now│
+│      │ refactor — handling JPY rounding in invoices and credit notes                             │
+│ #252 │ activate/auto-enable the watcher│ ✓ approved    │ merged — done         │ 2     │ 6d ago  │
+│      │ when a repo gets added                                                                    │
+│      │ … 56 more — TABLE_ROWS=2                                                                  │
+└──────┴─────────────────────────────────┴───────────────┴───────────────────────┴───────┴─────────┘
 
 recent activity  (full log: pr-agent logs · agent transcript: pr-agent logs N)
   18:51         #329   linked to session pumped-leaf
@@ -95,6 +97,11 @@ recent activity  (full log: pr-agent logs · agent transcript: pr-agent logs N)
   failed/retrying, worktree blocked (the PR branch is checked out in the main
   checkout), paused, hit the round limit, gave up, waiting for review,
   all feedback handled, or done.
+- Titles wrap over up to `PR_AGENT_TITLE_LINES` lines (default `3`; `1` =
+  truncate, `0` = no cap); the other cells render on the first line, while
+  continuation lines span the rest of the row (~3× the title width). In `-w`
+  mode the cap shrinks automatically when wrapped titles would push PRs
+  off-screen — visible rows beat title lines.
 - When the table is taller than the terminal, rows are dropped from the bottom
   (merged/closed history first) and collapsed into a `… N more` row, so the
   recent-activity and hint sections always stay visible. `PR_AGENT_TABLE_ROWS`
@@ -104,7 +111,8 @@ recent activity  (full log: pr-agent logs · agent transcript: pr-agent logs N)
 - **recent activity** tails the deduplicated event log; the last line is a
   contextual "what now" hint with the command to run.
 - A `SESSION` column (Devin session id per PR) appears when the terminal is
-  ≥ 125 columns wide.
+  ≥ 125 columns wide; on narrow terminals `LAST RUN`, then `ROUNDS` are
+  dropped to keep the title usable.
 
 ## What counts as feedback
 
@@ -151,6 +159,7 @@ Env vars always win over the per-repo config saved by `pr-agent on`
 | `PR_AGENT_TABLE_ROWS` | `0` | Rows in the status table (`0` = fit the screen; can exceed it — the bottom of the frame gets clipped) |
 | `PR_AGENT_ACTIVITY_LINES` | `6` | Lines in the status "recent activity" section (`0` = hide — frees rows for the table) |
 | `PR_AGENT_TITLE_W` | `0` | Title column width in the status table (`0` = auto-fit the terminal, up to 100 chars) |
+| `PR_AGENT_TITLE_LINES` | `3` | Max lines a TITLE cell wraps over in the status table (`1` = truncate to one line, `0` = no cap). `status -w` shrinks it when needed to keep PRs on screen |
 | `PR_AGENT_UPDATE_CHECK` | `1` | Check for newer releases in the background; notice appears on a later run (`0` disables the check and any pending notice) |
 | `PR_AGENT_UPDATE_CHECK_EVERY` | `86400` | Seconds between release checks |
 | `PR_AGENT_REPO` | — | `owner/name` to act on when not inside the repo |
