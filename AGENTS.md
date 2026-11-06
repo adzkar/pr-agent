@@ -113,10 +113,11 @@ the intent.
   adds header + N + blank, i.e. N+2) `+ gh_error` lines. If you add/remove any
   non-table, non-activity line, update the `11` in `chrome` or the frame will
   scroll/clip again. TITLE cells wrap over up to `TITLE_LINES` physical lines
-  via `wrap` (result in `WRAP_LINES`), so the term-fit budget counts *lines* —
-  `rows − chrome − gherr − 1`, one kept for the `… N more` row — while
-  `TABLE_ROWS` still counts *rows*: its overflow falls to the bottom clip, not
-  this cap.
+  via `wrap` (result in `WRAP_LINES`, uncapped count in `WRAP_FULL`), so the
+  term-fit budget counts *lines* — `rows − chrome − gherr − 1`, one kept for
+  the `… N more` row — and the cap auto-shrinks to the largest value still
+  showing the most PRs (visible rows beat title lines). `TABLE_ROWS` still
+  counts *rows*: its overflow falls to the bottom clip, not this cap.
 - **`running/<pr>` marker = "stopped by user".** `run_agent` treats a deleted
   marker as an intentional stop (rc 3), not a crash — remove the marker before
   killing a pid, never after.

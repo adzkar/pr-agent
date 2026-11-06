@@ -98,7 +98,9 @@ recent activity  (full log: pr-agent logs · agent transcript: pr-agent logs N)
   checkout), paused, hit the round limit, gave up, waiting for review,
   all feedback handled, or done.
 - Titles wrap over up to `PR_AGENT_TITLE_LINES` lines (default `3`; `1` =
-  truncate, `0` = no cap); the other cells render on the first line.
+  truncate, `0` = no cap); the other cells render on the first line. In `-w`
+  mode the cap shrinks automatically when wrapped titles would push PRs
+  off-screen — visible rows beat title lines.
 - When the table is taller than the terminal, rows are dropped from the bottom
   (merged/closed history first) and collapsed into a `… N more` row, so the
   recent-activity and hint sections always stay visible. `PR_AGENT_TABLE_ROWS`
@@ -155,7 +157,7 @@ Env vars always win over the per-repo config saved by `pr-agent on`
 | `PR_AGENT_TABLE_ROWS` | `0` | Rows in the status table (`0` = fit the screen; can exceed it — the bottom of the frame gets clipped) |
 | `PR_AGENT_ACTIVITY_LINES` | `6` | Lines in the status "recent activity" section (`0` = hide — frees rows for the table) |
 | `PR_AGENT_TITLE_W` | `0` | Title column width in the status table (`0` = auto-fit the terminal, up to 100 chars) |
-| `PR_AGENT_TITLE_LINES` | `3` | Max lines a TITLE cell wraps over in the status table (`1` = truncate to one line, `0` = no cap) |
+| `PR_AGENT_TITLE_LINES` | `3` | Max lines a TITLE cell wraps over in the status table (`1` = truncate to one line, `0` = no cap). `status -w` shrinks it when needed to keep PRs on screen |
 | `PR_AGENT_UPDATE_CHECK` | `1` | Check for newer releases in the background; notice appears on a later run (`0` disables the check and any pending notice) |
 | `PR_AGENT_UPDATE_CHECK_EVERY` | `86400` | Seconds between release checks |
 | `PR_AGENT_REPO` | — | `owner/name` to act on when not inside the repo |
