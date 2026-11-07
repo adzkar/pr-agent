@@ -58,7 +58,7 @@ shows where every PR stands.
 | `pr-agent reset-rounds N` | Reset PR N's round counter — lifts the `PR_AGENT_MAX_ROUNDS` auto-run limit, keeps the session |
 | `pr-agent gc [--yes]` | Clean up worktrees/branches/state of merged & closed PRs and stale non-PR state |
 | `pr-agent sync [--apply [N]]` | Report open PRs whose branch is behind their base; `--apply` merges the base into them via their agent sessions. Optional N: only PRs whose "do not review" banner depends on merged PR N. |
-| `pr-agent config` | Show effective settings |
+| `pr-agent config` | Show effective settings and where each came from (env/saved/default) |
 | `pr-agent map` | Show the raw PR → session/worktree map (JSON) |
 | `pr-agent version` | Print the installed version |
 | `pr-agent update [--check] [--force] [X.Y.Z]` | Self-update the invoked copy to the latest (or given) release — `--force` reinstalls and permits a git-worktree copy |
