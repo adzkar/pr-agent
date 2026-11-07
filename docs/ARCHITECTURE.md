@@ -168,36 +168,30 @@ the `live · refresh` footer.
 Cells pad to `width+2` (`␣content│`). The TITLE column auto-fits the space the
 fixed columns leave (`cols − fixed − 2n − 1`, ≤100); when that would fall
 below 25, `LAST RUN` then `ROUNDS` are dropped to claw width back (`TITLE_W`
-pins the width and skips this). Each TITLE cell wraps over up to `TITLE_LINES`
-physical lines (default 3, `1` = truncate, `0` = no cap) via `wrap` —
-word-boundary greedy, longer words hard-split, over-cap remainder folded into
-a `…`-ended last line — while the other cells render on the row's first line.
-The first wrapped line is capped at `title_w`; continuation lines wrap at a
+pins the width and skips this — the saved value is a logical width, never
+rewritten to the screen). Each TITLE cell wraps over up to `TITLE_LINES`
+physical lines (`1` = truncate, `0` = no cap) via `wrap` — word-boundary
+greedy, longer words hard-split, over-cap remainder folded into a `…`-ended
+last line — while the other cells render on the row's first line. The first
+wrapped line is capped at `title_w`; continuation lines wrap at a
 *merged-cell* width (`draw_span` draws one cell over TITLE..last column) so
-a title typically completes in 2 lines. `wrap` also reports `WRAP_FULL` (the
-uncapped line count): the pre-pass wraps every row at no cap, then the
-largest cap ≤ `TITLE_LINES` that still shows the maximum achievable number
-of PRs is picked (each row costs `min(WRAP_FULL, cap)` lines) — visible rows
-beat title lines.
+a title typically completes in 2 lines. `TITLE_LINES` resolves env → saved →
+mode default: `apply_status_defaults` gives interactive (`-w`) `0` and plain
+`status` `3` when neither env nor a saved value exists (provenance
+`mode-default`), and the cap is **never** shrunk to fit the screen — a saved
+legacy `CFG_TITLE_LINES=3` stays authoritative in both modes.
 
-`-w` mode repaints on the alt screen: `cmd_status` passes `tput lines` (and
-the refresh interval, for the footer) so `render_status` caps table body
-*lines* at `rows − chrome − gh_error − 1`
-(the `-1` reserves a `… N more` row), collapsing the rest into it (open PRs
-first — merged history drops out first; `N` counts PRs, not lines). `chrome`
-is a **measured physical-line count**, not a constant: every composed
-header line (badge, watching line, `gh_error`, hint, `-w` footer, activity
-header) goes through `phys_lines` — ANSI-stripped, soft-wrap counted at
-`cols` — plus the fixed blanks, the 4 table rules/header, and
-`ACTIVITY_LINES`; add any new non-table line through `phys_lines`/`chrome`
-the same way. `TABLE_ROWS` (default 0 = off) sets an exact *row* count
-in both modes that *overrides* the terminal budget — when it doesn't fit,
-the bottom of the frame (footer, hint, activity) is cut by the fallback clip
-(`… N more lines`); the `… N more` row names the binding cap ("make the
-terminal taller" vs `TABLE_ROWS=N`). The clip itself also counts physical
-lines (`phys_lines` per frame line, keeping the prefix that fits
-`rows − 1`), so a soft-wrapped header or a pinned-wide `TITLE_W` table
-overflows into the clip instead of scrolling.
+`TABLE_ROWS` counts **records**, not screen lines: `0` (default) renders every
+record in draw order and `N` keeps the first `N`, collapsing the rest into the
+`… N more — TABLE_ROWS=N` row (`N` counts PRs; records are never dropped for
+terminal height). In `-w` mode `cmd_status` repaints on the alt screen: it
+passes `tput lines` to `render_status` (reserved for viewport use) and clips
+the composed frame itself — `phys_lines` measures each logical frame line
+(ANSI-stripped, soft-wrap counted at `cols`), keeps the prefix that fits
+`rows − 1`, and appends `… N more lines` (the clip line names `TABLE_ROWS`
+when a cap is set). A wrapped title, a soft-wrapped header, or a pinned-wide
+`TITLE_W` table all overflow into the clip rather than scrolling — a real
+scroll viewport is future work; until then the clip message is the hint.
 
 ### Concurrency & locking
 
