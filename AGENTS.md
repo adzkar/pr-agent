@@ -237,6 +237,18 @@ the intent.
   — an unfiltered suffix passes the grep and, being newer than the
   `touch`ed marker, surfaces as the "latest release" to `cmd_update`.
   When the stub learns a new sidecar, extend the regex.
+- **Setting env names are a public interface — never derive them.** Six
+  documented `PR_AGENT_*` vars differ from `PR_AGENT_<setting>`:
+  `PR_AGENT_MODE`→`PERM_MODE`, `PR_AGENT_AUTHOR`→`AUTHOR_FILTER`,
+  `PR_AGENT_PR_AUTHOR`→`PR_AUTHOR_FILTER`, `PR_AGENT_CI`→`CI_TRIGGER`,
+  `PR_AGENT_CONFLICTS`→`CONFLICT_TRIGGER`, `PR_AGENT_SETUP`→`SETUP_CMD`.
+  `resolve_str`/`resolve_num` take the full env name as an explicit arg at
+  each `load_settings` call site (kept greppable on purpose); only the
+  `CFG_*` saved names derive from the setting. Deriving `PR_AGENT_$n`
+  silently renamed all six — including `PR_AGENT_MODE` reverting to
+  `dangerous`, a silent security downgrade — while fixtures passed because
+  they only exercised names that coincidentally matched. Fixtures:
+  `tests/display-settings.sh`.
 
 ## Commit style
 
