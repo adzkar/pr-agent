@@ -2543,8 +2543,7 @@ cmd_status() {
         if [[ "$clipped" == *$'\x02'* ]]; then
           clip_hint="make the terminal taller"
           [ "$TABLE_ROWS" -gt 0 ] && clip_hint="lower TABLE_ROWS or make the terminal taller"
-          frame="${clipped%%$'\x02'*}"   # kept prefix — empty when nothing fit (rows=1)
-          [ -n "$frame" ] && frame="${frame%$'\n'}"$'\n'
+          frame="${clipped%%$'\x02'*}"   # kept prefix (ends in \n) — empty when nothing fit
           frame="${frame}${C_DIM}… ${clipped##*$'\x02'} more lines — ${clip_hint}${C_RESET}"
         else frame="$clipped"; fi
         printf '\033[H%s\033[0m\033[J' "${frame//$'\n'/$'\033[K\n'}"
