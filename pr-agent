@@ -2466,12 +2466,13 @@ status_layout() { # snapshot-file cols [term-rows [watch-every [meta-out [hoff]]
     tbl+=( "$(draw_rule └ ┴ ┘)" )
 
     # optional chrome shrinks before it could starve the body: with a row budget,
-    # the activity section emits at most what truly remains
+    # the activity section (header + N events + trailing blank) emits at most
+    # what truly remains
     if [ -n "$term_rows" ] && [ "$ACTIVITY_LINES" -gt 0 ]; then
       local fixed=$(( $(phys_lines "$line1" "$cols") + $(phys_lines "$line2" "$cols") + 1 + ${#tbl[@]} + 1 + $(phys_lines "$hint_line" "$cols") ))
       [ -n "$gherr_line" ] && fixed=$(( fixed + $(phys_lines "$gherr_line" "$cols") ))
       [ -n "$foot_line" ] && fixed=$(( fixed + 1 + $(phys_lines "$foot_line" "$cols") ))
-      local budget=$(( term_rows - 1 - fixed - $(phys_lines "$act_hdr" "$cols") ))
+      local budget=$(( term_rows - 1 - fixed - $(phys_lines "$act_hdr" "$cols") - 1 ))
       [ "$budget" -lt 0 ] && budget=0
       [ "$act_n" -gt "$budget" ] && act_n=$budget
     fi
