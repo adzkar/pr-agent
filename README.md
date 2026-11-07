@@ -171,7 +171,7 @@ invocation only:
 | `PR_AGENT_MAIN_SYNC` | `0` | Each poll also auto-syncs open PRs behind the default base |
 | `PR_AGENT_TABLE_ROWS` | `0` | PR records in the status table (`0` = every record renders — interactive overflow scrolls/clips; `N` = cap the list) |
 | `PR_AGENT_ACTIVITY_LINES` | `6` | Lines in the status "recent activity" section (`0` = hide — frees rows for the table) |
-| `PR_AGENT_TITLE_W` | `0` | Title column width in the status table (`0` = auto — the largest useful width the title content and the viewport beside the PR column allow; `>0` pins a logical width, which may exceed the viewport) |
+| `PR_AGENT_TITLE_W` | `0` | Title column width in the status table (`0` = auto — the largest useful width the title content and the viewport beside the PR column allow; `>0` pins a logical width (min 5), which may exceed the viewport) |
 | `PR_AGENT_TITLE_LINES` | `3` plain / `0` `-w` | Max lines a TITLE cell wraps over in the status table (`1` = truncate to one line, `0` = no cap). The interactive default is uncapped; never auto-shrunk — set it explicitly to cap titles |
 | `PR_AGENT_UPDATE_CHECK` | `1` | Check for newer releases in the background; notice appears on a later run (`0` disables the check and any pending notice) |
 | `PR_AGENT_UPDATE_CHECK_EVERY` | `86400` | Seconds between release checks |

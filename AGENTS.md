@@ -163,7 +163,8 @@ the intent.
   ROUNDS | MODEL` at *measured* cell widths (`cell_ops max` per column over
   heading + every cell; never squeezed or dropped), TITLE at
   `min(widest title, cols − gutter)` when `TITLE_W=0`, the pin verbatim
-  otherwise — then `-w` projects each line into `cols` cells behind a frozen
+  otherwise (floored at the heading's 5 cells) — then `-w` projects each line
+  into `cols` cells behind a frozen
   `[0,gutter)` PR prefix at horizontal offset `hoff` (`cell_ops proj`;
   `_layout`'s 6th arg) while plain `status` prints it whole. `LAST RUN` and
   `SESSION` join only when they fully fit leftover viewport width; cells are

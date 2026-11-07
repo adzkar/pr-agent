@@ -203,10 +203,11 @@ agent states and model ids scroll off-screen rather than being truncated.
 `TITLE` gets the largest useful width beside the frozen PR gutter:
 `min(widest title cell, cols − gutter)` — content- and viewport-bounded, no
 fixed minimum and no old 100-char ceiling; a positive `TITLE_W` pins the
-logical width verbatim, even when oversized. `LAST RUN` and `SESSION` are
-optional and join only when they fully fit the width left after the core
-columns. Each TITLE cell wraps over up to `TITLE_LINES` lines (`1` =
-truncate, `0` = no cap) at that one logical width via `wrap` — word-boundary
+logical width, even when oversized (floored at the heading's 5 cells).
+`LAST RUN` and `SESSION` are optional and join only when they fully fit
+the width left after the core columns. Each TITLE cell wraps over up to
+`TITLE_LINES` lines (`1` = truncate, `0` = no cap) at that one logical
+width via `wrap` — word-boundary
 greedy in display cells (CJK 2, combining/ANSI 0), over-wide words hard-split,
 over-cap remainder folded into a `…`-ended last line — while the other cells
 render on the row's first line and continuation lines keep blank metadata

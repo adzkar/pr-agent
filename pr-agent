@@ -86,9 +86,9 @@
 #                         (default 6, 0 = hide — frees rows for the table)
 #   PR_AGENT_TITLE_W      Title column width in the status table (default 0 =
 #                         auto — largest useful width from title content and the
-#                         viewport beside the PR column; >0 pins a logical width,
-#                         which may exceed the viewport — metadata columns scroll
-#                         off-screen rather than squeeze the title)
+#                         viewport beside the PR column; >0 pins a logical width
+#                         (min 5), which may exceed the viewport — metadata
+#                         columns scroll off-screen rather than squeeze the title)
 #   PR_AGENT_TITLE_LINES  Max lines a TITLE cell wraps over in the status table
 #                         (1 = truncate to one line, 0 = no cap; default 3 for
 #                         plain status, 0 for status -w). Never shrunk to fit
