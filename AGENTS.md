@@ -21,6 +21,7 @@
 | `tests/title_wrap.sh` | Extracted-function fixtures for `wrap` — the status TITLE column's multi-line cell wrap (bash only) |
 | `tests/display-settings.sh` | Extracted-function fixtures for the settings resolver — precedence, `SRC_*` provenance, invalid-input notes (bash only) |
 | `tests/status_snapshot.sh` | Scratch-state + stubbed-`gh` fixtures for the status gather/snapshot/layout split — record data, ordering, pending counts without `seen` writes, layout purity, incomplete-snapshot rejection, concurrent gathers |
+| `tests/status_grid.sh` | Handcrafted-snapshot fixtures driving `_layout` — logical-grid geometry (measured columns, TITLE allocation, optional LAST RUN/SESSION, pinned `TITLE_W`), bounded projection + `hoff`, blank-cell continuations, unicode/ANSI cells, compact tiny-terminal state |
 | `AGENTS.md` | This file |
 
 ## Deploy model
@@ -57,7 +58,8 @@ stubbed `gh`; `tests/update-check.sh` extracts the update-check functions
 from `pr-agent` and exercises the stamp/throttle edge cases; `display-settings.sh`
 extracts the settings resolver and checks precedence/provenance/invalid inputs;
 `tests/status_snapshot.sh` drives `_gather`/`_layout` over a scratch state dir
-and checks the snapshot contract + layout purity.
+and checks the snapshot contract + layout purity; `tests/status_grid.sh` drives
+`_layout` over handcrafted snapshots and checks grid geometry + projection.
 Minimum checks:
 
 ```sh
@@ -70,6 +72,7 @@ tests/author_match.sh                  # author/login matching fixtures (no gh)
 tests/title_wrap.sh                    # TITLE-cell wrap fixtures (no gh)
 tests/display-settings.sh              # settings precedence/provenance fixtures (no gh)
 tests/status_snapshot.sh               # gather/snapshot/layout fixtures (stubbed gh)
+tests/status_grid.sh                   # grid geometry + projection fixtures (handcrafted snapshots)
 ./tests/release.sh                     # release + update scenarios (run when `release` or `cmd_update` changes)
 ./tests/update-check.sh                # update-check edge cases (run when the check changes)
 cd /path/to/a/watched/repo             # then run READ-ONLY commands only:
@@ -152,15 +155,41 @@ the intent.
   resolved user cap that's **never** shrunk for screen fit — env → saved →
   mode default via `apply_status_defaults` (interactive `0`, plain `3`, only
   when provenance is `default`; a saved legacy `3` stays authoritative in
-  `-w`). Overflow belongs to the `-w` frame clip in `cmd_status`, which counts
-  *physical* lines (`phys_lines`, ANSI-stripped soft-wrap) and keeps the
-  prefix that fits `rows − 1`. TITLE cells wrap via `wrap` (result in
-  `WRAP_LINES`) — the first line is `title_w` wide, continuation lines span
-  TITLE..last column via `draw_span`. Column set is width-driven: SESSION
-  needs `cols ≥ 125`; below a usable `title_w` (~25) `LAST RUN` then `ROUNDS`
-  drop out — keep `fixed`/`n` in step when adding a column. All of this is
-  layout-side: `status_layout` reads the resolved values from the snapshot's
-  `cfg` block, never the process env.
+  `-w`). Vertical overflow belongs to the `-w` frame clip in `cmd_status`
+  (`cell_ops clip` counts *physical* lines — ANSI-stripped soft-wrap — keeps
+  the prefix fitting `rows − 1`, sentinel line reports the drop).
+- **The grid is logical, the viewport a projection.** `status_layout` builds
+  the table at its own width — core `PR | TITLE | REVIEW | AGENT STATE |
+  ROUNDS | MODEL` at *measured* cell widths (`cell_ops max` per column over
+  heading + every cell; never squeezed or dropped), TITLE at
+  `min(widest title, cols − gutter)` when `TITLE_W=0`, the pin verbatim
+  otherwise (floored at the heading's 5 cells) — then `-w` projects each line
+  into `cols` cells behind a frozen
+  `[0,gutter)` PR prefix at horizontal offset `hoff` (`cell_ops proj`;
+  `_layout`'s 6th arg) while plain `status` prints it whole. `LAST RUN` and
+  `SESSION` join only when they fully fit leftover viewport width; cells are
+  `␣content␣│` — one space both sides, so rule/row/span formulas move
+  together (`Σ COL_W + 3n + 1`). TITLE wraps at *one* logical width via
+  `wrap` (result in `WRAP_LINES`, widths in `WRAP_W`) — continuations are
+  regular rows with blank metadata cells; only the `… N more` cap row merges
+  TITLE..last via `draw_span`. `term-rows` shrinks the activity section
+  before the frame clip can starve the body; `cols < 30` or `rows < 8` gets
+  a compact safe state. All of this is layout-side: `status_layout` reads
+  resolved values from the snapshot's `cfg` block, never the process env.
+- **`${#var}` is a char count, not a display width.** Everything that
+  measures, pads, cuts, or projects display text goes through `cell_ops` —
+  one `LC_ALL=C` awk program (UTF-8 decode → wcwidth-style classes: CJK/emoji
+  2 cells, combining/format/ANSI escapes 0, ASCII 1). awk quirks that have
+  already bitten: **BSD awk doesn't parse `0xNNN` literals** (they evaluate
+  to 0 — use decimal) and doesn't allow bare newlines mid-statement.
+  `wrap`'s per-char widths come from one `ws` pass per title, the grid's
+  column widths from one `max` pass per frame — don't reintroduce per-cell
+  subprocess calls into the draw loop. But char count *follows the ambient
+  locale*: under `LC_ALL=C`, `${#var}` counts bytes and `${var:i:j}`
+  byte-slices (splitting UTF-8 mid-codepoint) while `wcs[]` stays
+  per-codepoint — `wrap` pins `local LC_ALL=en_US.UTF-8` so its own
+  index/length math always matches `wcs[]`. Any function that mixes bash
+  string ops with cell_ops codepoint indexing needs the same pin.
 - **`save_config` pins only `env`/`saved`-provenance keys.** `pr-agent on`
   snapshots `CFG_*` for the detached watcher, but a key still at its resolver
   `default` (or `mode-default`) stays unwritten — writing it would pin the

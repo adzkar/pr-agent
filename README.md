@@ -69,24 +69,22 @@ shows where every PR stands.
 it live on the terminal's alt screen.
 
 ```
-pr-agent v0.1.0  ● watching (pid 10391)   owner/repo
-watching open PRs by @me · every 2m · mode dangerous · conflicts · 2 parallel · max 10 rounds · reacts to humans + review-bot[bot] · next poll in 34s
+pr-agent v0.3.1  ● watching (pid 10391)   owner/repo
+watching open PRs by @me · every 2m · mode dangerous · conflicts · 2 parallel · max 10 rounds · reacts to humans + review-bot[bot] · next poll in 1m34s
 
-┌──────┬─────────────────────────────────┬───────────────┬───────────────────────┬───────┬─────────┐
-│ PR   │ TITLE                           │ REVIEW        │ AGENT STATE           │ ROUNDS│ LAST RUN│
-├──────┼─────────────────────────────────┼───────────────┼───────────────────────┼───────┼─────────┤
-│ #266 │ payment changes for the currency│ ✗ changes req.│ ↻ agent working 2m30s │ 9     │ just now│
-│      │ refactor — handling JPY rounding in invoices and credit notes                             │
-│ #252 │ activate/auto-enable the watcher│ ✓ approved    │ merged — done         │ 2     │ 6d ago  │
-│      │ when a repo gets added                                                                    │
-│      │ … 56 more — TABLE_ROWS=2                                                                  │
-└──────┴─────────────────────────────────┴───────────────┴───────────────────────┴───────┴─────────┘
+┌──────┬───────────────────────────────────────────┬────────────────┬───────────────────────┬────────┬───────────┬──────────┬─────────────┐
+│ PR   │ TITLE                                     │ REVIEW         │ AGENT STATE           │ ROUNDS │ MODEL     │ LAST RUN │ SESSION     │
+├──────┼───────────────────────────────────────────┼────────────────┼───────────────────────┼────────┼───────────┼──────────┼─────────────┤
+│ #266 │ payment changes for the currency refactor │ ✗ changes req. │ ↻ agent working 2m30s │ 9      │ swe-2-max │ 2m ago   │ pumped-leaf │
+│ #252 │ activate the watcher when a repo is added │ ✓ approved     │ merged — done         │ 2      │ —         │ 6d ago   │ calm-river  │
+│      │ … 2 more — TABLE_ROWS=2                                                                                                          │
+└──────┴───────────────────────────────────────────┴────────────────┴───────────────────────┴────────┴───────────┴──────────┴─────────────┘
 
 recent activity  (full log: pr-agent logs · agent transcript: pr-agent logs N)
-  18:51         #329   linked to session pumped-leaf
-  19:04         #330   round 1 finished ✓
+  Jan 06 19:04  #330   round 1 done at 19:04
+  Jan 06 18:51  #329   linked to session pumped-leaf
 
-↻ agent is addressing feedback on #266. Follow along: pr-agent logs 266 -f
+↻ agent is addressing feedback on #266. Follow along: pr-agent logs 266 -f  · steer: pr-agent attach 266
 ```
 
 - **Open PRs come first**, then merged/closed history (dimmed); within each
@@ -97,11 +95,18 @@ recent activity  (full log: pr-agent logs · agent transcript: pr-agent logs N)
   failed/retrying, worktree blocked (the PR branch is checked out in the main
   checkout), paused, hit the round limit, gave up, waiting for review,
   all feedback handled, or done.
+- The table is a **logical grid wider than the terminal can be**: `PR`,
+  `TITLE`, `REVIEW`, `AGENT STATE`, `ROUNDS`, and `MODEL` always render, and
+  metadata columns are measured at their real content width rather than
+  squeezed or dropped to make the row fit. `status -w` shows a bounded
+  window of that grid — the PR column stays pinned on the left and the rest
+  clips off the right edge (reach it with plain `pr-agent status`, which
+  prints the complete table; horizontal scrolling lands separately).
 - Titles wrap over up to `PR_AGENT_TITLE_LINES` lines (`1` = truncate, `0` =
-  no cap; default `3` for plain `status`, `0` for `status -w`), and the cap is
-  never shrunk to fit the screen — only env or saved values change it. The
-  other cells render on the first line, while continuation lines span the
-  rest of the row (~3× the title width).
+  no cap; default `3` for plain `status`, `0` for `status -w`) at one logical
+  width, and the cap is never shrunk to fit the screen — only env or saved
+  values change it. The other cells render on the first line; continuation
+  lines keep the title text with blank metadata cells.
 - `PR_AGENT_TABLE_ROWS` counts PR records, not screen lines: `0` (default)
   renders every record and lets the frame clip reveal what fits; a positive
   `N` keeps the first `N` records and summarizes the rest in a `… N more`
@@ -109,9 +114,11 @@ recent activity  (full log: pr-agent logs · agent transcript: pr-agent logs N)
   block via `PR_AGENT_ACTIVITY_LINES`.
 - **recent activity** tails the deduplicated event log; the last line is a
   contextual "what now" hint with the command to run.
-- A `SESSION` column (Devin session id per PR) appears when the terminal is
-  ≥ 125 columns wide; on narrow terminals `LAST RUN`, then `ROUNDS` are
-  dropped to keep the title usable.
+- `MODEL` is the agent's model id per PR (`—` until per-session model data
+  lands). `LAST RUN` and `SESSION` are optional: they join the grid only
+  when they fully fit in the spare width after the core columns.
+- On a very small terminal (under ~30 columns or 8 rows) the dashboard
+  degrades to a compact safe state instead of a clipped grid.
 
 ## What counts as feedback
 
@@ -164,7 +171,7 @@ invocation only:
 | `PR_AGENT_MAIN_SYNC` | `0` | Each poll also auto-syncs open PRs behind the default base |
 | `PR_AGENT_TABLE_ROWS` | `0` | PR records in the status table (`0` = every record renders — interactive overflow scrolls/clips; `N` = cap the list) |
 | `PR_AGENT_ACTIVITY_LINES` | `6` | Lines in the status "recent activity" section (`0` = hide — frees rows for the table) |
-| `PR_AGENT_TITLE_W` | `0` | Title column width in the status table (`0` = auto-fit the terminal, up to 100 chars) |
+| `PR_AGENT_TITLE_W` | `0` | Title column width in the status table (`0` = auto — the largest useful width the title content and the viewport beside the PR column allow; `>0` pins a logical width (min 5), which may exceed the viewport) |
 | `PR_AGENT_TITLE_LINES` | `3` plain / `0` `-w` | Max lines a TITLE cell wraps over in the status table (`1` = truncate to one line, `0` = no cap). The interactive default is uncapped; never auto-shrunk — set it explicitly to cap titles |
 | `PR_AGENT_UPDATE_CHECK` | `1` | Check for newer releases in the background; notice appears on a later run (`0` disables the check and any pending notice) |
 | `PR_AGENT_UPDATE_CHECK_EVERY` | `86400` | Seconds between release checks |

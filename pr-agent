@@ -85,8 +85,10 @@
 #   PR_AGENT_ACTIVITY_LINES  Lines in the status "recent activity" section
 #                         (default 6, 0 = hide — frees rows for the table)
 #   PR_AGENT_TITLE_W      Title column width in the status table (default 0 =
-#                         auto-fit the terminal, up to 100 chars; LAST RUN and
-#                         ROUNDS columns drop out on narrow terminals first)
+#                         auto — largest useful width from title content and the
+#                         viewport beside the PR column; >0 pins a logical width
+#                         (min 5), which may exceed the viewport — metadata
+#                         columns scroll off-screen rather than squeeze the title)
 #   PR_AGENT_TITLE_LINES  Max lines a TITLE cell wraps over in the status table
 #                         (1 = truncate to one line, 0 = no cap; default 3 for
 #                         plain status, 0 for status -w). Never shrunk to fit
@@ -1697,7 +1699,7 @@ fmt_ago() { # seconds -> 45s / 3m12s / 1h05m
 
 STATUS_PENDING="$STATE_DIR/status_pending"
 COL_W=() COLS='' NEXT_POLL='' CELL_T='' CELL_C=''
-WRAP_LINES=() WRAP_FULL=0
+WRAP_LINES=() WRAP_FULL=0 WRAP_W=()
 SNOW=''   # snapshot epoch — status_layout freezes the relative-time helpers to it; empty = live clock
 H_PENDING='' H_FAILED='' H_GAVEUP='' H_DIED='' H_WORKING='' H_PAUSED='' H_LIMIT='' H_BOTFAIL='' H_SYNCFAIL='' H_BLOCKED=''
 
@@ -1712,15 +1714,131 @@ setup_colors() { # enable ANSI styling only when stdout is a terminal and NO_COL
 
 term_cols() { tput cols 2>/dev/null || echo 100; }
 
-trunc() { # text width -> text cut to width chars, ending in … when cut
-  local s="$1" w="$2"
-  [ "${#s}" -gt "$w" ] && s="${s:0:$((w-1))}…"
-  printf '%s' "$s"
+cell_ops() { # mode [-v k=v]… — one LC_ALL=C awk engine for display-cell ops on stdin lines.
+             # Bytes are decoded as UTF-8 → codepoints, classified wcwidth-style
+             # (combining/control 0, East-Asian wide/fullwidth + emoji 2, else 1);
+             # ANSI escapes (\033[…letter) pass through uncounted. No runtime deps
+             # beyond awk — bash ${#var} is char count, not display width.
+             # modes: len → per-line cell width · max → per-tag max width of "tag\ttext"
+             #   lines · ws → per-line space-separated per-char widths · cut → text
+             #   clipped to w cells (a straddling wide char emits as a space) ·
+             #   trunc → whole line if ≤w cells else w-1 cells + '…' · proj → frozen
+             #   [0,gutter) prefix + horizontal window [gutter+off, gutter+off+cols-
+             #   gutter), C_RESET-terminated · clip → emit lines while cumulative
+             #   soft-wrap phys ≤ rows-1, then a \x02<remaining> sentinel line
+  local mode="$1"; shift
+  LC_ALL=C awk -v mode="$mode" -v w=0 -v gutter=0 -v cols=0 -v off=0 -v rows=0 -v needle='' "$@" '
+    BEGIN { for (i = 1; i < 256; i++) B[sprintf("%c", i)] = i }
+    function wof(cp) {   # codepoint -> display cells (0 combining/control, 2 wide, else 1)
+      if (cp < 32 || cp == 127) return 0
+      # NOTE: decimal only — BSD awk does not parse 0xNNN literals
+      if ((cp >= 768   && cp <= 879)   || (cp >= 1155  && cp <= 1161)  ||
+          (cp >= 1425  && cp <= 1469)  || cp == 1471 || (cp >= 1473 && cp <= 1477) ||
+          cp == 1479 || (cp >= 1552  && cp <= 1562)  || (cp >= 1611 && cp <= 1631) ||
+          cp == 1648 || (cp >= 1750  && cp <= 1788)  || (cp >= 1759 && cp <= 1768) ||
+          (cp >= 1770  && cp <= 1773)  || (cp >= 6832  && cp <= 6911)  ||
+          (cp >= 7616  && cp <= 7679)  || (cp >= 8400  && cp <= 8432)  ||
+          cp == 8203 || cp == 8205 || (cp >= 65024 && cp <= 65039) ||
+          (cp >= 65056 && cp <= 65071) || (cp >= 917760 && cp <= 917999)) return 0
+      if ((cp >= 4352   && cp <= 4447)   || cp == 9001 || cp == 9002 ||
+          (cp >= 11904  && cp <= 12350)  || (cp >= 12353  && cp <= 13311)  ||
+          (cp >= 13312  && cp <= 19903)  || (cp >= 19968  && cp <= 40959)  ||
+          (cp >= 40960  && cp <= 42191)  || (cp >= 43360  && cp <= 43391)  ||
+          (cp >= 44032  && cp <= 55203)  || (cp >= 63744  && cp <= 64255)  ||
+          (cp >= 65040  && cp <= 65049)  || (cp >= 65072  && cp <= 65131)  ||
+          (cp >= 65280  && cp <= 65376)  || (cp >= 65504  && cp <= 65510)  ||
+          (cp >= 94176  && cp <= 94180)  || (cp >= 94208  && cp <= 101119) ||
+          (cp >= 110592 && cp <= 110930) || (cp >= 110960 && cp <= 111355) ||
+          (cp >= 127488 && cp <= 127743) || (cp >= 127744 && cp <= 129791) ||
+          (cp >= 131072 && cp <= 173791) || (cp >= 173824 && cp <= 191471) ||
+          (cp >= 194560 && cp <= 195103) || (cp >= 196608 && cp <= 201551)) return 2
+      return 1
+    }
+    function esc(s, i, j) {   # index after an ANSI sequence starting at byte i (\033[..letter)
+      j = i + 1; n = length(s)
+      if (substr(s, j, 1) == "[") { j++; while (j <= n && substr(s, j, 1) !~ /[A-Za-z]/) j++ }
+      return j + 1
+    }
+    function dec(s, i, b) {   # byte offset -> globals CP (codepoint) + NB (byte length)
+      b = B[substr(s, i, 1)]
+      if (b < 128)      { CP = b; NB = 1 }
+      else if (b < 224) { CP = (b - 192) * 64 + B[substr(s, i + 1, 1)] - 128; NB = 2 }
+      else if (b < 240) { CP = (b - 224) * 4096 + (B[substr(s, i + 1, 1)] - 128) * 64 + B[substr(s, i + 2, 1)] - 128; NB = 3 }
+      else              { CP = (b - 240) * 262144 + (B[substr(s, i + 1, 1)] - 128) * 4096 + (B[substr(s, i + 2, 1)] - 128) * 64 + B[substr(s, i + 3, 1)] - 128; NB = 4 }
+    }
+    {
+      if (mode == "max") {                       # "tag<TAB>text" -> per-tag max cell width
+        t = index($0, "\t"); tag = substr($0, 1, t - 1); txt = substr($0, t + 1)
+        total = 0; n = length(txt); i = 1
+        while (i <= n) {
+          if (B[substr(txt, i, 1)] == 27) { i = esc(txt, i); continue }
+          dec(txt, i); total += wof(CP); i += NB
+        }
+        if (!(tag in mx) || total > mx[tag]) mx[tag] = total
+        next
+      }
+      if (mode == "trunc") {                     # whole line fits -> verbatim; else cut + …
+        total = 0; n = length($0); i = 1
+        while (i <= n) {
+          if (B[substr($0, i, 1)] == 27) { i = esc($0, i); continue }
+          dec($0, i); total += wof(CP); i += NB
+        }
+        if (total <= w) { print $0; next }
+        w = w - 1                                # fall into cut at w-1, then add …
+      }
+      n = length($0); i = 1; total = 0; out = ""; wlist = ""; emitted = 0; p = 0
+      while (i <= n) {
+        b = B[substr($0, i, 1)]
+        if (b == 27) { j = esc($0, i); if (mode != "len" && mode != "clip" && mode != "ws") out = out substr($0, i, j - i); i = j; continue }
+        dec($0, i); cw = wof(CP); ch = substr($0, i, NB); i += NB
+        if (mode == "len" || mode == "clip") { total += cw; continue }
+        if (mode == "ws") { wlist = wlist (wlist == "" ? "" : " ") cw; continue }
+        if (mode == "cut" || mode == "trunc") {
+          if (cw > w - total) { if (total < w) out = out " "; break }   # straddling wide char -> pad the leftover cell only
+          out = out ch; total += cw
+          if (total >= w) break
+          continue
+        }
+        # proj: frozen prefix [0,gutter) always emits; window cells [gutter+off,…)
+        if (mode == "proj" && (p < gutter || p >= gutter + off)) {
+          if (emitted + cw <= cols) { out = out ch; emitted += cw }
+          else { if (emitted < cols) out = out " "; break }   # straddle -> pad, else stop
+        }
+        if (mode == "pos" && ch == needle) plist = plist (plist == "" ? "" : " ") p
+        p += cw
+      }
+      if (mode == "len") print total
+      else if (mode == "ws") print wlist
+      else if (mode == "pos") print plist
+      else if (mode == "cut") print out
+      else if (mode == "trunc") print out "…"
+      else if (mode == "clip") { cum += (total > 0 ? int((total + cols - 1) / cols) : 1)
+                                 if (!full && cum <= rows - 1) { print $0; kept = cum }
+                                 else full = 1 }
+      else if (mode == "proj") print out sprintf("%c", 27) "[0m"
+    }
+    END { if (mode == "max") for (t in mx) print t "\t" mx[t]
+          if (mode == "len" && NR == 0) print 0
+          if (mode == "clip" && full) printf "%c%d\n", 2, cum - kept }
+  '
 }
 
-pad() { # text width -> text truncated/right-padded to exactly width chars (unicode-aware)
+cell_len() { # text -> display cells (ANSI-transparent; wcwidth-style, not ${#var})
+  printf '%s' "$1" | cell_ops len
+}
+
+trunc() { # text width -> text cut to width cells, ending in … when cut
+  printf '%s' "$1" | cell_ops trunc -v w="$2"
+}
+
+padw() { # text colw curw -> content + spaces to colw cells (curw ≤ colw; clamps at 0)
+  local n=$(( $2 - $3 )); [ "$n" -lt 0 ] && n=0
+  printf '%s%*s' "$1" "$n" ''
+}
+
+pad() { # text width -> text truncated/right-padded to exactly width cells
   local s; s="$(trunc "$1" "$2")"
-  printf '%s%*s' "$s" "$(( $2 - ${#s} ))" ''
+  printf '%s%*s' "$s" "$(( $2 - $(cell_len "$s") ))" ''
 }
 
 rep() { # char count -> char repeated count times
@@ -1729,10 +1847,8 @@ rep() { # char count -> char repeated count times
   printf '%s' "$out"
 }
 
-vis_len() { # text -> display chars: ANSI escapes stripped; counts like pad/wrap do
-  local s
-  s="$(printf '%s' "$1" | sed -E $'s/\033\\[[0-9;]*[A-Za-z]//g')"
-  printf '%s' "${#s}"
+vis_len() { # text -> display cells (ANSI-transparent); counts like pad/wrap do
+  printf '%s' "$1" | cell_ops len
 }
 
 phys_lines() { # text width -> physical lines the text occupies on the terminal (soft wrap; min 1)
@@ -1742,35 +1858,51 @@ phys_lines() { # text width -> physical lines the text occupies on the terminal 
   printf '%s' "$(( n > 0 ? (n + w - 1) / w : 1 ))"
 }
 
-wrap() { # text width max [contw] -> WRAP_LINES: greedy word wrap — first line ≤width, continuation lines ≤contw (default width); a word wider than its line hard-splits at that line's width; over max folds the rest into a …-ended last line (max 0 = no cap). WRAP_FULL = uncapped line count. widths floor at 1 — ≤0 would loop forever
-  local s w w2 wcur max line='' word i rest; local -a out=()
+wrap() { # text width max -> WRAP_LINES: greedy word wrap at one logical width (cells);
+         # a word wider than the line hard-splits cell-wise (a straddling wide char
+         # moves to the next line); over max folds the rest into a …-ended last line
+         # (max 0 = no cap). WRAP_FULL = uncapped line count, WRAP_W = per-line cell
+         # widths. width floors at 1 — ≤0 would loop forever
+  local s w max line='' linew=0 word wordw i base ci=0 take tw rest; local -a out=() outw=() wcs=()
+  local LC_ALL=en_US.UTF-8   # ${#}/${var:i:j} must count codepoints — wcs[] is indexed by them
   s="$(printf '%s' "$1" | sed -E 's/[[:space:]]+/ /g; s/^ //; s/ $//')"
-  w="$2"; max="${3:-0}"; w2="${4:-$w}"
-  [ "$w" -gt 0 ] || w=1; [ "$w2" -gt 0 ] || w2="$w"
+  w="$2"; max="${3:-0}"; [ "$w" -gt 0 ] || w=1
+  if [ -n "$s" ]; then
+    local wlist; wlist="$(printf '%s' "$s" | cell_ops ws)"
+    wcs=( $wlist )   # digits only — word-split is the intended parse
+  fi
   while [ -n "$s" ]; do
     word="${s%% *}"
+    wordw=0; for (( i = 0; i < ${#word}; i++ )); do wordw=$(( wordw + ${wcs[ci+i]:-0} )); done
+    base=$ci; ci=$(( ci + ${#word} + 1 ))   # +1: the separator char consumed below
     if [ "$word" = "$s" ]; then s=''; else s="${s#* }"; fi
-    while :; do   # too wide for its line: commit the pending line, then split at the width of the line each chunk lands on
-      [ "${#out[@]}" -eq 0 ] && wcur="$w" || wcur="$w2"   # first-line width only while nothing's emitted yet
-      [ "${#word}" -le "$wcur" ] && break
-      if [ -n "$line" ]; then out+=( "$line" ); line=''
-      else out+=( "${word:0:$wcur}" ); word="${word:$wcur}"; fi
+    while [ "$wordw" -gt "$w" ]; do   # too wide: flush pending line, then chunk cell-wise
+      if [ -n "$line" ]; then out+=( "$line" ); outw+=( "$linew" ); line=''; linew=0; fi
+      take=0; tw=0
+      while [ $(( base + take )) -lt $(( ci - 1 )) ] && [ $(( tw + ${wcs[base+take]:-0} )) -le "$w" ]; do
+        tw=$(( tw + wcs[base+take] )); take=$(( take + 1 ))
+      done
+      [ "$take" -eq 0 ] && { take=1; tw=${wcs[base]:-1}; }   # always progress — a 2-cell
+      out+=( "${word:0:$take}" ); outw+=( "$tw" )            # char at w=1 overflows but can't loop
+      word="${word:$take}"; base=$(( base + take ))
+      wordw=0; for (( i = 0; i < ${#word}; i++ )); do wordw=$(( wordw + ${wcs[base+i]:-0} )); done
     done
-    if [ -z "$line" ]; then line="$word"
-    elif [ $(( ${#line} + 1 + ${#word} )) -le "$wcur" ]; then line+=" $word"
-    else out+=( "$line" ); line="$word"; fi
+    if [ -z "$line" ]; then line="$word"; linew=$wordw
+    elif [ $(( linew + 1 + wordw )) -le "$w" ]; then line+=" $word"; linew=$(( linew + 1 + wordw ))
+    else out+=( "$line" ); outw+=( "$linew" ); line="$word"; linew=$wordw; fi
   done
-  [ -n "$line" ] && out+=( "$line" )
-  [ "${#out[@]}" -eq 0 ] && out+=( '' )
+  [ -n "$line" ] && { out+=( "$line" ); outw+=( "$linew" ); }
+  [ "${#out[@]}" -eq 0 ] && { out+=( '' ); outw+=( 0 ); }
   WRAP_FULL=${#out[@]}
   if [ "$max" -gt 0 ] && [ "${#out[@]}" -gt "$max" ]; then
     rest="${out[$(( max - 1 ))]}"
     for (( i = max; i < ${#out[@]}; i++ )); do rest+=" ${out[$i]}"; done
-    local lw; [ "$max" -gt 1 ] && lw="$w2" || lw="$w"   # the last shown line is a continuation line when max>1
-    if [ "${#rest}" -ge "$lw" ]; then rest="$(trunc "$rest" "$lw")"; else rest+="…"; fi
+    rest="$(trunc "$rest" "$w")"; [ "$(cell_len "$rest")" -lt "$w" ] && rest+="…"
     out=( "${out[@]:0:$(( max - 1 ))}" "$rest" )
+    outw=( "${outw[@]:0:$(( max - 1 ))}" "$(cell_len "$rest")" )
   fi
   WRAP_LINES=( "${out[@]}" )
+  WRAP_W=( "${outw[@]}" )
 }
 
 title_disp() { # raw title -> display title (conventional-commit prefix stripped, ? when empty)
@@ -1793,26 +1925,31 @@ fmt_dur() { # seconds -> "2m" for whole minutes, else fmt_ago style
 hash_list() { echo "$1" | sed -E 's/([0-9]+)/#\1/g; s/^ +//; s/ +$//; s/ +/, /g'; }
 first_of() { echo $1 | cut -d' ' -f1; }
 
+# Cells are `␣content␣│` — one space reserved on both sides; a column of width w
+# occupies w+3 cells in rules/rows and the width formula is Σ COL_W + 3n + 1.
+
 draw_rule() { # left mid right -> horizontal border sized to COL_W
   local out="$1" i n=${#COL_W[@]}
   for (( i = 0; i < n; i++ )); do
-    out+="$(rep ─ $(( COL_W[i] + 1 )))"
+    out+="$(rep ─ $(( COL_W[i] + 2 )))"
     if [ "$i" -lt $(( n - 1 )) ]; then out+="$2"; else out+="$3"; fi
   done
   printf '%s%s%s\n' "$C_DIM" "$out" "$C_RESET"
 }
 
-draw_row() { # text1 style1 text2 style2 ... -> one bordered table row sized to COL_W
+draw_row() { # text1 style1 curw1 text2 style2 curw2 ... -> bordered row; curw is the
+             # text's measured cell width (caller guarantees it fits COL_W[i])
   local out="${C_DIM}│${C_RESET}" i=0
   while [ $# -gt 0 ]; do
-    out+=" $2$(pad "$1" "${COL_W[i]}")$C_RESET${C_DIM}│${C_RESET}"
-    shift 2; i=$(( i + 1 ))
+    out+=" $2$(padw "$1" "${COL_W[i]}" "$3")$C_RESET ${C_DIM}│${C_RESET}"
+    shift 3; i=$(( i + 1 ))
   done
   printf '%s\n' "$out"
 }
 
-draw_span() { # text style span -> continuation row: blank PR cell + one cell spanning TITLE..last at span chars
-  printf '%s\n' "${C_DIM}│${C_RESET} $(pad '' "${COL_W[0]}")${C_DIM}│${C_RESET} $2$(pad "$1" "$3")$C_RESET${C_DIM}│${C_RESET}"
+draw_span() { # text style span curw -> one row: blank PR cell + a single cell spanning
+              # TITLE..last at span cells (the "… N more" cap row)
+  printf '%s\n' "${C_DIM}│${C_RESET} $(padw '' "${COL_W[0]}" 0) ${C_DIM}│${C_RESET} $2$(padw "$1" "$3" "$4")$C_RESET ${C_DIM}│${C_RESET}"
 }
 
 status_prs() { # -> PR numbers shown in status, most recent activity first: watch targets ∪ agent history
@@ -2106,13 +2243,18 @@ render_hint() { # running -> one contextual "what now" line
   printf '%s\n' "$hint"
 }
 
-status_layout() { # snapshot-file cols [term-rows [watch-every [meta-out]]] -> the status frame,
-                  # rendered purely from the snapshot: no gh/Devin calls, no worktree probes,
-                  # no config/map/seen writes — repaints and resizes repeat it freely.
-                  # term-rows is reserved for viewport use (records always render; the -w
-                  # frame clip owns overflow); watch-every adds the live footer; meta-out
-                  # gets per-record line anchors (jsonl) for scroll/resize consumers.
-  local snap="$1" cols="$2" meta_out="${5:-}"
+status_layout() { # snapshot-file cols [term-rows [watch-every [meta-out [hoff]]]] ->
+                  # the status frame, rendered purely from the snapshot: no gh/Devin calls,
+                  # no worktree probes, no config/map/seen writes — repaints and resizes
+                  # repeat it freely. The table is a *logical* grid composed at its own
+                  # width: watch-every non-empty means a bounded viewport — the table is
+                  # projected into cols cells behind a frozen PR gutter starting at
+                  # horizontal offset hoff (cells), while plain status prints the full
+                  # logical table (a narrow terminal may soft-wrap it — every record and
+                  # column stays reachable there). term-rows shrinks optional chrome
+                  # (activity) before the frame clip may starve the body; meta-out gets
+                  # geometry + per-record line anchors (jsonl) for scroll/resize consumers.
+  local snap="$1" cols="$2" term_rows="${3:-}" every="${4:-}" meta_out="${5:-}" hoff="${6:-0}"
   jq -e '(.v == 1) and (.now | type == "number") and (.repo | type == "string")
          and (.watcher | type == "object") and (.cfg | type == "object")
          and (.prs | type == "array") and (.activity | type == "array")' \
@@ -2158,15 +2300,10 @@ status_layout() { # snapshot-file cols [term-rows [watch-every [meta-out]]] -> t
   local line1 line2 gherr_line='' foot_line='' act_hdr=''
   line1="${C_BOLD}${C_BLUE}pr-agent v${VERSION}${C_RESET}  ${badge}   ${C_BOLD}${repo_n}${C_RESET}${upd:+ ${C_YELLOW}· update v$upd${C_RESET}}"
   line2="${C_DIM}watching ${watch_lbl} · every $(fmt_dur "$INTERVAL") · mode ${PERM_MODE}${extras} · ${CONCURRENCY} parallel · max ${MAX_ROUNDS} rounds · reacts to ${reacts} · ${C_RESET}${poll}"
-  printf '%s\n' "$line1" "$line2"
-  if [ "$gh_err" = "true" ]; then
-    gherr_line="${C_YELLOW}⚠ couldn't reach GitHub — showing cached data (check: gh auth status)${C_RESET}"
-    printf '%s\n' "$gherr_line"
-  fi
-  echo
+  [ "$gh_err" = "true" ] && gherr_line="${C_YELLOW}⚠ couldn't reach GitHub — showing cached data (check: gh auth status)${C_RESET}"
 
-  if [ -n "${4:-}" ]; then   # -w: the live footer is part of the frame
-    foot_line="${C_DIM}live · refresh ${4}s (GitHub data every 30s) · updated $(date +%H:%M:%S) · Ctrl-C to exit${C_RESET}"
+  if [ -n "$every" ]; then   # -w: the live footer is part of the frame
+    foot_line="${C_DIM}live · refresh ${every}s (GitHub data every 30s) · updated $(date +%H:%M:%S) · Ctrl-C to exit${C_RESET}"
   fi
   if [ "$ACTIVITY_LINES" -gt 0 ]; then
     act_hdr="${C_BOLD}recent activity${C_RESET}${C_DIM}  (full log: pr-agent logs · agent transcript: pr-agent logs N)${C_RESET}"
@@ -2188,34 +2325,9 @@ status_layout() { # snapshot-file cols [term-rows [watch-every [meta-out]]] -> t
                         (.last_run // 0 | if . == 0 then "" else tostring end),
                         (.model // "")] | join("\u001f")' "$snap")
 
-  local show_session=0 show_lastrun=1 show_rounds=1 fixed title_w span_w n=6 i
-  [ "$cols" -ge 125 ] && show_session=1
-  fixed=$(( 5 + 14 + 22 + 6 + 8 ))
-  if [ "$show_session" -eq 1 ]; then fixed=$(( fixed + 16 )); n=7; fi
-  # drop low-priority columns until the title gets a usable width — TITLE_W pins the width instead
-  if [ "$TITLE_W" -le 0 ]; then
-    while [ $(( cols - fixed - 2 * n - 1 )) -lt 25 ]; do
-      if [ "$show_lastrun" -eq 1 ]; then show_lastrun=0; fixed=$(( fixed - 8 ))
-      elif [ "$show_rounds" -eq 1 ]; then show_rounds=0; fixed=$(( fixed - 6 ))
-      else break; fi
-      n=$(( n - 1 ))
-    done
-  fi
-  title_w=$(( cols - fixed - 2 * n - 1 ))
-  if [ "$TITLE_W" -gt 0 ]; then title_w="$TITLE_W"; elif [ "$title_w" -gt 100 ]; then title_w=100; fi
-  [ "$title_w" -lt 10 ] && title_w=10
-  COL_W=( 5 "$title_w" 14 22 )
-  local -a hdr row
-  hdr=( PR "$C_BOLD" TITLE "$C_BOLD" REVIEW "$C_BOLD" "AGENT STATE" "$C_BOLD" )
-  [ "$show_rounds" -eq 1 ] && { COL_W+=( 6 ); hdr+=( ROUNDS "$C_BOLD" ); }
-  [ "$show_lastrun" -eq 1 ] && { COL_W+=( 8 ); hdr+=( "LAST RUN" "$C_BOLD" ); }
-  if [ "$show_session" -eq 1 ]; then COL_W+=( 16 ); hdr+=( SESSION "$C_BOLD" ); fi
-  span_w=-2
-  for i in "${COL_W[@]:1}"; do span_w=$(( span_w + i + 2 )); done   # TITLE..last merged-cell width for title continuation lines
-
   # one pass in draw order (open first, done dimmed): caches each row's cells
   # and fills the H_* hint buckets so the hint sees every PR, visible or not
-  local -a order=() ostate=() obase=() ort=() orc=() ost=() osc=() otit=() ornd=() osid=() olrun=()
+  local -a order=() ostate=() obase=() ort=() orc=() ost=() osc=() otit=() ornd=() omdl=() olrd=() osidd=()
   local num state title review draft pending rounds fc gu rgu wtb sb sp skip agent astarted sid lrun model
   local pass base rt rc
   if [ "${#lines[@]}" -gt 0 ]; then   # bash 3.2 set -u: "${arr[@]}" on an empty array is unbound
@@ -2232,40 +2344,112 @@ status_layout() { # snapshot-file cols [term-rows [watch-every [meta-out]]] -> t
       order+=( "$num" ); ostate+=( "$state" ); obase+=( "$base" )
       ort+=( "$rt" ); orc+=( "$rc" ); ost+=( "$CELL_T" ); osc+=( "$CELL_C" )
       otit+=( "$(title_disp "$title")" )   # conventional-commit prefix dropped
-      ornd+=( "$rounds" ); osid+=( "$sid" ); olrun+=( "$lrun" )
+      ornd+=( "$rounds" ); omdl+=( "${model:-—}" )   # no model adapter yet — the
+      olrd+=( "$(fmt_rel "$lrun")" ); osidd+=( "${sid:-—}" )   # empty/unknown display value is —
     done
   done
   fi
   local hint_line; hint_line="$(render_hint "$running" || true)"
 
   local -a meta_rec=()
-  local drawn=0 title_lines="$TITLE_LINES"
-  if [ "${#lines[@]}" -eq 0 ]; then
+  local title_w=0 gutter=0 logi_w=0 projected=0 compact=0 act_n="$ACTIVITY_LINES"
+
+  if [ "$cols" -lt 30 ] || { [ -n "$term_rows" ] && [ "$term_rows" -lt 8 ]; }; then
+    # compact safe state — a full grid can't stay bounded below ~30×8; chrome is
+    # suppressed too (a wrapped hint alone would eat the budget)
+    compact=1
+    printf '%s%s\n' "$(trunc "$line1" "$cols")" "$C_RESET"
+    printf '%s\n' "${C_YELLOW}terminal too small${C_RESET}${C_DIM} — need ≥30 cols × ≥8 rows${C_RESET}"
+    printf '%s\n' "${C_DIM}${#order[@]} PR records tracked${C_RESET}"
+  elif [ "${#lines[@]}" -eq 0 ]; then
+    printf '%s\n' "$line1" "$line2"
+    [ -n "$gherr_line" ] && printf '%s\n' "$gherr_line"
+    echo
     printf '%s\n' "${C_DIM}no PRs to show — no open non-draft PRs and no agent history yet${C_RESET}"
   else
-    local shown hidden=0 hidden_open=0 cost k gherr_n=0 lnext
+    # measure every cell once (headings included) — metadata columns get their true
+    # content width so long agent states and model ids stay reachable off-screen
+    # rather than silently truncated; lower-case tags carry per-record widths
+    local meas tag wv
+    local pr_w=4 rev_w=6 st_w=11 rnd_w=6 mdl_w=5 lrun_w=8 ses_w=7 title_max=5
+    local -a cw_p=() cw_r=() cw_s=() cw_d=() cw_m=() cw_l=() cw_x=()
+    meas="$( {
+      printf 'P\tPR\nR\tREVIEW\nS\tAGENT STATE\nD\tROUNDS\nM\tMODEL\nL\tLAST RUN\nI\tSESSION\n'
+      local mi
+      for (( mi = 0; mi < ${#order[@]}; mi++ )); do   # cells count twice: once into the
+        printf 'P\t#%s\np%s\t#%s\n' "${order[$mi]}" "$mi" "${order[$mi]}"   # column max,
+        printf 'R\t%s\nr%s\t%s\n' "${ort[$mi]}" "$mi" "${ort[$mi]}"         # once per-cell
+        printf 'S\t%s\ns%s\t%s\n' "${ost[$mi]}" "$mi" "${ost[$mi]}"
+        printf 'D\t%s\nd%s\t%s\n' "${ornd[$mi]}" "$mi" "${ornd[$mi]}"
+        printf 'M\t%s\nm%s\t%s\n' "${omdl[$mi]}" "$mi" "${omdl[$mi]}"
+        printf 'L\t%s\nl%s\t%s\n' "${olrd[$mi]}" "$mi" "${olrd[$mi]}"
+        printf 'I\t%s\nx%s\t%s\n' "${osidd[$mi]}" "$mi" "${osidd[$mi]}"
+        printf 'T\t%s\n' "${otit[$mi]}"
+      done
+    } | cell_ops max )"
+    while IFS=$'\t' read -r tag wv; do
+      case "$tag" in
+        P) pr_w=$wv ;; T) title_max=$wv ;; R) rev_w=$wv ;; S) st_w=$wv ;;
+        D) rnd_w=$wv ;; M) mdl_w=$wv ;; L) lrun_w=$wv ;; I) ses_w=$wv ;;
+        p*) cw_p[${tag#?}]=$wv ;; r*) cw_r[${tag#?}]=$wv ;; s*) cw_s[${tag#?}]=$wv ;;
+        d*) cw_d[${tag#?}]=$wv ;; m*) cw_m[${tag#?}]=$wv ;; l*) cw_l[${tag#?}]=$wv ;;
+        x*) cw_x[${tag#?}]=$wv ;;
+      esac
+    done <<<"$meas"
+
+    # TITLE gets the largest useful width beside the frozen PR gutter: bounded by
+    # real content and the viewport, never squeezed to fit the metadata columns —
+    # those overflow into logical space (the projection clips them) instead
+    gutter=$(( pr_w + 4 ))                       # │␣PR␣│
+    local usable_vp=$(( cols - gutter ))
+    if [ "$TITLE_W" -gt 0 ]; then title_w=$TITLE_W; [ "$title_w" -lt 5 ] && title_w=5   # pin = logical width, floored at the TITLE heading
+    else title_w=$title_max; [ "$title_w" -gt "$usable_vp" ] && title_w=$usable_vp; [ "$title_w" -lt 1 ] && title_w=1; fi
+
+    COL_W=( "$pr_w" "$title_w" "$rev_w" "$st_w" "$rnd_w" "$mdl_w" )
+    local -a hdr_args=( PR "$C_BOLD" 2 TITLE "$C_BOLD" 5 REVIEW "$C_BOLD" 6 "AGENT STATE" "$C_BOLD" 11 ROUNDS "$C_BOLD" 6 MODEL "$C_BOLD" 5 )
+    local show_lastrun=0 show_session=0 i
+    for i in "${COL_W[@]}"; do logi_w=$(( logi_w + i + 3 )); done; logi_w=$(( logi_w + 1 ))
+    if [ $(( logi_w + lrun_w + 3 )) -le "$cols" ]; then   # optional columns only into
+      show_lastrun=1; COL_W+=( "$lrun_w" ); logi_w=$(( logi_w + lrun_w + 3 ))   # genuine slack
+      hdr_args+=( "LAST RUN" "$C_BOLD" 8 )
+    fi
+    if [ $(( logi_w + ses_w + 3 )) -le "$cols" ]; then
+      show_session=1; COL_W+=( "$ses_w" ); logi_w=$(( logi_w + ses_w + 3 ))
+      hdr_args+=( SESSION "$C_BOLD" 7 )
+    fi
+    local span_w=$(( logi_w - gutter - 3 ))   # merged TITLE..last content width (cap row)
+
+    local shown hidden=0 hidden_open=0 cost k gherr_n=0 lnext drawn=0 title_lines="$TITLE_LINES"
     shown="${#order[@]}"
     # TABLE_ROWS counts records, not screen lines: 0 = every record renders
-    # (the -w frame clip reveals what fits); a positive cap keeps the first N
+    # (the -w frame clip reveals what fits); a positive cap keeps the first N.
+    # TITLE_LINES is a user/resolved cap — never shrunk to fit the screen.
     [ "$TABLE_ROWS" -gt 0 ] && [ "$TABLE_ROWS" -lt "$shown" ] && shown="$TABLE_ROWS"
-    # TITLE_LINES is a user/resolved cap — never shrunk to fit the screen
     [ "$gh_err" = "true" ] && gherr_n=1
     lnext=$(( 2 + gherr_n + 1 + 3 + 1 ))   # first record's 1-based frame line: header(2) + gherr + blank + rules/header(3)
 
-    draw_rule ┌ ┬ ┐
-    draw_row "${hdr[@]}"
-    draw_rule ├ ┼ ┤
+    local -a tbl=() row=() crow=()
+    tbl+=( "$(draw_rule ┌ ┬ ┐)" )
+    tbl+=( "$(draw_row "${hdr_args[@]}")" )
+    tbl+=( "$(draw_rule ├ ┼ ┤)" )
     for (( i = 0; i < ${#order[@]}; i++ )); do
       num="${order[$i]}"
       if [ "$drawn" -lt "$shown" ]; then
-        wrap "${otit[$i]}" "$title_w" "$title_lines" "$span_w"; cost=${#WRAP_LINES[@]}
-        row=( "#$num" "$C_BOLD${obase[$i]}" "${WRAP_LINES[0]}" "${obase[$i]}" "${ort[$i]}" "${orc[$i]}" "${ost[$i]}" "${osc[$i]}" )
-        [ "$show_rounds" -eq 1 ] && row+=( "${ornd[$i]}" "${obase[$i]}" )
-        [ "$show_lastrun" -eq 1 ] && row+=( "$(fmt_rel "${olrun[$i]}")" "${obase[$i]}" )
-        if [ "$show_session" -eq 1 ]; then row+=( "${osid[$i]:-—}" "$C_DIM" ); fi
-        draw_row "${row[@]}"
-        for (( k = 1; k < cost; k++ )); do   # continuation lines of a wrapped title span the rest of the row
-          draw_span "${WRAP_LINES[$k]}" "${obase[$i]}" "$span_w"
+        wrap "${otit[$i]}" "$title_w" "$title_lines"; cost=${#WRAP_LINES[@]}
+        row=( "#$num" "$C_BOLD${obase[$i]}" "${cw_p[$i]}"
+              "${WRAP_LINES[0]}" "${obase[$i]}" "${WRAP_W[0]}"
+              "${ort[$i]}" "${orc[$i]}" "${cw_r[$i]}"
+              "${ost[$i]}" "${osc[$i]}" "${cw_s[$i]}"
+              "${ornd[$i]}" "${obase[$i]}" "${cw_d[$i]}"
+              "${omdl[$i]}" "${obase[$i]}" "${cw_m[$i]}" )
+        [ "$show_lastrun" -eq 1 ] && row+=( "${olrd[$i]}" "${obase[$i]}" "${cw_l[$i]}" )
+        [ "$show_session" -eq 1 ] && row+=( "${osidd[$i]}" "$C_DIM" "${cw_x[$i]}" )
+        tbl+=( "$(draw_row "${row[@]}")" )
+        for (( k = 1; k < cost; k++ )); do   # continuations: title text only, regular blank cells
+          crow=( '' '' 0 "${WRAP_LINES[$k]}" "${obase[$i]}" "${WRAP_W[$k]}" '' '' 0 '' '' 0 '' '' 0 '' '' 0 )
+          [ "$show_lastrun" -eq 1 ] && crow+=( '' '' 0 )
+          [ "$show_session" -eq 1 ] && crow+=( '' '' 0 )
+          tbl+=( "$(draw_row "${crow[@]}")" )
         done
         meta_rec+=( "{\"n\":$num,\"line\":$lnext,\"title_lines\":$cost}" ); lnext=$(( lnext + cost ))
         drawn=$(( drawn + 1 ))
@@ -2277,21 +2461,44 @@ status_layout() { # snapshot-file cols [term-rows [watch-every [meta-out]]] -> t
     if [ "$hidden" -gt 0 ]; then   # only reachable via an explicit TABLE_ROWS cap
       local more="… ${hidden} more"
       [ "$hidden_open" -gt 0 ] && more="$more ($hidden_open open)"
-      draw_span "$more — TABLE_ROWS=$TABLE_ROWS" "$C_DIM" "$span_w"
+      tbl+=( "$(draw_span "$more — TABLE_ROWS=$TABLE_ROWS" "$C_DIM" "$span_w" "$(cell_len "$more — TABLE_ROWS=$TABLE_ROWS")")" )
       meta_rec+=( "{\"more\":$hidden,\"line\":$lnext}" )
     fi
-    draw_rule └ ┴ ┘
+    tbl+=( "$(draw_rule └ ┴ ┘)" )
+
+    # optional chrome shrinks before it could starve the body: with a row budget,
+    # the activity section (header + N events + trailing blank) emits at most
+    # what truly remains
+    if [ -n "$term_rows" ] && [ "$ACTIVITY_LINES" -gt 0 ]; then
+      local fixed=$(( $(phys_lines "$line1" "$cols") + $(phys_lines "$line2" "$cols") + 1 + ${#tbl[@]} + 1 + $(phys_lines "$hint_line" "$cols") ))
+      [ -n "$gherr_line" ] && fixed=$(( fixed + $(phys_lines "$gherr_line" "$cols") ))
+      [ -n "$foot_line" ] && fixed=$(( fixed + 1 + $(phys_lines "$foot_line" "$cols") ))
+      local budget=$(( term_rows - 1 - fixed - $(phys_lines "$act_hdr" "$cols") - 1 ))
+      [ "$budget" -lt 0 ] && budget=0
+      [ "$act_n" -gt "$budget" ] && act_n=$budget
+    fi
+
+    printf '%s\n' "$line1" "$line2"
+    [ -n "$gherr_line" ] && printf '%s\n' "$gherr_line"
+    echo
+    if [ -n "$every" ]; then   # bounded viewport: project horizontally — frozen PR
+      projected=1            # gutter, window at hoff, lines never soft-wrap
+      printf '%s\n' "${tbl[@]}" | cell_ops proj -v gutter="$gutter" -v cols="$cols" -v off="$hoff"
+    else
+      printf '%s\n' "${tbl[@]}"
+    fi
   fi
   if [ -n "$meta_out" ]; then   # anchors for scroll/resize: geometry + one entry per drawn record
-    { printf '%s\n' "{\"type\":\"geometry\",\"cols\":$cols,\"title_w\":$title_w,\"span_w\":${span_w:-0},\"title_lines\":${title_lines:-0},\"table_rows\":$TABLE_ROWS,\"records\":${#order[@]}}"
+    { printf '%s\n' "{\"type\":\"geometry\",\"cols\":$cols,\"title_w\":$title_w,\"gutter\":$gutter,\"logical_w\":$logi_w,\"hoff\":$hoff,\"projected\":$projected,\"span_w\":${span_w:-0},\"title_lines\":${title_lines:-0},\"table_rows\":$TABLE_ROWS,\"records\":${#order[@]}}"
       if [ "${#meta_rec[@]}" -gt 0 ]; then printf '%s\n' "${meta_rec[@]}"; fi
     } >"$meta_out" 2>/dev/null || true
   fi
 
+  [ "$compact" -eq 1 ] && return 0
   echo
-  if [ "$ACTIVITY_LINES" -gt 0 ]; then
+  if [ "$act_n" -gt 0 ]; then
     printf '%s\n' "$act_hdr"
-    jq -r '.activity[]?' "$snap" | recent_events "$ACTIVITY_LINES" "$cols"
+    jq -r '.activity[]?' "$snap" | recent_events "$act_n" "$cols"
     echo
   fi
   printf '%s\n' "$hint_line"
@@ -2317,7 +2524,7 @@ cmd_status() {
   case "${1:-}" in
     -w|--watch)
       apply_status_defaults watch
-      local every="${2:-5}" frame rows nlines fl p keep kept_phys
+      local every="${2:-5}" frame rows clipped clip_hint
       if [ -t 1 ]; then
         tput smcup 2>/dev/null || printf '\033[?1049h' # alt screen: repaints stay out of scrollback
         tput civis 2>/dev/null
@@ -2329,16 +2536,16 @@ cmd_status() {
         COLS="$(term_cols)"
         rows="$(tput lines 2>/dev/null || true)"; rows="${rows:-24}"
         frame="$(render_status 30 "$rows" "$every")"
-        nlines=0 keep=0 kept_phys=0   # physical height — a soft-wrapped line overflows too
-        while IFS= read -r fl; do
-          p="$(phys_lines "$fl" "$COLS")"; nlines=$(( nlines + p ))
-          [ "$nlines" -le $(( rows - 1 )) ] && { keep=$(( keep + 1 )); kept_phys="$nlines"; }
-        done <<< "$frame"
-        if [ "$nlines" -gt "$rows" ]; then # frame taller than the screen: clip — printing it would scroll
-          local clip_hint="make the terminal taller"
+        # physical height counts soft wraps too — a frame taller than the screen
+        # gets bottom-clipped (printing it would scroll): one cell_ops pass emits
+        # the kept prefix + a \x02<dropped-phys> sentinel line when it clipped
+        clipped="$(printf '%s\n' "$frame" | cell_ops clip -v cols="$COLS" -v rows="$rows")"
+        if [[ "$clipped" == *$'\x02'* ]]; then
+          clip_hint="make the terminal taller"
           [ "$TABLE_ROWS" -gt 0 ] && clip_hint="lower TABLE_ROWS or make the terminal taller"
-          frame="$(printf '%s\n' "$frame" | sed -n "1,${keep}p")"$'\n'"${C_DIM}… $(( nlines - kept_phys )) more lines — ${clip_hint}${C_RESET}"
-        fi
+          frame="${clipped%%$'\x02'*}"   # kept prefix (ends in \n) — empty when nothing fit
+          frame="${frame}${C_DIM}… ${clipped##*$'\x02'} more lines — ${clip_hint}${C_RESET}"
+        else frame="$clipped"; fi
         printf '\033[H%s\033[0m\033[J' "${frame//$'\n'/$'\033[K\n'}"
         sleep "$every"
       done ;;
@@ -2388,8 +2595,8 @@ case "${1:-}" in
   _ensure)   shift; need_repo; map_init; ensure_worktree "$@" ;;   # internal — test/smoke.sh drives these
   _blocked)  shift; need_repo; still_blocked "$@" ;;               # internal — rc 0 blocked / 1 free / 2 indeterminate
   _gather)   shift; need_repo; status_gather "${1:-0}" ;;          # internal — prints the status snapshot (JSON)
-  _layout)   shift; [ -f "${1:-}" ] || die "usage: pr-agent _layout SNAPSHOT [COLS [ROWS [EVERY [META_OUT]]]]"
-             setup_colors; status_layout "$1" "${2:-$(term_cols)}" "${3:-}" "${4:-}" "${5:-}" ;;
+  _layout)   shift; [ -f "${1:-}" ] || die "usage: pr-agent _layout SNAPSHOT [COLS [ROWS [EVERY [META_OUT [HOFF]]]]]"
+             setup_colors; status_layout "$1" "${2:-$(term_cols)}" "${3:-}" "${4:-}" "${5:-}" "${6:-0}" ;;
   attach)    shift; need_repo; cmd_attach "$@" ;;
   peek)      shift; cmd_peek "$@" ;;
   mark-seen) shift; cmd_mark_seen "$@" ;;

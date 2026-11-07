@@ -30,8 +30,8 @@ Sections are delimited by `# --- name ---` banners, in file order:
 | watcher | 1189–1351 | `watch_loop` (re-cd's to `repo_dir` each cycle; re-probes `worktree_blocked` PRs via `still_blocked`), `pid_is_watcher`/`is_running`, `pr_sig`, `install_launchd` (launchd plist), `cmd_on`, `kill_agents`, `cmd_off` |
 | manual commands | 1352–1568 | `need_pr`/`need_real_pr`/`gh_err_not_pr` (every command acting on a user-supplied N — `on`/`add` targets included — resolves it through `need_real_pr`'s `gh pr view` first, `sync --apply` excepted (own resolution); `gh_err_not_pr` reads the stderr — only "Could not resolve to a PullRequest" marks a non-PR), `run`, `tell`/`_tell`, `attach`, `retry`, `peek`, `mark-seen`, `forget_pr`, `gc`, `sync`, `config`, `logs` (`version` is a dispatch one-liner) |
 | self-update | 1569–1690 | `ver_gt`, `latest_release_tag`, `cmd_update` — downloads release assets from `UPDATE_REPO`, verifies sha256, atomic-installs over the (symlink-resolved) install; `maybe_update_check`/`pending_update_version` — throttled background release check (OMZ-style), both gated on `UPDATE_CHECK` |
-| status rendering | 1691–2345 | `fmt_*`, `trunc`/`pad`/`wrap` (TITLE cells wrap to `TITLE_LINES` lines), `vis_len`/`phys_lines` (ANSI-stripped soft-wrap count), `draw_*`, `status_prs`, `status_pending_count`/`refresh_status_pending` (pending counts without `seed_seen` — an absent marker gets `last_seen_ts` applied in memory), `refresh_blocked_flags` (lazy `still_blocked` re-probe — clears a freed flag even with the watcher off), `recent_event_groups`/`recent_events`, `status_gather` — emits the versioned JSON snapshot and is the *only* side-effecting stage (cache refresh + lock-protected blocked-flag maintenance); `review_cell`/`state_cell` (pure: read the record's snapshot fields; only side effect is the `H_*` hint buckets), `render_hint`, `status_layout` — pure paint from the snapshot + optional per-record `meta-out` anchors, `render_status` (gather → temp file → layout), `cmd_status` (alt-screen watch loop + fallback clip), `usage` |
-| dispatch | 2346–end | `case "$1"` router (`usage` sits just above the banner) — inline cases: `add`/`rm`, `pause`/`resume`, `reset`, `reset-rounds`, `map`, `version`, `help`; `_loop`/`_check`/`_tell`/`_ensure`/`_blocked`/`_gather`/`_layout` are internal entries (`_gather` prints the status snapshot, `_layout` renders one — `tests/status_snapshot.sh` drives both). `maybe_update_check` runs just before dispatch; the notice is skipped for internal/machine-readable commands (`_loop` logs it) |
+| status rendering | 1693–2553 | `fmt_*`, `cell_ops` — one `LC_ALL=C` awk engine for display-cell ops (UTF-8 decode → wcwidth-style classes; ANSI escapes transparent): `len`/`max`/`ws`/`cut`/`trunc`/`proj`/`clip`/`pos` — backing `trunc`/`pad`/`vis_len`/`phys_lines`/`wrap` so `${#var}` is never used as a display width — `draw_*`, `status_prs`, `status_pending_count`/`refresh_status_pending` (pending counts without `seed_seen` — an absent marker gets `last_seen_ts` applied in memory), `refresh_blocked_flags` (lazy `still_blocked` re-probe — clears a freed flag even with the watcher off), `recent_event_groups`/`recent_events`, `status_gather` — emits the versioned JSON snapshot and is the *only* side-effecting stage (cache refresh + lock-protected blocked-flag maintenance); `review_cell`/`state_cell` (pure: read the record's snapshot fields; only side effect is the `H_*` hint buckets), `render_hint`, `status_layout` — pure paint: builds the logical grid, then prints it whole (plain) or horizontally projects it into the viewport behind a frozen PR gutter (`watch-every`/`hoff`) + optional per-record `meta-out` anchors, `render_status` (gather → temp file → layout), `cmd_status` (alt-screen watch loop + `cell_ops clip` frame clip), `usage` |
+| dispatch | 2554–end | `case "$1"` router (`usage` sits just above the banner) — inline cases: `add`/`rm`, `pause`/`resume`, `reset`, `reset-rounds`, `map`, `version`, `help`; `_loop`/`_check`/`_tell`/`_ensure`/`_blocked`/`_gather`/`_layout` are internal entries (`_gather` prints the status snapshot, `_layout` renders one — `tests/status_snapshot.sh` and `tests/status_grid.sh` drive both). `maybe_update_check` runs just before dispatch; the notice is skipped for internal/machine-readable commands (`_loop` logs it) |
 
 ## On-disk state
 
@@ -172,54 +172,69 @@ command-substitution globals:
   review/draft, raw title, pending, rounds/fail counts, skip, blocked/sync
   flags, agent marker, session id, last-run epoch, model evidence), and the
   collapsed `activity` groups.
-- **`status_layout <snap> <cols> [term-rows] [watch-every] [meta-out]`** —
+- **`status_layout <snap> <cols> [term-rows] [watch-every] [meta-out] [hoff]`** —
   pure paint: validates the snapshot is complete (`v` + required blocks —
   incomplete input is rejected), freezes the clock to `snapshot.now` so
   repeated paints are byte-identical, and touches no `gh`/Devin calls, no
   worktree probes, no config/map/seen writes — repaints and resizes repeat it
-  freely. `meta-out` optionally receives a geometry line plus per-record
-  frame-line anchors (jsonl) for later scroll/resize work.
+  freely. `meta-out` optionally receives a geometry line (cols, title_w,
+  gutter, logical_w, hoff, projected, spans/caps) plus per-record frame-line
+  anchors (jsonl) for scroll/resize consumers.
 
-Layout composes the same frame as before: header (watcher state, targets,
-settings, poll countdown) → PR table. `status_prs` = watch targets ∪ PRs with
-map history, **most recent activity first** (max of `updated`,
-`last_seen_ts`, `last_run_at`), then **open first, merged/closed dimmed** via
-the two render passes over the snapshot records. One pre-pass walks the
-records in that draw order: `review_cell`/`state_cell` render the REVIEW and
-AGENT STATE cells once each (cached in the `o*` arrays for the draw loop) and
-fill the `H_*` buckets that pick the one-line `render_hint` — the hint text
-is therefore known before the table is drawn, and covers records beyond any
-`TABLE_ROWS` cap. Then a blank line, `recent activity` (last `ACTIVITY_LINES`
-deduped `watch.log` events — the whole section is hidden when
-`ACTIVITY_LINES=0`), the hint, and in `-w` mode the `live · refresh` footer.
+Layout composes the frame: header (watcher state, targets, settings, poll
+countdown) → PR table → activity → hint (→ `-w` footer). `status_prs` = watch
+targets ∪ PRs with map history, **most recent activity first** (max of
+`updated`, `last_seen_ts`, `last_run_at`), then **open first, merged/closed
+dimmed** via the two render passes over the snapshot records. One pre-pass
+walks the records in that draw order: `review_cell`/`state_cell` render the
+REVIEW and AGENT STATE cells once each (cached in the `o*` arrays for the
+draw loop) and fill the `H_*` buckets that pick the one-line `render_hint` —
+the hint text is therefore known before the table is drawn, and covers
+records beyond any `TABLE_ROWS` cap.
 
-Cells pad to `width+2` (`␣content│`). The TITLE column auto-fits the space the
-fixed columns leave (`cols − fixed − 2n − 1`, ≤100); when that would fall
-below 25, `LAST RUN` then `ROUNDS` are dropped to claw width back (`TITLE_W`
-pins the width and skips this — the saved value is a logical width, never
-rewritten to the screen). Each TITLE cell wraps over up to `TITLE_LINES`
-physical lines (`1` = truncate, `0` = no cap) via `wrap` — word-boundary
-greedy, longer words hard-split, over-cap remainder folded into a `…`-ended
-last line — while the other cells render on the row's first line. The first
-wrapped line is capped at `title_w`; continuation lines wrap at a
-*merged-cell* width (`draw_span` draws one cell over TITLE..last column) so
-a title typically completes in 2 lines. `TITLE_LINES` resolves env → saved →
-mode default: `apply_status_defaults` gives interactive (`-w`) `0` and plain
-`status` `3` when neither env nor a saved value exists (provenance
-`mode-default`), and the cap is **never** shrunk to fit the screen — a saved
-legacy `CFG_TITLE_LINES=3` stays authoritative in both modes.
+The table is a **logical grid** built at its own width, then emitted whole
+(plain `status` — the complete grid prints; a narrow terminal may soft-wrap
+that noninteractive output so nothing is unreachable) or **projected** into
+the bounded `-w` viewport. Cells reserve one space on both sides
+(`␣content␣│`); core columns are `PR | TITLE | REVIEW | AGENT STATE | ROUNDS |
+MODEL` (`MODEL` shows `—` until session-model data lands), every metadata
+column measured at its real heading/content width via `cell_ops max` — long
+agent states and model ids scroll off-screen rather than being truncated.
+`TITLE` gets the largest useful width beside the frozen PR gutter:
+`min(widest title cell, cols − gutter)` — content- and viewport-bounded, no
+fixed minimum and no old 100-char ceiling; a positive `TITLE_W` pins the
+logical width, even when oversized (floored at the heading's 5 cells).
+`LAST RUN` and `SESSION` are optional and join only when they fully fit
+the width left after the core columns. Each TITLE cell wraps over up to
+`TITLE_LINES` lines (`1` = truncate, `0` = no cap) at that one logical
+width via `wrap` — word-boundary
+greedy in display cells (CJK 2, combining/ANSI 0), over-wide words hard-split,
+over-cap remainder folded into a `…`-ended last line — while the other cells
+render on the row's first line and continuation lines keep blank metadata
+cells (the `… N more` cap row stays one line via `draw_span`'s merged
+TITLE..last cell). `TITLE_LINES` resolves env → saved → mode default:
+`apply_status_defaults` gives interactive (`-w`) `0` and plain `status` `3`
+when neither env nor a saved value exists (provenance `mode-default`), and
+the cap is **never** shrunk to fit the screen — a saved legacy
+`CFG_TITLE_LINES=3` stays authoritative in both modes.
 
 `TABLE_ROWS` counts **records**, not screen lines: `0` (default) renders every
 record in draw order and `N` keeps the first `N`, collapsing the rest into the
 `… N more — TABLE_ROWS=N` row (`N` counts PRs; records are never dropped for
-terminal height). In `-w` mode `cmd_status` repaints on the alt screen: it
-passes `tput lines` to `render_status` (reserved for viewport use) and clips
-the composed frame itself — `phys_lines` measures each logical frame line
-(ANSI-stripped, soft-wrap counted at `cols`), keeps the prefix that fits
-`rows − 1`, and appends `… N more lines` (the clip line names `TABLE_ROWS`
-when a cap is set). A wrapped title, a soft-wrapped header, or a pinned-wide
-`TITLE_W` table all overflow into the clip rather than scrolling — a real
-scroll viewport is future work; until then the clip message is the hint.
+terminal height). In `-w` mode the table lines pass through `cell_ops proj`:
+the `[0,gutter)` PR prefix stays frozen and the window emits `cols − gutter`
+logical cells starting at `gutter + hoff` — i.e. `[gutter+hoff,
+gutter+hoff+cols−gutter)` — wrap points and record heights never change under
+horizontal movement, lines never soft-wrap, and each line is `C_RESET`-
+terminated so clipped styles can't bleed. `term-rows` shrinks optional chrome
+first — the activity section emits at most the count that leaves the body
+intact (header + hint + footer are the last to go) — and `cmd_status` then
+clips the composed frame: `cell_ops clip` counts physical height (ANSI-stripped,
+soft-wrap at `cols`), keeps the prefix that fits `rows − 1`, and returns a
+sentinel so `cmd_status` can append `… N more lines` (naming `TABLE_ROWS`
+when a cap is set). Very small terminals (`cols < 30` or `rows < 8`) get a
+compact safe state instead of a clipped grid. Keyboard scrolling is future
+work — `hoff` is the seam it plugs into.
 
 ### Concurrency & locking
 
