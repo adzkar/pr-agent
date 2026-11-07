@@ -253,11 +253,12 @@ CFG_TITLE_LINES=9
 CFG_SRC_TITLE_LINES=default')"
 eq "foreign marker inert, display marker demotes" \
    "$("$T/mark.sh" "$d" | paste -sd'|' -)" 'INTERVAL=45(saved)|TITLE_LINES=3(default)'
-O="$("$T/save.sh" "$d" 'INTERVAL=45 SRC_INTERVAL=saved TITLE_LINES=3 SRC_TITLE_LINES=default')"
+O="$("$T/save.sh" "$d")"
 has "foreign marker cleaned"  "$([ "$O" != "${O/CFG_SRC_INTERVAL/}" ] && echo kept || echo gone)" gone
 has "digit marker cleaned"    "$([ "$O" != "${O/CFG_SRC_FOO2/}" ] && echo kept || echo gone)" gone
 has "interval value resaved"  "$O" 'CFG_INTERVAL=45'
-has "display marker reissued" "$O" 'CFG_SRC_TITLE_LINES=default'
+has "display marker dropped"  "$([ "$O" != "${O/CFG_SRC_TITLE_LINES/}" ] && echo kept || echo gone)" gone
+lacks "demoted value unpinned" "$O" 'CFG_TITLE_LINES='
 eq "post-resave state pins both" \
    "$("$T/mark.sh" "$d" | paste -sd'|' -)" 'INTERVAL=45(saved)|TITLE_LINES=3(default)'
 
@@ -265,7 +266,7 @@ echo "-- only the tool's own config header is stripped --"
 d="$(cfg hdr '# pr-agent config notes
 # pr-agent config v9
 # pr-agent config')"
-O="$("$T/save.sh" "$d" '')"
+O="$("$T/save.sh" "$d")"
 has "foreign header comment kept" "$O" '# pr-agent config notes'
 eq  "versioned headers managed" \
     "$(printf '%s\n' "$O" | { grep -c '^# pr-agent config v[0-9]' || true; })" 1
