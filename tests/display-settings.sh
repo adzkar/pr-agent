@@ -20,6 +20,7 @@ cat >"$T/run.sh" <<EOF
 set -euo pipefail
 STATE_DIR="\$1"; shift
 SETTING_NOTES='' RES='' RES_SRC=''
+DISPLAY_SETTINGS='TABLE_ROWS ACTIVITY_LINES TITLE_W TITLE_LINES'
 . "$T/funcs.sh"
 load_settings
 for k in "\$@"; do printf '%s=%s(%s)\n' "\$k" "\${!k:-∅}" "\$(setting_src "\$k")"; done
@@ -32,6 +33,7 @@ cat >"$T/mode.sh" <<EOF
 set -euo pipefail
 STATE_DIR="\$1"
 SETTING_NOTES='' RES='' RES_SRC=''
+DISPLAY_SETTINGS='TABLE_ROWS ACTIVITY_LINES TITLE_W TITLE_LINES'
 . "$T/funcs.sh"
 load_settings
 apply_status_defaults "\$2"
@@ -45,6 +47,7 @@ set -euo pipefail
 STATE_DIR="\$1"
 SETTING_NOTES='' RES='' RES_SRC=''
 SETTINGS='TABLE_ROWS ACTIVITY_LINES TITLE_W TITLE_LINES'
+DISPLAY_SETTINGS='TABLE_ROWS ACTIVITY_LINES TITLE_W TITLE_LINES'
 repo() { echo owner/repo; }
 . "$T/funcs.sh"
 load_settings
@@ -58,10 +61,11 @@ cat >"$T/save.sh" <<EOF
 set -euo pipefail
 STATE_DIR="\$1"
 SETTING_NOTES='' RES='' RES_SRC=''
-SETTINGS='TABLE_ROWS ACTIVITY_LINES TITLE_W TITLE_LINES'
+SETTINGS='INTERVAL TABLE_ROWS TITLE_LINES'
+DISPLAY_SETTINGS='TABLE_ROWS ACTIVITY_LINES TITLE_W TITLE_LINES'
 . "$T/funcs.sh"
 load_settings
-[ -n "\${2:-}" ] && apply_status_defaults "\$2"
+if [ -n "\${2:-}" ]; then apply_status_defaults "\$2"; fi
 save_config
 cat "\$STATE_DIR/config"
 EOF
@@ -172,16 +176,67 @@ has "fallback value shown"    "$O" 'titles uncapped'
 
 echo "== save: only env/saved provenance is pinned =="
 d="$(cfg savefresh '')"; rm "$d/config"
-eq "defaults stay unpinned"    "$("$T/save.sh" "$d" | paste -sd'|' -)" ''
-eq "mode-default unpinned"     "$("$T/save.sh" "$d" watch | paste -sd'|' -)" ''
-eq "env pinned"                "$(PR_AGENT_TITLE_LINES=7 "$T/save.sh" "$d" | paste -sd'|' -)" 'CFG_TITLE_LINES=7'
+O="$("$T/save.sh" "$d")"
+has "v2 header"                "$O" '# pr-agent config v2'
+eq  "defaults stay unpinned"   "$(printf '%s\n' "$O" | grep -c '^CFG_' || true)" '0'
+eq  "mode-default unpinned"    "$("$T/save.sh" "$d" watch | grep -c '^CFG_' || true)" '0'
+eq  "env pinned"               "$(PR_AGENT_TITLE_LINES=7 "$T/save.sh" "$d" | grep '^CFG_')" 'CFG_TITLE_LINES=7'
 d="$(cfg savelc '')"; rm "$d/config"
 "$T/save.sh" "$d" >/dev/null   # a fresh `on` writes no display keys…
 eq "watch cap after fresh on"  "$("$T/mode.sh" "$d" watch)" 'TITLE_LINES=0(mode-default)'   # …so -w still gets its mode default
 d="$(cfg savesaved 'CFG_TITLE_LINES=3')"
-eq "saved kept"                "$("$T/save.sh" "$d" | paste -sd'|' -)" 'CFG_TITLE_LINES=3'
+eq "saved kept"                "$("$T/save.sh" "$d" | grep '^CFG_')" 'CFG_TITLE_LINES=3'
 d="$(cfg savemix 'CFG_TABLE_ROWS=10')"
-eq "only saved key written"    "$("$T/save.sh" "$d" | paste -sd'|' -)" 'CFG_TABLE_ROWS=10'
+eq "only saved key written"    "$("$T/save.sh" "$d" | grep '^CFG_')" 'CFG_TABLE_ROWS=10'
+
+echo "== save_config v2 =="
+echo "-- CFG_SRC markers demote on read, drop on resave --"
+d="$(cfg marked 'CFG_TITLE_LINES=3
+CFG_SRC_TITLE_LINES=default')"
+eq "marker demotes to mode default (watch)" \
+   "$("$T/mode.sh" "$d" watch)" 'TITLE_LINES=0(mode-default)'
+eq "marker demotes to mode default (plain)" \
+   "$("$T/mode.sh" "$d" plain)" 'TITLE_LINES=3(mode-default)'
+O="$("$T/save.sh" "$d")"
+lacks "stale marker dropped"    "$O" 'CFG_SRC_TITLE_LINES'
+lacks "demoted value unpinned"  "$O" 'CFG_TITLE_LINES='
+
+echo "-- env/saved-sourced display keys stay authoritative --"
+d="$(cfg saveexp 'CFG_TITLE_LINES=1
+CFG_TABLE_ROWS=10')"
+O="$("$T/save.sh" "$d")"
+has "saved value written"      "$O" 'CFG_TITLE_LINES=1'
+has "rows value written"       "$O" 'CFG_TABLE_ROWS=10'
+eq "explicit cap survives reload (watch)" \
+   "$("$T/mode.sh" "$d" watch)" 'TITLE_LINES=1(saved)'
+eq "explicit rows survive reload" \
+   "$("$T/run.sh" "$d" TABLE_ROWS | grep '^TABLE_ROWS=')" 'TABLE_ROWS=10(saved)'
+
+echo "-- legacy v1 file (no markers): saved cap stays authoritative --"
+d="$(cfg v1 'CFG_TITLE_LINES=3')"
+eq "legacy 3 wins (watch)" "$("$T/mode.sh" "$d" watch)" 'TITLE_LINES=3(saved)'
+O="$("$T/save.sh" "$d")"
+has "resave upgrades to v2"    "$O" '# pr-agent config v2'
+lacks "no marker for saved key" "$O" 'CFG_SRC_TITLE_LINES'
+eq "cap survives v1→v2 resave" "$("$T/mode.sh" "$d" watch)" 'TITLE_LINES=3(saved)'
+
+echo "-- foreign lines survive a resave --"
+d="$(cfg foreign '# hand-added note
+CFG_FUTURE=sparkles
+CFG_SRC_TITLE_LINES=default
+CFG_TITLE_LINES=9')"
+O="$("$T/save.sh" "$d")"
+has "comment kept"           "$O" '# hand-added note'
+has "unknown key kept"       "$O" 'CFG_FUTURE=sparkles'
+lacks "stale marker dropped" "$O" 'CFG_SRC_TITLE_LINES'
+lacks "demoted value gone"   "$O" 'CFG_TITLE_LINES='
+
+echo "-- resave is idempotent --"
+d="$(cfg idem '')"; rm "$d/config"
+"$T/save.sh" "$d" >/dev/null
+first="$(shasum "$d/config" | cut -d' ' -f1)"
+"$T/save.sh" "$d" >/dev/null
+eq "same file twice" "$(shasum "$d/config" | cut -d' ' -f1)" "$first"
 
 echo
 echo "$pass passed, $fail failed"
