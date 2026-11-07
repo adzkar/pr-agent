@@ -97,17 +97,16 @@ recent activity  (full log: pr-agent logs · agent transcript: pr-agent logs N)
   failed/retrying, worktree blocked (the PR branch is checked out in the main
   checkout), paused, hit the round limit, gave up, waiting for review,
   all feedback handled, or done.
-- Titles wrap over up to `PR_AGENT_TITLE_LINES` lines (default `3`; `1` =
-  truncate, `0` = no cap); the other cells render on the first line, while
-  continuation lines span the rest of the row (~3× the title width). In `-w`
-  mode the cap shrinks automatically when wrapped titles would push PRs
-  off-screen — visible rows beat title lines.
-- When the table is taller than the terminal, rows are dropped from the bottom
-  (merged/closed history first) and collapsed into a `… N more` row, so the
-  recent-activity and hint sections always stay visible. `PR_AGENT_TABLE_ROWS`
-  sets an exact row count that can exceed the terminal — the bottom sections
-  then get clipped (`… N more lines`) instead. To fit more rows *without*
-  clipping, shrink or hide the activity block via `PR_AGENT_ACTIVITY_LINES`.
+- Titles wrap over up to `PR_AGENT_TITLE_LINES` lines (`1` = truncate, `0` =
+  no cap; default `3` for plain `status`, `0` for `status -w`), and the cap is
+  never shrunk to fit the screen — only env or saved values change it. The
+  other cells render on the first line, while continuation lines span the
+  rest of the row (~3× the title width).
+- `PR_AGENT_TABLE_ROWS` counts PR records, not screen lines: `0` (default)
+  renders every record and lets the frame clip reveal what fits; a positive
+  `N` keeps the first `N` records and summarizes the rest in a `… N more`
+  row. To see more of an overflowing frame, shrink or hide the activity
+  block via `PR_AGENT_ACTIVITY_LINES`.
 - **recent activity** tails the deduplicated event log; the last line is a
   contextual "what now" hint with the command to run.
 - A `SESSION` column (Devin session id per PR) appears when the terminal is
@@ -156,10 +155,10 @@ Env vars always win over the per-repo config saved by `pr-agent on`
 | `PR_AGENT_BOT_STATUS_RE` | `\b(underway\|already running\|queued)\b` | jq regex (case-insensitive, unanchored); top-level comments from `[bot]`/`BOTS` authors that are just status narration, not findings — reviews/line comments always pass, and "in progress" is deliberately absent (too common in findings prose) |
 | `PR_AGENT_SETUP` | — | Command run inside a new worktree instead of the built-in env-file + `node_modules`/bun setup |
 | `PR_AGENT_MAIN_SYNC` | `0` | Each poll also auto-syncs open PRs behind the default base |
-| `PR_AGENT_TABLE_ROWS` | `0` | Rows in the status table (`0` = fit the screen; can exceed it — the bottom of the frame gets clipped) |
+| `PR_AGENT_TABLE_ROWS` | `0` | PR records in the status table (`0` = every record renders — interactive overflow scrolls/clips; `N` = cap the list) |
 | `PR_AGENT_ACTIVITY_LINES` | `6` | Lines in the status "recent activity" section (`0` = hide — frees rows for the table) |
 | `PR_AGENT_TITLE_W` | `0` | Title column width in the status table (`0` = auto-fit the terminal, up to 100 chars) |
-| `PR_AGENT_TITLE_LINES` | `3` | Max lines a TITLE cell wraps over in the status table (`1` = truncate to one line, `0` = no cap). `status -w` shrinks it when needed to keep PRs on screen |
+| `PR_AGENT_TITLE_LINES` | `3` plain / `0` `-w` | Max lines a TITLE cell wraps over in the status table (`1` = truncate to one line, `0` = no cap). The interactive default is uncapped; never auto-shrunk — set it explicitly to cap titles |
 | `PR_AGENT_UPDATE_CHECK` | `1` | Check for newer releases in the background; notice appears on a later run (`0` disables the check and any pending notice) |
 | `PR_AGENT_UPDATE_CHECK_EVERY` | `86400` | Seconds between release checks |
 | `PR_AGENT_REPO` | — | `owner/name` to act on when not inside the repo |
