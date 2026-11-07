@@ -59,6 +59,7 @@ ok()  { pass=$((pass+1)); echo "ok   $1"; }
 bad() { fail=$((fail+1)); echo "FAIL $1 — $2"; }
 eq()  { [ "$2" = "$3" ] && ok "$1" || bad "$1" "got '$2' want '$3'"; }
 has() { case "$2" in *"$3"*) ok "$1" ;; *) bad "$1" "want '$3' in: $2" ;; esac; }
+lacks() { case "$2" in *"$3"*) bad "$1" "unwanted '$3' in: $2" ;; *) ok "$1" ;; esac; }
 cfg() { mkdir -p "$T/$1"; printf '%s\n' "$2" >"$T/$1/config"; echo "$T/$1"; }
 
 echo "== defaults: no config =="
@@ -141,10 +142,13 @@ has "saved provenance shown"  "$O" '(saved)'
 has "default provenance"      "$O" '(default)'
 has "truncation discoverable" "$O" 'titles truncate after 3 line(s)'
 has "record cap shown"        "$O" 'first 10 PR records'
+lacks "no every-record claim" "$O" 'keeps every record'
+has "clip still explained"    "$O" 'frame clip'
 d="$(cfg cfgopen '')"; rm "$d/config"
 O="$("$T/cfg.sh" "$d")"
 has "mode default explained"  "$O" 'truncate after 3 line(s) for plain status, uncapped in status -w'
 has "all records shown"       "$O" 'all PR records'
+has "every-record claim kept" "$O" 'keeps every record'
 d="$(cfg cfgnotes 'CFG_TABLE_ROWS=xyz')"
 O="$(PR_AGENT_TITLE_LINES=0 "$T/cfg.sh" "$d")"
 has "env provenance shown"    "$O" '(env)'

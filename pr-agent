@@ -1501,9 +1501,9 @@ cmd_config() {
     trunc_note="titles truncate after $TITLE_LINES line(s) for plain status, uncapped in status -w (mode default)"
   elif [ "$TITLE_LINES" -gt 0 ]; then trunc_note="titles truncate after $TITLE_LINES line(s)"
   else trunc_note="titles uncapped"; fi
-  if [ "$TABLE_ROWS" -gt 0 ]; then rows_note="first $TABLE_ROWS PR records"
-  else rows_note="all PR records"; fi
-  echo "display: $trunc_note · $rows_note (status -w keeps every record; overflow falls to the frame clip)"
+  if [ "$TABLE_ROWS" -gt 0 ]; then rows_note="first $TABLE_ROWS PR records (status -w overflow falls to the frame clip)"
+  else rows_note="all PR records (status -w keeps every record; overflow falls to the frame clip)"; fi
+  echo "display: $trunc_note · $rows_note"
   [ -n "$SETTING_NOTES" ] && printf '  ignored invalid input:%s\n' "$SETTING_NOTES"
   echo "(saved by 'pr-agent on'; override with PR_AGENT_* env vars)"
 }
