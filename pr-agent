@@ -2539,10 +2539,12 @@ cmd_status() {
         # gets bottom-clipped (printing it would scroll): one cell_ops pass emits
         # the kept prefix + a \x02<dropped-phys> sentinel line when it clipped
         clipped="$(printf '%s\n' "$frame" | cell_ops clip -v cols="$COLS" -v rows="$rows")"
-        if [[ "$clipped" == *$'\n\x02'* ]]; then
+        if [[ "$clipped" == *$'\x02'* ]]; then
           clip_hint="make the terminal taller"
           [ "$TABLE_ROWS" -gt 0 ] && clip_hint="lower TABLE_ROWS or make the terminal taller"
-          frame="${clipped%$'\n'*}"$'\n'"${C_DIM}… ${clipped##*$'\x02'} more lines — ${clip_hint}${C_RESET}"
+          frame="${clipped%%$'\x02'*}"   # kept prefix — empty when nothing fit (rows=1)
+          [ -n "$frame" ] && frame="${frame%$'\n'}"$'\n'
+          frame="${frame}${C_DIM}… ${clipped##*$'\x02'} more lines — ${clip_hint}${C_RESET}"
         else frame="$clipped"; fi
         printf '\033[H%s\033[0m\033[J' "${frame//$'\n'/$'\033[K\n'}"
         sleep "$every"
