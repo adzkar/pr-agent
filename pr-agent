@@ -152,6 +152,7 @@ MAP_FILE="$STATE_DIR/map.json"
 LOG_FILE="$STATE_DIR/watch.log"
 PRS_CACHE="$STATE_DIR/prs.jsonl"
 PRS_EXTRA="$STATE_DIR/prs_extra.jsonl"
+PRS_LOCK="$STATE_DIR/prs.lock"
 mkdir -p "$STATE_DIR"/{locks,running,seen,feedback,logs}
 
 # --- settings: env > saved per-repo config > default; provenance tracked -------
@@ -304,8 +305,8 @@ detect_repo() {
 
 map_init() { [ -f "$MAP_FILE" ] || echo '{"prs":{}}' >"$MAP_FILE"; }
 
-with_map_lock() { # cmd... -> run cmd while holding the map lock (stale locks broken after ~10s)
-  local l="$STATE_DIR/map.lock" i=0 rc=0
+with_lock() { # lockdir cmd... -> run cmd while holding a mkdir lock (stale locks broken after ~10s)
+  local l="$1" i=0 rc=0; shift
   until mkdir "$l" 2>/dev/null; do
     sleep 0.1; i=$(( i + 1 ))
     if [ "$i" -gt 100 ]; then rmdir "$l" 2>/dev/null || true; i=0; fi
@@ -313,6 +314,10 @@ with_map_lock() { # cmd... -> run cmd while holding the map lock (stale locks br
   "$@" || rc=$?
   rmdir "$l" 2>/dev/null || true
   return "$rc"
+}
+
+with_map_lock() { # cmd... -> run cmd while holding the map lock
+  with_lock "$STATE_DIR/map.lock" "$@"
 }
 
 map_get() { # pr key -> value or empty
@@ -384,6 +389,14 @@ refresh_prs() { # ttl -> refresh prs.jsonl unless younger than ttl seconds; 1 on
   backfill_prs
 }
 
+prs_extra_merge() { # additions-file -> append into prs_extra.jsonl via a locked, atomic rewrite
+                    # (several dashboards/watchers may share the cache — never leave a partial file)
+  local add="$1" tmp; tmp="$(mktemp)"
+  if [ -f "$PRS_EXTRA" ]; then cat "$PRS_EXTRA" >"$tmp"; fi
+  cat "$add" >>"$tmp"
+  mv "$tmp" "$PRS_EXTRA"
+}
+
 backfill_prs() { # -> one gh pr view per tracked PR missing from both prs caches (once each ever)
   local known cand
   known="$( { jq -r '.number' "$PRS_CACHE" 2>/dev/null || true
@@ -392,10 +405,12 @@ backfill_prs() { # -> one gh pr view per tracked PR missing from both prs caches
              [ -f "$STATE_DIR/targets" ] && tr ' ' '\n' <"$STATE_DIR/targets" || true; } \
            | { grep -E '^[0-9]+$' || true; } | sort -u )"
   [ -n "$cand" ] || return 0
-  local n
+  local n tmp; tmp="$(mktemp)"
   for n in $(comm -23 <(printf '%s\n' "$cand") <(printf '%s\n' "$known")); do
-    gh pr view "$n" --repo "$(repo)" --json "$PR_JSON_FIELDS" --jq "$PR_JQ" >>"$PRS_EXTRA" 2>/dev/null || true
+    gh pr view "$n" --repo "$(repo)" --json "$PR_JSON_FIELDS" --jq "$PR_JQ" >>"$tmp" 2>/dev/null || true
   done
+  [ -s "$tmp" ] && with_lock "$PRS_LOCK" prs_extra_merge "$tmp"
+  rm -f "$tmp"
 }
 
 pr_info() { # pr [field] -> the PR's cached object (or one field of it); PRS_EXTRA covers aged-out PRs
@@ -471,8 +486,9 @@ seed_seen() { # pr all_file -> create seen/<pr> on first sight, honouring the le
   fi
 }
 
-filter_feedback() { # pr all_file -> new, actionable items (jsonl, oldest first)
-  local seen="$STATE_DIR/seen/$1"; [ -f "$seen" ] || seen=/dev/null
+filter_feedback() { # pr all_file [seen_file] -> new, actionable items (jsonl, oldest first);
+                    # default seen file: seen/<pr>
+  local seen="${3:-$STATE_DIR/seen/$1}"; [ -f "$seen" ] || seen=/dev/null
   jq -c -s --arg me "$(me)" --arg only "$AUTHOR_FILTER" --arg bots "$BOTS" --arg skip "$SKIP_RE" \
       --arg retry_re "$RETRY_RE" --arg status_re "$BOT_STATUS_RE" --arg trig "$TRIGGER" --rawfile seen "$seen" '
     ($seen | split("\n") | map(select(length > 0) | {(.): true}) | add // {}) as $S
@@ -1682,6 +1698,7 @@ fmt_ago() { # seconds -> 45s / 3m12s / 1h05m
 STATUS_PENDING="$STATE_DIR/status_pending"
 COL_W=() COLS='' NEXT_POLL='' CELL_T='' CELL_C=''
 WRAP_LINES=() WRAP_FULL=0
+SNOW=''   # snapshot epoch — status_layout freezes the relative-time helpers to it; empty = live clock
 H_PENDING='' H_FAILED='' H_GAVEUP='' H_DIED='' H_WORKING='' H_PAUSED='' H_LIMIT='' H_BOTFAIL='' H_SYNCFAIL='' H_BLOCKED=''
 
 setup_colors() { # enable ANSI styling only when stdout is a terminal and NO_COLOR is unset
@@ -1760,9 +1777,9 @@ title_disp() { # raw title -> display title (conventional-commit prefix stripped
   printf '%s' "${1:-?}" | sed -E 's/^[a-z]+(\([^)]*\))?!?: //'
 }
 
-fmt_rel() { # epoch -> "just now" / "4m ago" / "3h ago" / "2d ago" (empty -> —)
+fmt_rel() { # epoch -> "just now" / "4m ago" / "3h ago" / "2d ago" (empty -> —); relative to $SNOW when set
   [ -z "$1" ] && { echo "—"; return; }
-  local s=$(( $(date +%s) - $1 ))
+  local s=$(( ${SNOW:-$(date +%s)} - $1 ))
   if [ "$s" -lt 60 ]; then echo "just now"
   elif [ "$s" -lt 3600 ]; then echo "$((s/60))m ago"
   elif [ "$s" -lt 86400 ]; then echo "$((s/3600))h ago"
@@ -1818,12 +1835,32 @@ status_prs() { # -> PR numbers shown in status, most recent activity first: watc
     | sort_by(.t) | reverse | .[].n'
 }
 
+status_pending_count() { # pr -> unprocessed-feedback count as status reports it — never creates or
+                         # rewrites seen/<pr> (the watcher owns those): when the marker is absent
+                         # the legacy last_seen_ts cutoff is applied in memory, exactly the keys
+                         # seed_seen would have written
+  local pr="$1" all seen cutoff n=0
+  all="$(mktemp)"
+  if fetch_feedback "$pr" >"$all" 2>/dev/null; then
+    seen="$STATE_DIR/seen/$pr"
+    if [ ! -f "$seen" ]; then
+      seen="$(mktemp)"
+      cutoff="$(map_get "$pr" last_seen_ts)"
+      if [ -n "$cutoff" ]; then jq -r --arg c "$cutoff" 'select(.ts <= $c) | .key' "$all" >"$seen"; fi
+    fi
+    n="$(filter_feedback "$pr" "$all" "$seen" | wc -l | tr -d ' ')"
+    if [ "$seen" != "$STATE_DIR/seen/$pr" ]; then rm -f "$seen"; fi
+  fi
+  rm -f "$all"
+  echo "${n:-0}"
+}
+
 refresh_status_pending() { # ttl -> recount unprocessed feedback per open PR unless younger than ttl
   if [ -f "$STATUS_PENDING" ] && [ $(( $(date +%s) - $(stat -f %m "$STATUS_PENDING") )) -lt "$1" ]; then return 0; fi
   local tmp pr n; tmp="$(mktemp)"
   for pr in $(status_prs); do
     [ "$(pr_info "$pr" state)" = "CLOSED" ] || [ "$(pr_info "$pr" state)" = "MERGED" ] && continue
-    n="$(pending_feedback "$pr" 2>/dev/null | wc -l | tr -d ' ')" || n=0
+    n="$(status_pending_count "$pr")"
     echo "$pr $n" >>"$tmp"
   done
   mv "$tmp" "$STATUS_PENDING"
@@ -1846,6 +1883,102 @@ last_run_epoch() { # pr -> epoch of the last finished agent run (map, falling ba
   echo "$v"
 }
 
+# gather -> snapshot -> layout/paint:
+#   status_gather ttl — the ONLY side-effecting stage; prints a versioned JSON snapshot on
+#     stdout so results cross subshell/worker boundaries explicitly instead of relying on
+#     command-substitution globals surviving in the parent. Side effects, all enumerated:
+#       refresh_prs / backfill_prs → prs.jsonl, prs_extra.jsonl (locked merge), gh_error
+#       refresh_status_pending     → status_pending (counts via status_pending_count — no
+#                                    seen-marker writes; those belong to the watcher)
+#       refresh_blocked_flags      → lock-protected worktree_blocked map_dels
+#       map_init                   → creates map.json when absent
+#     Everything else is a read: map.json, targets, seen/, running/, locks/, watch.log,
+#     pid/cycle files. Layout and painting perform none of these.
+#   status_layout snap cols [rows [every [meta-out]]] — pure: renders the ANSI frame from
+#     the snapshot alone (no gh/Devin calls, no worktree probes, no config/map/seen writes),
+#     so repaints and resizes may repeat it freely. meta-out optionally receives per-record
+#     line anchors for later scroll/resize work.
+#   render_status — thin orchestrator: gather to a temp file, then lay it out.
+
+status_gather() { # ttl -> status snapshot (JSON v1) on stdout — see the inventory above
+  map_init
+  refresh_prs "$1" || true
+  refresh_status_pending "$1"
+  refresh_blocked_flags
+
+  local now running=0 pid='' launchd=0 cyc=0 last_cycle=0 t watch_lbl reacts extras=''
+  local gh_err=0 upd num recs act info pending marker apid started agent astarted skip lrun
+  now="$(date +%s)"
+  if is_running; then running=1; pid="$(cat "$PID_FILE" 2>/dev/null)"; fi
+  [ -f "$LAUNCHD_PLIST" ] && launchd=1
+  [ -f "$STATE_DIR/cycle_active" ] && cyc=1
+  [ -f "$STATE_DIR/last_cycle" ] && last_cycle="$(cat "$STATE_DIR/last_cycle")"
+  t="$(cat "$STATE_DIR/targets" 2>/dev/null || echo all)"
+  if [ "$t" = "all" ] || [ -z "$t" ]; then watch_lbl="$(scope_label)"; else watch_lbl="$(hash_list "$t")"; fi
+  if [ -n "$AUTHOR_FILTER" ]; then reacts="$AUTHOR_FILTER"; else reacts="humans"; [ -n "$BOTS" ] && reacts+=" + $BOTS"; fi
+  [ "$SANDBOX" = "1" ] && extras+=" · sandbox"
+  [ "$CI_TRIGGER" = "1" ] && extras+=" · CI"
+  [ "$CONFLICT_TRIGGER" = "1" ] && extras+=" · conflicts"
+  [ "$MAIN_SYNC" = "1" ] && extras+=" · main-sync"
+  [ -f "$STATE_DIR/gh_error" ] && gh_err=1
+  upd="$(pending_update_version || true)"
+
+  recs="$(mktemp)"; act="$(mktemp)"
+  for num in $(status_prs); do
+    info="$(pr_info "$num")"; [ -n "$info" ] || info='{}'
+    pending="$(awk -v n="$num" '$1 == n { print $2 }' "$STATUS_PENDING" 2>/dev/null)"
+    agent='' astarted=0
+    marker="$STATE_DIR/running/$num"
+    if [ -f "$marker" ]; then
+      read -r apid started _ <"$marker"
+      if kill -0 "$apid" 2>/dev/null; then agent=working; astarted="${started:-0}"
+      else agent=interrupted; fi
+    elif [ -d "$STATE_DIR/locks/$num" ]; then agent=reading; fi
+    skip="$(skip_reason "$num")"
+    lrun="$(last_run_epoch "$num")"
+    jq -nc --argjson n "$num" --argjson info "$info" --arg pending "${pending:-0}" \
+      --arg rounds "$(map_num "$num" rounds)" --arg fail_count "$(map_num "$num" fail_count)" \
+      --arg gave_up "$(map_get "$num" gave_up)" --arg retry_gave_up "$(map_get "$num" retry_gave_up)" \
+      --arg worktree_blocked "$(map_get "$num" worktree_blocked)" \
+      --arg sync_blocked "$(map_get "$num" sync_blocked)" --arg sync_pending "$(map_get "$num" sync_pending)" \
+      --arg skip "$skip" --arg agent "$agent" --arg agent_started "$astarted" \
+      --arg session_id "$(map_get "$num" session_id)" --arg last_run "$lrun" \
+      --arg model "$(map_get "$num" model)" \
+      '{n:$n,
+        state: (if ($info.state // "") == "" then "OPEN" else $info.state end),
+        title: ($info.title // ""), review: ($info.review // ""), draft: ($info.draft // false),
+        updated: ($info.updated // ""), pending: ($pending | tonumber? // 0),
+        rounds: ($rounds | tonumber? // 0), fail_count: ($fail_count | tonumber? // 0),
+        gave_up: $gave_up, retry_gave_up: $retry_gave_up, worktree_blocked: $worktree_blocked,
+        sync_blocked: $sync_blocked, sync_pending: $sync_pending, skip: $skip,
+        agent: $agent, agent_started: ($agent_started | tonumber? // 0),
+        session_id: $session_id, last_run: ($last_run | tonumber? // 0), model: $model}' >>"$recs"
+  done
+  recent_event_groups >"$act"
+  jq -n --argjson now "$now" --arg repo "$(repo)" --arg update "$upd" \
+    --arg running "$running" --arg pid "$pid" --arg launchd "$launchd" \
+    --arg cycle_active "$cyc" --arg last_cycle "$last_cycle" --arg gh_err "$gh_err" \
+    --arg watch "$watch_lbl" --arg interval "$INTERVAL" --arg perm_mode "$PERM_MODE" \
+    --arg extras "$extras" --arg concurrency "$CONCURRENCY" \
+    --arg max_rounds "$MAX_ROUNDS" --arg max_fails "$MAX_FAILS" --arg retry_max "$RETRY_MAX" \
+    --arg reacts "$reacts" --arg table_rows "$TABLE_ROWS" --arg activity_lines "$ACTIVITY_LINES" \
+    --arg title_w "$TITLE_W" --arg title_lines "$TITLE_LINES" \
+    --slurpfile prs "$recs" --rawfile activity "$act" \
+    '{v: 1, now: $now, repo: $repo, update: $update, gh_error: ($gh_err == "1"),
+      watcher: {running: ($running == "1"), pid: $pid, launchd: ($launchd == "1"),
+                cycle_active: ($cycle_active == "1"),
+                last_cycle: ($last_cycle | tonumber? // 0), interval: ($interval | tonumber? // 120)},
+      watch: $watch,
+      cfg: {perm_mode: $perm_mode, extras: $extras, concurrency: ($concurrency | tonumber? // 2),
+            max_rounds: ($max_rounds | tonumber? // 10), max_fails: ($max_fails | tonumber? // 3),
+            retry_max: ($retry_max | tonumber? // 3), reacts: $reacts,
+            table_rows: ($table_rows | tonumber? // 0), activity_lines: ($activity_lines | tonumber? // 6),
+            title_w: ($title_w | tonumber? // 0), title_lines: ($title_lines | tonumber? // 3)},
+      prs: $prs,
+      activity: ($activity | split("\n") | map(select(length > 0)))}'
+  rm -f "$recs" "$act"
+}
+
 review_cell() { # reviewDecision isDraft -> sets CELL_T / CELL_C
   if [ "$2" = "true" ]; then CELL_T="draft"; CELL_C="$C_DIM"; return; fi
   case "$1" in
@@ -1856,57 +1989,60 @@ review_cell() { # reviewDecision isDraft -> sets CELL_T / CELL_C
   esac
 }
 
-state_cell() { # pr gh_state pending -> sets CELL_T / CELL_C and records hint buckets
-  local pr="$1" marker="$STATE_DIR/running/$1" fc apid started reason
-  if [ -f "$marker" ]; then
-    read -r apid started _ <"$marker"
-    if kill -0 "$apid" 2>/dev/null; then
-      CELL_T="↻ agent working $(fmt_ago $(( $(date +%s) - started )))"; CELL_C="$C_YELLOW$C_BOLD"
-      H_WORKING+=" $pr"; return
-    fi
-    CELL_T="✗ run interrupted"; CELL_C="$C_RED"; H_DIED+=" $pr"; return
-  fi
-  if [ -d "$STATE_DIR/locks/$pr" ]; then CELL_T="↻ reading feedback"; CELL_C="$C_YELLOW"; return; fi
+state_cell() { # pr gh_state pending -> sets CELL_T / CELL_C and records hint buckets.
+               # Pure: reads the record's S_* inputs captured by status_gather
+               # (S_AGENT/S_STARTED, S_WTB/S_SB/S_SP, S_SKIP, S_FC, S_RETRYUP, S_GAVEUP,
+               # S_ROUNDS) — no marker probes, no map/seen/prs reads.
+  local pr="$1" fnow
+  case "${S_AGENT:-}" in
+    working)
+      fnow="${SNOW:-$(date +%s)}"
+      CELL_T="↻ agent working $(fmt_ago $(( fnow - S_STARTED )))"; CELL_C="$C_YELLOW$C_BOLD"
+      H_WORKING+=" $pr"; return ;;
+    interrupted) CELL_T="✗ run interrupted"; CELL_C="$C_RED"; H_DIED+=" $pr"; return ;;
+    reading)     CELL_T="↻ reading feedback"; CELL_C="$C_YELLOW"; return ;;
+  esac
   case "$2" in
     MERGED) CELL_T="merged — done"; CELL_C="$C_DIM"; return ;;
     CLOSED) CELL_T="closed"; CELL_C="$C_DIM"; return ;;
   esac
   # blocked beats the sync cells — no agent can run while the branch sits in the main checkout;
   # both stay above skip_reason — sync_blocked is a sticky needs-you state for PRs the watcher skips
-  if [ "$(map_get "$pr" worktree_blocked)" = "1" ]; then CELL_T="⚠ worktree blocked"; CELL_C="$C_YELLOW"; H_BLOCKED+=" $pr"; return; fi
-  if [ "$(map_get "$pr" sync_blocked)" = "1" ]; then CELL_T="✗ main-sync failed — needs you"; CELL_C="$C_RED"; H_SYNCFAIL+=" $pr"; return; fi
-  if [ "$(map_get "$pr" sync_pending)" = "1" ]; then CELL_T="● behind base — sync queued"; CELL_C="$C_CYAN$C_BOLD"; H_PENDING+=" $pr"; return; fi
-  reason="$(skip_reason "$pr")"
-  case "$reason" in
+  if [ "$S_WTB" = "1" ]; then CELL_T="⚠ worktree blocked"; CELL_C="$C_YELLOW"; H_BLOCKED+=" $pr"; return; fi
+  if [ "$S_SB" = "1" ]; then CELL_T="✗ main-sync failed — needs you"; CELL_C="$C_RED"; H_SYNCFAIL+=" $pr"; return; fi
+  if [ "$S_SP" = "1" ]; then CELL_T="● behind base — sync queued"; CELL_C="$C_CYAN$C_BOLD"; H_PENDING+=" $pr"; return; fi
+  case "$S_SKIP" in
     paused)        CELL_T="⏸ paused"; CELL_C="$C_YELLOW"; H_PAUSED+=" $pr"; return ;;
     "round limit") CELL_T="⏸ hit $MAX_ROUNDS-round limit"; CELL_C="$C_RED"; H_LIMIT+=" $pr"; return ;;
     approved)      CELL_T="✓ approved — stopped"; CELL_C="$C_GREEN"; return ;;
   esac
-  fc="$(map_num "$pr" fail_count)"
   if [ "${3:-0}" -gt 0 ]; then
-    if [ "$fc" -gt 0 ]; then
-      CELL_T="✗ failed $fc/$MAX_FAILS, retrying"; CELL_C="$C_RED"; H_FAILED+=" $pr"
+    if [ "$S_FC" -gt 0 ]; then
+      CELL_T="✗ failed $S_FC/$MAX_FAILS, retrying"; CELL_C="$C_RED"; H_FAILED+=" $pr"
     else
       CELL_T="● $3 new item$([ "$3" -gt 1 ] && echo s || true)"; CELL_C="$C_CYAN$C_BOLD"
     fi
     H_PENDING+=" $pr"; return
   fi
-  if [ "$(map_get "$pr" retry_gave_up)" = "1" ]; then CELL_T="✗ review bot failing"; CELL_C="$C_RED"; H_BOTFAIL+=" $pr"; return; fi
-  if [ "$(map_get "$pr" gave_up)" = "1" ]; then CELL_T="✗ gave up — needs you"; CELL_C="$C_RED"; H_GAVEUP+=" $pr"; return; fi
-  if [ "$(map_num "$pr" rounds)" -eq 0 ]; then CELL_T="· waiting for review"; CELL_C="$C_DIM"; return; fi
+  if [ "$S_RETRYUP" = "1" ]; then CELL_T="✗ review bot failing"; CELL_C="$C_RED"; H_BOTFAIL+=" $pr"; return; fi
+  if [ "$S_GAVEUP" = "1" ]; then CELL_T="✗ gave up — needs you"; CELL_C="$C_RED"; H_GAVEUP+=" $pr"; return; fi
+  if [ "$S_ROUNDS" -eq 0 ]; then CELL_T="· waiting for review"; CELL_C="$C_DIM"; return; fi
   CELL_T="✓ all feedback handled"; CELL_C="$C_GREEN"
 }
 
-recent_events() { # n width -> last n pr-agent events (agent chatter filtered, repeats collapsed)
-  local today re='^PR #([0-9]+): (.*)$' cnt line ts msg when tag style
-  today="$(date +%F)"
+recent_event_groups() { # -> watch.log events as collapsed "count<TAB>raw line" groups, oldest first
   { grep -E '^\[[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}\] ' "$LOG_FILE" 2>/dev/null || true; } \
     | awk '{ m = substr($0, 23) }
            m == pm { c++; pl = $0; next }
            NR > 1  { print c "\t" pl }
                    { pm = m; pl = $0; c = 1 }
-           END     { if (pl != "") print c "\t" pl }' \
-    | tail -n "$1" \
+           END     { if (pl != "") print c "\t" pl }'
+}
+
+recent_events() { # n width -> last n collapsed groups (on stdin) formatted as activity lines
+  local today re='^PR #([0-9]+): (.*)$' cnt line ts msg when tag style
+  today="$(date -r "${SNOW:-$(date +%s)}" +%F 2>/dev/null || date +%F)"
+  tail -n "$1" \
     | while IFS=$'\t' read -r cnt line; do
         ts="${line:1:19}" msg="${line:22}" tag='' style=''
         if [ "${ts:0:10}" = "$today" ]; then when="${ts:11:5}"
@@ -1970,27 +2106,45 @@ render_hint() { # running -> one contextual "what now" line
   printf '%s\n' "$hint"
 }
 
-render_status() { # ttl [term-rows [watch-every]] -> status screen; term-rows is reserved for viewport use (records always render; the -w frame clip owns overflow); watch-every adds the live footer
-  if ! need_repo 2>/dev/null; then
-    printf '%s\n' "${C_BOLD}${C_BLUE}pr-agent${C_RESET}  ${C_DIM}○ never started for this repo${C_RESET}" \
-      "cd into a repo and run ${C_BOLD}pr-agent on${C_RESET}"
-    return 0
-  fi
-  map_init
-  refresh_prs "$1" || true
-  refresh_status_pending "$1"
-  refresh_blocked_flags
-  H_PENDING='' H_FAILED='' H_GAVEUP='' H_DIED='' H_WORKING='' H_PAUSED='' H_LIMIT='' H_BOTFAIL='' H_SYNCFAIL='' H_BLOCKED='' NEXT_POLL="on the next poll"
+status_layout() { # snapshot-file cols [term-rows [watch-every [meta-out]]] -> the status frame,
+                  # rendered purely from the snapshot: no gh/Devin calls, no worktree probes,
+                  # no config/map/seen writes — repaints and resizes repeat it freely.
+                  # term-rows is reserved for viewport use (records always render; the -w
+                  # frame clip owns overflow); watch-every adds the live footer; meta-out
+                  # gets per-record line anchors (jsonl) for scroll/resize consumers.
+  local snap="$1" cols="$2" meta_out="${5:-}"
+  jq -e '(.v == 1) and (.now | type == "number") and (.repo | type == "string")
+         and (.watcher | type == "object") and (.cfg | type == "object")
+         and (.prs | type == "array") and (.activity | type == "array")' \
+    "$snap" >/dev/null 2>&1 || die "status snapshot incomplete — gather it again"
 
-  local running=0 now badge poll t next cols reacts extras=''
-  now="$(date +%s)"
-  if is_running; then running=1; fi
+  # resolved settings + clock frozen to the snapshot so repeated paints stay identical
+  local SNOW repo_n upd gh_err watch_lbl w_run w_pid w_launchd w_cyc w_last
+  local PERM_MODE INTERVAL CONCURRENCY MAX_ROUNDS MAX_FAILS RETRY_MAX \
+        TABLE_ROWS ACTIVITY_LINES TITLE_W TITLE_LINES reacts extras
+  # \x1f is a non-whitespace IFS — empty fields survive the read (tab would collapse them)
+  IFS=$'\x1f' read -r SNOW repo_n upd gh_err watch_lbl w_run w_pid w_launchd w_cyc w_last INTERVAL \
+    <<<"$(jq -r '[.now, .repo, .update, (.gh_error | tostring), .watch,
+                 (.watcher.running | tostring), .watcher.pid, (.watcher.launchd | tostring),
+                 (.watcher.cycle_active | tostring), (.watcher.last_cycle | tostring),
+                 (.watcher.interval | tostring)] | join("\u001f")' "$snap")"
+  IFS=$'\x1f' read -r PERM_MODE extras CONCURRENCY MAX_ROUNDS MAX_FAILS RETRY_MAX reacts \
+                 TABLE_ROWS ACTIVITY_LINES TITLE_W TITLE_LINES \
+    <<<"$(jq -r '[.cfg.perm_mode, .cfg.extras, (.cfg.concurrency | tostring),
+                  (.cfg.max_rounds | tostring), (.cfg.max_fails | tostring),
+                  (.cfg.retry_max | tostring), .cfg.reacts, (.cfg.table_rows | tostring),
+                  (.cfg.activity_lines | tostring), (.cfg.title_w | tostring),
+                  (.cfg.title_lines | tostring)] | join("\u001f")' "$snap")"
+
+  local running=0 badge poll next
+  [ "$w_run" = "true" ] && running=1
+  H_PENDING='' H_FAILED='' H_GAVEUP='' H_DIED='' H_WORKING='' H_PAUSED='' H_LIMIT='' H_BOTFAIL='' H_SYNCFAIL='' H_BLOCKED='' NEXT_POLL="on the next poll"
   if [ "$running" -eq 1 ]; then
-    badge="${C_GREEN}${C_BOLD}● watching${C_RESET}${C_DIM} (pid $(cat "$PID_FILE")$([ -f "$LAUNCHD_PLIST" ] && echo ", launchd" || true))${C_RESET}"
-    if [ -f "$STATE_DIR/cycle_active" ]; then
+    badge="${C_GREEN}${C_BOLD}● watching${C_RESET}${C_DIM} (pid $w_pid$([ "$w_launchd" = "true" ] && echo ", launchd" || true))${C_RESET}"
+    if [ "$w_cyc" = "true" ]; then
       poll="${C_YELLOW}polling GitHub now${C_RESET}"; NEXT_POLL="in the current poll"
-    elif [ -f "$STATE_DIR/last_cycle" ]; then
-      next=$(( $(cat "$STATE_DIR/last_cycle") + INTERVAL - now ))
+    elif [ "$w_last" -gt 0 ] 2>/dev/null; then
+      next=$(( w_last + INTERVAL - SNOW ))
       if [ "$next" -le 0 ]; then poll="next poll any second"; NEXT_POLL="any second"
       else poll="next poll in ${C_BOLD}$(fmt_ago "$next")${C_RESET}"; NEXT_POLL="on the next poll (in $(fmt_ago "$next"))"; fi
     else
@@ -1998,38 +2152,42 @@ render_status() { # ttl [term-rows [watch-every]] -> status screen; term-rows is
     fi
   else
     badge="${C_RED}${C_BOLD}○ stopped${C_RESET}"
-    if [ -f "$STATE_DIR/last_cycle" ]; then poll="last poll $(fmt_rel "$(cat "$STATE_DIR/last_cycle")")"; else poll="never polled"; fi
+    if [ "$w_last" -gt 0 ] 2>/dev/null; then poll="last poll $(fmt_rel "$w_last")"; else poll="never polled"; fi
   fi
-  t="$(cat "$STATE_DIR/targets" 2>/dev/null || echo all)"
-  if [ "$t" = "all" ] || [ -z "$t" ]; then
-    t="$(scope_label)"
-  else t="$(hash_list "$t")"; fi
-  if [ -n "$AUTHOR_FILTER" ]; then reacts="$AUTHOR_FILTER"; else reacts="humans"; [ -n "$BOTS" ] && reacts+=" + $BOTS"; fi
-  [ "$SANDBOX" = "1" ] && extras+=" · sandbox"
-  [ "$CI_TRIGGER" = "1" ] && extras+=" · CI"
-  [ "$CONFLICT_TRIGGER" = "1" ] && extras+=" · conflicts"
-  [ "$MAIN_SYNC" = "1" ] && extras+=" · main-sync"
 
-  local upd; upd="$(pending_update_version || true)"
-  cols="${COLS:-$(term_cols)}"
   local line1 line2 gherr_line='' foot_line='' act_hdr=''
-  line1="${C_BOLD}${C_BLUE}pr-agent v${VERSION}${C_RESET}  ${badge}   ${C_BOLD}$(repo)${C_RESET}${upd:+ ${C_YELLOW}· update v$upd${C_RESET}}"
-  line2="${C_DIM}watching ${t} · every $(fmt_dur "$INTERVAL") · mode ${PERM_MODE}${extras} · ${CONCURRENCY} parallel · max ${MAX_ROUNDS} rounds · reacts to ${reacts} · ${C_RESET}${poll}"
+  line1="${C_BOLD}${C_BLUE}pr-agent v${VERSION}${C_RESET}  ${badge}   ${C_BOLD}${repo_n}${C_RESET}${upd:+ ${C_YELLOW}· update v$upd${C_RESET}}"
+  line2="${C_DIM}watching ${watch_lbl} · every $(fmt_dur "$INTERVAL") · mode ${PERM_MODE}${extras} · ${CONCURRENCY} parallel · max ${MAX_ROUNDS} rounds · reacts to ${reacts} · ${C_RESET}${poll}"
   printf '%s\n' "$line1" "$line2"
-  if [ -f "$STATE_DIR/gh_error" ]; then
+  if [ "$gh_err" = "true" ]; then
     gherr_line="${C_YELLOW}⚠ couldn't reach GitHub — showing cached data (check: gh auth status)${C_RESET}"
     printf '%s\n' "$gherr_line"
   fi
   echo
 
-  if [ -n "${3:-}" ]; then   # -w: the live footer is part of the frame
-    foot_line="${C_DIM}live · refresh ${3}s (GitHub data every 30s) · updated $(date +%H:%M:%S) · Ctrl-C to exit${C_RESET}"
+  if [ -n "${4:-}" ]; then   # -w: the live footer is part of the frame
+    foot_line="${C_DIM}live · refresh ${4}s (GitHub data every 30s) · updated $(date +%H:%M:%S) · Ctrl-C to exit${C_RESET}"
   fi
   if [ "$ACTIVITY_LINES" -gt 0 ]; then
     act_hdr="${C_BOLD}recent activity${C_RESET}${C_DIM}  (full log: pr-agent logs · agent transcript: pr-agent logs N)${C_RESET}"
   fi
 
-  local prs; prs="$(status_prs)"
+  # records arrive in status_prs order (most recent activity first); the two passes
+  # below draw open first, done dimmed — each row's TSV is re-parsed per pass
+  local -a lines=()
+  local l
+  while IFS= read -r l; do lines+=( "$l" ); done \
+    < <(jq -r '.prs[] | [(.n // 0), (.state // ""), (.title // "" | gsub("[\t\u001f]"; " ")),
+                        (.review // ""), ((.draft // false) | tostring),
+                        ((.pending // 0) | tostring), ((.rounds // 0) | tostring),
+                        ((.fail_count // 0) | tostring),
+                        (.gave_up // ""), (.retry_gave_up // ""), (.worktree_blocked // ""),
+                        (.sync_blocked // ""), (.sync_pending // ""),
+                        (.skip // ""), (.agent // ""), ((.agent_started // 0) | tostring),
+                        (.session_id // ""),
+                        (.last_run // 0 | if . == 0 then "" else tostring end),
+                        (.model // "")] | join("\u001f")' "$snap")
+
   local show_session=0 show_lastrun=1 show_rounds=1 fixed title_w span_w n=6 i
   [ "$cols" -ge 125 ] && show_session=1
   fixed=$(( 5 + 14 + 22 + 6 + 8 ))
@@ -2057,37 +2215,42 @@ render_status() { # ttl [term-rows [watch-every]] -> status screen; term-rows is
 
   # one pass in draw order (open first, done dimmed): caches each row's cells
   # and fills the H_* hint buckets so the hint sees every PR, visible or not
-  local -a order=() ostate=() obase=() ort=() orc=() ost=() osc=() otit=()
-  local num title review state draft pending pass base rt rc
+  local -a order=() ostate=() obase=() ort=() orc=() ost=() osc=() otit=() ornd=() osid=() olrun=()
+  local num state title review draft pending rounds fc gu rgu wtb sb sp skip agent astarted sid lrun model
+  local pass base rt rc
+  if [ "${#lines[@]}" -gt 0 ]; then   # bash 3.2 set -u: "${arr[@]}" on an empty array is unbound
   for pass in open done; do
-    for num in $prs; do
-      state="$(pr_info "$num" state)"; [ -n "$state" ] || state=OPEN
+    for l in "${lines[@]}"; do
+      IFS=$'\x1f' read -r num state title review draft pending rounds fc gu rgu wtb sb sp \
+                      skip agent astarted sid lrun model <<<"$l"
       if [ "$pass" = open ]; then [ "$state" = OPEN ] || continue; base=''
       else [ "$state" != OPEN ] || continue; base="$C_DIM"; fi
-      pending="$(awk -v n="$num" '$1 == n { print $2 }' "$STATUS_PENDING" 2>/dev/null)"
-      review="$(pr_info "$num" review)"; draft="$(pr_info "$num" draft)"
       review_cell "$review" "$draft"; rt="$CELL_T" rc="$CELL_C"
-      state_cell "$num" "$state" "${pending:-0}"
-      title="$(title_disp "$(pr_info "$num" title)")"   # conventional-commit prefix dropped
+      S_AGENT="$agent" S_STARTED="$astarted" S_WTB="$wtb" S_SB="$sb" S_SP="$sp" \
+      S_SKIP="$skip" S_FC="$fc" S_RETRYUP="$rgu" S_GAVEUP="$gu" S_ROUNDS="$rounds"
+      state_cell "$num" "$state" "$pending"
       order+=( "$num" ); ostate+=( "$state" ); obase+=( "$base" )
       ort+=( "$rt" ); orc+=( "$rc" ); ost+=( "$CELL_T" ); osc+=( "$CELL_C" )
-      otit+=( "$title" )
+      otit+=( "$(title_disp "$title")" )   # conventional-commit prefix dropped
+      ornd+=( "$rounds" ); osid+=( "$sid" ); olrun+=( "$lrun" )
     done
   done
+  fi
   local hint_line; hint_line="$(render_hint "$running" || true)"
 
-  if [ -z "$prs" ]; then
+  local -a meta_rec=()
+  local drawn=0 title_lines="$TITLE_LINES"
+  if [ "${#lines[@]}" -eq 0 ]; then
     printf '%s\n' "${C_DIM}no PRs to show — no open non-draft PRs and no agent history yet${C_RESET}"
   else
-    local total shown hidden=0 hidden_open=0 drawn=0 cost k sid
-    local title_lines
-    total="$(printf '%s\n' "$prs" | wc -l | tr -d ' ')"
-    shown="$total"
+    local shown hidden=0 hidden_open=0 cost k gherr_n=0 lnext
+    shown="${#order[@]}"
     # TABLE_ROWS counts records, not screen lines: 0 = every record renders
     # (the -w frame clip reveals what fits); a positive cap keeps the first N
     [ "$TABLE_ROWS" -gt 0 ] && [ "$TABLE_ROWS" -lt "$shown" ] && shown="$TABLE_ROWS"
     # TITLE_LINES is a user/resolved cap — never shrunk to fit the screen
-    title_lines="$TITLE_LINES"
+    [ "$gh_err" = "true" ] && gherr_n=1
+    lnext=$(( 2 + gherr_n + 1 + 3 + 1 ))   # first record's 1-based frame line: header(2) + gherr + blank + rules/header(3)
 
     draw_rule ┌ ┬ ┐
     draw_row "${hdr[@]}"
@@ -2097,15 +2260,14 @@ render_status() { # ttl [term-rows [watch-every]] -> status screen; term-rows is
       if [ "$drawn" -lt "$shown" ]; then
         wrap "${otit[$i]}" "$title_w" "$title_lines" "$span_w"; cost=${#WRAP_LINES[@]}
         row=( "#$num" "$C_BOLD${obase[$i]}" "${WRAP_LINES[0]}" "${obase[$i]}" "${ort[$i]}" "${orc[$i]}" "${ost[$i]}" "${osc[$i]}" )
-        [ "$show_rounds" -eq 1 ] && row+=( "$(map_num "$num" rounds)" "${obase[$i]}" )
-        [ "$show_lastrun" -eq 1 ] && row+=( "$(fmt_rel "$(last_run_epoch "$num")")" "${obase[$i]}" )
-        if [ "$show_session" -eq 1 ]; then
-          sid="$(map_get "$num" session_id)"; row+=( "${sid:-—}" "$C_DIM" )
-        fi
+        [ "$show_rounds" -eq 1 ] && row+=( "${ornd[$i]}" "${obase[$i]}" )
+        [ "$show_lastrun" -eq 1 ] && row+=( "$(fmt_rel "${olrun[$i]}")" "${obase[$i]}" )
+        if [ "$show_session" -eq 1 ]; then row+=( "${osid[$i]:-—}" "$C_DIM" ); fi
         draw_row "${row[@]}"
         for (( k = 1; k < cost; k++ )); do   # continuation lines of a wrapped title span the rest of the row
           draw_span "${WRAP_LINES[$k]}" "${obase[$i]}" "$span_w"
         done
+        meta_rec+=( "{\"n\":$num,\"line\":$lnext,\"title_lines\":$cost}" ); lnext=$(( lnext + cost ))
         drawn=$(( drawn + 1 ))
         continue
       fi
@@ -2116,18 +2278,38 @@ render_status() { # ttl [term-rows [watch-every]] -> status screen; term-rows is
       local more="… ${hidden} more"
       [ "$hidden_open" -gt 0 ] && more="$more ($hidden_open open)"
       draw_span "$more — TABLE_ROWS=$TABLE_ROWS" "$C_DIM" "$span_w"
+      meta_rec+=( "{\"more\":$hidden,\"line\":$lnext}" )
     fi
     draw_rule └ ┴ ┘
+  fi
+  if [ -n "$meta_out" ]; then   # anchors for scroll/resize: geometry + one entry per drawn record
+    { printf '%s\n' "{\"type\":\"geometry\",\"cols\":$cols,\"title_w\":$title_w,\"span_w\":${span_w:-0},\"title_lines\":${title_lines:-0},\"table_rows\":$TABLE_ROWS,\"records\":${#order[@]}}"
+      if [ "${#meta_rec[@]}" -gt 0 ]; then printf '%s\n' "${meta_rec[@]}"; fi
+    } >"$meta_out" 2>/dev/null || true
   fi
 
   echo
   if [ "$ACTIVITY_LINES" -gt 0 ]; then
     printf '%s\n' "$act_hdr"
-    recent_events "$ACTIVITY_LINES" "$cols"
+    jq -r '.activity[]?' "$snap" | recent_events "$ACTIVITY_LINES" "$cols"
     echo
   fi
   printf '%s\n' "$hint_line"
   if [ -n "$foot_line" ]; then printf '\n%s' "$foot_line"; fi
+}
+
+render_status() { # ttl [term-rows [watch-every]] -> status screen: gather (side effects) → snapshot → pure layout
+  if ! need_repo 2>/dev/null; then
+    printf '%s\n' "${C_BOLD}${C_BLUE}pr-agent${C_RESET}  ${C_DIM}○ never started for this repo${C_RESET}" \
+      "cd into a repo and run ${C_BOLD}pr-agent on${C_RESET}"
+    return 0
+  fi
+  local snap rc=0
+  snap="$(mktemp)"
+  status_gather "$1" >"$snap" || rc=$?
+  if [ "$rc" -eq 0 ]; then status_layout "$snap" "${COLS:-$(term_cols)}" "${2:-}" "${3:-}" || rc=$?; fi
+  rm -f "$snap"
+  return "$rc"
 }
 
 cmd_status() {
@@ -2175,7 +2357,7 @@ case "${1:-}" in
   _loop)  if upd="$(pending_update_version)"; then
             log "pr-agent v$upd released upstream — 'pr-agent update' installs it"
           fi ;;
-  _check|_tell|map|peek|config|status|st|version|update|help|-h|--help|--version|-v) ;;
+  _check|_tell|map|peek|config|status|st|version|update|help|-h|--help|--version|-v|_gather|_layout) ;;
   *)      if [ -t 1 ] && upd="$(pending_update_version)"; then
             printf '%s\n' "${C_DIM:-}→ pr-agent v$upd available — run 'pr-agent update'${C_RESET:-}"
           fi ;;
@@ -2205,6 +2387,9 @@ case "${1:-}" in
   _check)    shift; need_repo; map_init; refresh_prs 0; check_pr "$1" "" "" "${2:-watch}" ;;
   _ensure)   shift; need_repo; map_init; ensure_worktree "$@" ;;   # internal — test/smoke.sh drives these
   _blocked)  shift; need_repo; still_blocked "$@" ;;               # internal — rc 0 blocked / 1 free / 2 indeterminate
+  _gather)   shift; need_repo; status_gather "${1:-0}" ;;          # internal — prints the status snapshot (JSON)
+  _layout)   shift; [ -f "${1:-}" ] || die "usage: pr-agent _layout SNAPSHOT [COLS [ROWS [EVERY [META_OUT]]]]"
+             setup_colors; status_layout "$1" "${2:-$(term_cols)}" "${3:-}" "${4:-}" "${5:-}" ;;
   attach)    shift; need_repo; cmd_attach "$@" ;;
   peek)      shift; cmd_peek "$@" ;;
   mark-seen) shift; cmd_mark_seen "$@" ;;
