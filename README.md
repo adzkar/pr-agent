@@ -128,8 +128,14 @@ recent activity  (full log: pr-agent logs · agent transcript: pr-agent logs N)
 
 ## Configuration
 
-Env vars always win over the per-repo config saved by `pr-agent on`
-(`pr-agent config` shows the effective values):
+Every setting resolves env → saved → default: `PR_AGENT_*` env vars win,
+then the per-repo config saved by `pr-agent on`, then the built-in default
+(`pr-agent config` shows each effective value with its source — `env`,
+`saved`, or `default` — plus any rejected invalid values). A one-off env
+never touches the file; e.g. `PR_AGENT_TITLE_LINES=0 pr-agent status` shows
+full titles for that invocation only. Values that were defaults when saved
+stay marked as defaults (`CFG_SRC_*` markers in the config file), so a saved
+default still yields to a mode default instead of becoming permanent:
 
 | Var | Default | Meaning |
 | --- | --- | --- |
