@@ -221,8 +221,9 @@ the cap is **never** shrunk to fit the screen — a saved legacy
 record in draw order and `N` keeps the first `N`, collapsing the rest into the
 `… N more — TABLE_ROWS=N` row (`N` counts PRs; records are never dropped for
 terminal height). In `-w` mode the table lines pass through `cell_ops proj`:
-the `[0,gutter)` PR prefix stays frozen and the window emits logical cells
-`[gutter+hoff, cols)` — wrap points and record heights never change under
+the `[0,gutter)` PR prefix stays frozen and the window emits `cols − gutter`
+logical cells starting at `gutter + hoff` — i.e. `[gutter+hoff,
+gutter+hoff+cols−gutter)` — wrap points and record heights never change under
 horizontal movement, lines never soft-wrap, and each line is `C_RESET`-
 terminated so clipped styles can't bleed. `term-rows` shrinks optional chrome
 first — the activity section emits at most the count that leaves the body
