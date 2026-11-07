@@ -155,21 +155,23 @@ mkdir -p "$STATE_DIR"/{locks,running,seen,feedback,logs}
 
 # --- settings: env > saved per-repo config > default; provenance tracked -------
 
-SETTING_NOTES=''   # "NAME(src)" entries for rejected invalid numeric values — reported by config, source files untouched
+SETTING_NOTES=''   # "NAME:src" entries for rejected invalid numeric values — reported by config, source files untouched
 
-resolve_str() { # NAME default -> RES + RES_SRC (env > saved > default; first non-empty wins)
-  local n="$1" def="$2" ev cv
-  eval "ev=\${PR_AGENT_$n:-}"; eval "cv=\${CFG_$n:-}"
+resolve_str() { # NAME ENVNAME default -> RES + RES_SRC (env > saved CFG_NAME > default; first non-empty wins).
+  # ENVNAME is the documented PR_AGENT_* name, passed in full: six settings' env names differ
+  # from PR_AGENT_<NAME> (PERM_MODE→PR_AGENT_MODE et al.) so the name must not be derived.
+  local n="$1" e="$2" def="$3" c="CFG_$1" ev cv
+  ev="${!e:-}"; cv="${!c:-}"
   if [ -n "$ev" ]; then RES="$ev"; RES_SRC=env
   elif [ -n "$cv" ]; then RES="$cv"; RES_SRC=saved
   else RES="$def"; RES_SRC=default; fi
 }
 
-resolve_num() { # NAME default -> RES + RES_SRC like resolve_str, but the first *valid digits* layer wins; rejected values join SETTING_NOTES
-  local n="$1" def="$2" v src
+resolve_num() { # NAME ENVNAME default -> RES + RES_SRC like resolve_str, but the first *valid digits* layer wins; rejected values join SETTING_NOTES
+  local n="$1" e="$2" def="$3" c="CFG_$1" v src
   RES=''; RES_SRC=''
   for src in env saved; do
-    if [ "$src" = env ]; then eval "v=\${PR_AGENT_$n:-}"; else eval "v=\${CFG_$n:-}"; fi
+    if [ "$src" = env ]; then v="${!e:-}"; else v="${!c:-}"; fi
     [ -z "$v" ] && continue
     if [[ "$v" =~ ^[0-9]+$ ]]; then RES="$v"; RES_SRC="$src"; break; fi
     SETTING_NOTES+=" $n:$src"
@@ -183,35 +185,35 @@ setting_src() { # NAME -> provenance label env|saved|default (default when unset
 
 load_settings() { # -> populate settings + SRC_<name> provenance; sources $STATE_DIR/config read-only
   if [ -f "$STATE_DIR/config" ]; then . "$STATE_DIR/config"; fi
-  resolve_str  INTERVAL 120;                                  INTERVAL=$RES;        SRC_INTERVAL=$RES_SRC
-  resolve_str  PERM_MODE dangerous;                           PERM_MODE=$RES;       SRC_PERM_MODE=$RES_SRC
-  resolve_str  SANDBOX 0;                                     SANDBOX=$RES;         SRC_SANDBOX=$RES_SRC
-  resolve_str  AUTHOR_FILTER '';                              AUTHOR_FILTER=$RES;   SRC_AUTHOR_FILTER=$RES_SRC
-  resolve_str  PR_AUTHOR_FILTER @me;                          PR_AUTHOR_FILTER=$RES; SRC_PR_AUTHOR_FILTER=$RES_SRC
-  resolve_str  BOTS '';                                       BOTS=$RES;            SRC_BOTS=$RES_SRC
-  resolve_str  TRIGGER /agent;                                TRIGGER=$RES;         SRC_TRIGGER=$RES_SRC
-  resolve_str  MAX_FAILS 3;                                   MAX_FAILS=$RES;       SRC_MAX_FAILS=$RES_SRC
-  resolve_str  MAX_ROUNDS 10;                                 MAX_ROUNDS=$RES;      SRC_MAX_ROUNDS=$RES_SRC
-  resolve_str  STOP_ON_APPROVE 1;                             STOP_ON_APPROVE=$RES; SRC_STOP_ON_APPROVE=$RES_SRC
-  resolve_str  CONCURRENCY 2;                                 CONCURRENCY=$RES;     SRC_CONCURRENCY=$RES_SRC
-  resolve_str  CI_TRIGGER 0;                                  CI_TRIGGER=$RES;      SRC_CI_TRIGGER=$RES_SRC
-  resolve_str  CONFLICT_TRIGGER 0;                            CONFLICT_TRIGGER=$RES; SRC_CONFLICT_TRIGGER=$RES_SRC
-  resolve_str  NOTIFY 1;                                      NOTIFY=$RES;          SRC_NOTIFY=$RES_SRC
-  resolve_str  SKIP_RE 'in-progress -->';                     SKIP_RE=$RES;         SRC_SKIP_RE=$RES_SRC
-  resolve_str  BOT_STATUS_RE '\b(underway|already running|queued)\b'; BOT_STATUS_RE=$RES; SRC_BOT_STATUS_RE=$RES_SRC
-  resolve_str  SETUP_CMD '';                                  SETUP_CMD=$RES;       SRC_SETUP_CMD=$RES_SRC
-  resolve_str  MAIN_SYNC 0;                                   MAIN_SYNC=$RES;       SRC_MAIN_SYNC=$RES_SRC
-  resolve_str  RETRY 1;                                       RETRY=$RES;           SRC_RETRY=$RES_SRC
-  resolve_str  RETRY_MAX 3;                                   RETRY_MAX=$RES;       SRC_RETRY_MAX=$RES_SRC
-  resolve_str  RETRY_RE '^Review failed:';                    RETRY_RE=$RES;        SRC_RETRY_RE=$RES_SRC
-  resolve_str  RETRY_MSG '';                                  RETRY_MSG=$RES;       SRC_RETRY_MSG=$RES_SRC
+  resolve_str  INTERVAL PR_AGENT_INTERVAL 120;              INTERVAL=$RES;        SRC_INTERVAL=$RES_SRC
+  resolve_str  PERM_MODE PR_AGENT_MODE dangerous;           PERM_MODE=$RES;       SRC_PERM_MODE=$RES_SRC
+  resolve_str  SANDBOX PR_AGENT_SANDBOX 0;                  SANDBOX=$RES;         SRC_SANDBOX=$RES_SRC
+  resolve_str  AUTHOR_FILTER PR_AGENT_AUTHOR '';            AUTHOR_FILTER=$RES;   SRC_AUTHOR_FILTER=$RES_SRC
+  resolve_str  PR_AUTHOR_FILTER PR_AGENT_PR_AUTHOR @me;     PR_AUTHOR_FILTER=$RES; SRC_PR_AUTHOR_FILTER=$RES_SRC
+  resolve_str  BOTS PR_AGENT_BOTS '';                       BOTS=$RES;            SRC_BOTS=$RES_SRC
+  resolve_str  TRIGGER PR_AGENT_TRIGGER /agent;             TRIGGER=$RES;         SRC_TRIGGER=$RES_SRC
+  resolve_str  MAX_FAILS PR_AGENT_MAX_FAILS 3;              MAX_FAILS=$RES;       SRC_MAX_FAILS=$RES_SRC
+  resolve_str  MAX_ROUNDS PR_AGENT_MAX_ROUNDS 10;           MAX_ROUNDS=$RES;      SRC_MAX_ROUNDS=$RES_SRC
+  resolve_str  STOP_ON_APPROVE PR_AGENT_STOP_ON_APPROVE 1;  STOP_ON_APPROVE=$RES; SRC_STOP_ON_APPROVE=$RES_SRC
+  resolve_str  CONCURRENCY PR_AGENT_CONCURRENCY 2;          CONCURRENCY=$RES;     SRC_CONCURRENCY=$RES_SRC
+  resolve_str  CI_TRIGGER PR_AGENT_CI 0;                    CI_TRIGGER=$RES;      SRC_CI_TRIGGER=$RES_SRC
+  resolve_str  CONFLICT_TRIGGER PR_AGENT_CONFLICTS 0;       CONFLICT_TRIGGER=$RES; SRC_CONFLICT_TRIGGER=$RES_SRC
+  resolve_str  NOTIFY PR_AGENT_NOTIFY 1;                    NOTIFY=$RES;          SRC_NOTIFY=$RES_SRC
+  resolve_str  SKIP_RE PR_AGENT_SKIP_RE 'in-progress -->';  SKIP_RE=$RES;         SRC_SKIP_RE=$RES_SRC
+  resolve_str  BOT_STATUS_RE PR_AGENT_BOT_STATUS_RE '\b(underway|already running|queued)\b'; BOT_STATUS_RE=$RES; SRC_BOT_STATUS_RE=$RES_SRC
+  resolve_str  SETUP_CMD PR_AGENT_SETUP '';                 SETUP_CMD=$RES;       SRC_SETUP_CMD=$RES_SRC
+  resolve_str  MAIN_SYNC PR_AGENT_MAIN_SYNC 0;              MAIN_SYNC=$RES;       SRC_MAIN_SYNC=$RES_SRC
+  resolve_str  RETRY PR_AGENT_RETRY 1;                      RETRY=$RES;           SRC_RETRY=$RES_SRC
+  resolve_str  RETRY_MAX PR_AGENT_RETRY_MAX 3;              RETRY_MAX=$RES;       SRC_RETRY_MAX=$RES_SRC
+  resolve_str  RETRY_RE PR_AGENT_RETRY_RE '^Review failed:'; RETRY_RE=$RES;       SRC_RETRY_RE=$RES_SRC
+  resolve_str  RETRY_MSG PR_AGENT_RETRY_MSG '';             RETRY_MSG=$RES;       SRC_RETRY_MSG=$RES_SRC
   [ -n "$RETRY_MSG" ] || RETRY_MSG='@{reviewer} the review run failed — please retry.'   # {reviewer} -> bot handle
-  resolve_num  TABLE_ROWS 0;                                  TABLE_ROWS=$RES;      SRC_TABLE_ROWS=$RES_SRC
-  resolve_num  ACTIVITY_LINES 6;                              ACTIVITY_LINES=$RES;  SRC_ACTIVITY_LINES=$RES_SRC
-  resolve_num  TITLE_W 0;                                     TITLE_W=$RES;         SRC_TITLE_W=$RES_SRC
-  resolve_num  TITLE_LINES 3;                                 TITLE_LINES=$RES;     SRC_TITLE_LINES=$RES_SRC
-  resolve_str  UPDATE_CHECK 1;                                UPDATE_CHECK=$RES;    SRC_UPDATE_CHECK=$RES_SRC
-  resolve_num  UPDATE_CHECK_EVERY 86400;                      UPDATE_CHECK_EVERY=$RES; SRC_UPDATE_CHECK_EVERY=$RES_SRC
+  resolve_num  TABLE_ROWS PR_AGENT_TABLE_ROWS 0;            TABLE_ROWS=$RES;      SRC_TABLE_ROWS=$RES_SRC
+  resolve_num  ACTIVITY_LINES PR_AGENT_ACTIVITY_LINES 6;    ACTIVITY_LINES=$RES;  SRC_ACTIVITY_LINES=$RES_SRC
+  resolve_num  TITLE_W PR_AGENT_TITLE_W 0;                  TITLE_W=$RES;         SRC_TITLE_W=$RES_SRC
+  resolve_num  TITLE_LINES PR_AGENT_TITLE_LINES 3;          TITLE_LINES=$RES;     SRC_TITLE_LINES=$RES_SRC
+  resolve_str  UPDATE_CHECK PR_AGENT_UPDATE_CHECK 1;        UPDATE_CHECK=$RES;    SRC_UPDATE_CHECK=$RES_SRC
+  resolve_num  UPDATE_CHECK_EVERY PR_AGENT_UPDATE_CHECK_EVERY 86400; UPDATE_CHECK_EVERY=$RES; SRC_UPDATE_CHECK_EVERY=$RES_SRC
 }
 
 load_settings
