@@ -106,31 +106,27 @@ the intent.
   an unreachable cwd spam getcwd errors. Don't hoist the in-loop `cd`.
 - **`state_cell`/`review_cell` have side effects** — `state_cell` populates
   the `H_*` hint buckets that drive the bottom "what now" line. A pre-pass
-  calls both once per PR (open pass, then done pass) *before* the line budget
-  is fixed — the `o*` arrays cache the cells for the draw loop — so the hint
-  is composable early and stays accurate even for rows the screen won't fit.
+  calls both once per PR (open pass, then done pass) and caches the cells in
+  the `o*` arrays for the draw loop — so the hint sees every tracked PR, not
+  just the ones the screen shows.
 - **`state_cell` precedence is deliberate** — working/interrupted →
   merged/closed → `worktree_blocked` → `sync_blocked`/`sync_pending` →
   `skip_reason` (paused/round-limit/approved) → pending items → idle. The
   sync cells must stay above `skip_reason`: `sync_blocked` is a sticky
   "needs you" state for approved/paused PRs the watcher itself skips.
-- **`render_status` line budget.** `status -w` passes terminal rows so the table
-  caps itself; fixed chrome is a *measured* count — each composed header line,
-  the hint, the activity header and the `-w` footer go through `phys_lines`
-  (ANSI-stripped, soft-wrap at `cols`) plus fixed blanks/rules, the activity
-  block (`ACTIVITY_LINES>0` adds phys(header) + N + blank) and `gh_error`'s
-  phys. If you add/remove any non-table line, route it through `phys_lines`
-  into `chrome` the same way or the frame will scroll/clip again. TITLE cells
-  wrap over up to `TITLE_LINES` physical lines
-  via `wrap` (result in `WRAP_LINES`, uncapped count in `WRAP_FULL`) — the
-  first line is `title_w` wide, continuation lines span TITLE..last column via
-  `draw_span` — so the term-fit budget counts *lines* — `rows − chrome − gherr
-  − 1`, one kept for the `… N more` row — and the cap auto-shrinks to the
-  largest value still showing the most PRs (visible rows beat title lines).
-  Column set is width-driven too: SESSION needs `cols ≥ 125`; below a usable
-  `title_w` (~25) `LAST RUN` then `ROUNDS` drop out — keep `fixed`/`n` in step
-  when adding a column. `TABLE_ROWS` still counts *rows*: its overflow falls
-  to the bottom clip, not this cap.
+- **`render_status` draws every selected record — no fit-budget.** `TABLE_ROWS`
+  counts *records* (`0` = all render; `N` = first `N`, rest collapse into the
+  `… N more — TABLE_ROWS=N` row), and `TITLE_LINES` is a resolved user cap
+  that's **never** shrunk for screen fit — env → saved → mode default via
+  `apply_status_defaults` (interactive `0`, plain `3`, only when provenance is
+  `default`; a saved legacy `3` stays authoritative in `-w`). Overflow belongs
+  to the `-w` frame clip in `cmd_status`, which counts *physical* lines
+  (`phys_lines`, ANSI-stripped soft-wrap) and keeps the prefix that fits
+  `rows − 1`. TITLE cells wrap via `wrap` (result in `WRAP_LINES`) — the
+  first line is `title_w` wide, continuation lines span TITLE..last column
+  via `draw_span`. Column set is width-driven: SESSION needs `cols ≥ 125`;
+  below a usable `title_w` (~25) `LAST RUN` then `ROUNDS` drop out — keep
+  `fixed`/`n` in step when adding a column.
 - **`running/<pr>` marker = "stopped by user".** `run_agent` treats a deleted
   marker as an intentional stop (rc 3), not a crash — remove the marker before
   killing a pid, never after.
