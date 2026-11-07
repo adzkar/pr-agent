@@ -141,5 +141,23 @@ check "add: real PR accepted"               0 "$(try add 42)"
 if [ "$(cat "$D/targets")" = "42" ]; then echo "  ok   targets: $(cat "$D/targets")"
 else echo "  FAIL targets: $(cat "$D/targets")"; fail=1; fi
 
+echo "smoke: read commands never rewrite the config file"
+
+cat >"$D/config" <<'CFG'
+# my note
+CFG_FUTURE=sparkles
+CFG_TITLE_LINES=3
+CFG_TABLE_ROWS=10
+CFG
+csum="$(shasum "$D/config" | cut -d' ' -f1)"
+check "status rc"          0 "$(try status)"
+check "config rc"          0 "$(try config)"
+if [ "$(shasum "$D/config" | cut -d' ' -f1)" = "$csum" ]; then echo "  ok   config byte-identical after status/config"
+else echo "  FAIL config was rewritten"; fail=1; fi
+csum="$(shasum "$D/config" | cut -d' ' -f1)"
+check "status under env-zero rc" 0 "$(PR_AGENT_TITLE_LINES=0 try status)"
+if [ "$(shasum "$D/config" | cut -d' ' -f1)" = "$csum" ]; then echo "  ok   env zero did not touch the file"
+else echo "  FAIL env zero rewrote config"; fail=1; fi
+
 echo
 if [ "$fail" -eq 0 ]; then echo "smoke: all checks passed"; else echo "smoke: FAILURES"; exit 1; fi
