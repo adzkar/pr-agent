@@ -153,6 +153,14 @@ for tw in 30 60 150; do
 done
 contains "$T/pinw150.out" "#266" "oversized pin keeps PR identity"
 
+with_cfg "$SNAP" "$T/pin3.json" 3 0
+lay "$T/pin3.json" 80 "" "" "$T/pin3.jsonl" >"$T/pin3.out"
+[ "$(mval title_w "$T/pin3.jsonl")" = "5" ] && ok "pin below heading floors at TITLE (5)" \
+  || bad "pin below heading floors" "$(mval title_w "$T/pin3.jsonl")"
+w="$(table "$T/pin3.out" | cell_ops len | sort -u | wc -l | tr -d ' ')"
+[ "$w" -eq 1 ] && ok "pin floor keeps rows one logical width" \
+               || bad "pin floor keeps rows one width" "$w distinct widths"
+
 echo "== wrapping: one logical width, blank-cell continuations, aligned dividers =="
 lay "$SNAP" 80 >"$T/wrap.out"
 ln1="$(table "$T/wrap.out" | sed -n '4p')"   # first record line

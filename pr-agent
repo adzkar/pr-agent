@@ -2401,7 +2401,7 @@ status_layout() { # snapshot-file cols [term-rows [watch-every [meta-out [hoff]]
     # those overflow into logical space (the projection clips them) instead
     gutter=$(( pr_w + 4 ))                       # │␣PR␣│
     local usable_vp=$(( cols - gutter ))
-    if [ "$TITLE_W" -gt 0 ]; then title_w=$TITLE_W   # a pin is the logical width verbatim
+    if [ "$TITLE_W" -gt 0 ]; then title_w=$TITLE_W; [ "$title_w" -lt 5 ] && title_w=5   # pin = logical width, floored at the TITLE heading
     else title_w=$title_max; [ "$title_w" -gt "$usable_vp" ] && title_w=$usable_vp; [ "$title_w" -lt 1 ] && title_w=1; fi
 
     COL_W=( "$pr_w" "$title_w" "$rev_w" "$st_w" "$rnd_w" "$mdl_w" )
