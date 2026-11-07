@@ -9,7 +9,7 @@ T="$(mktemp -d)"
 trap 'rm -rf "$T"' EXIT
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-sed -n '/^resolve_str()/,/^}/p;/^resolve_num()/,/^}/p;/^setting_src()/,/^}/p;/^apply_status_defaults()/,/^}/p;/^load_settings()/,/^}/p;/^cmd_config()/,/^}/p' \
+sed -n '/^resolve_str()/,/^}/p;/^resolve_num()/,/^}/p;/^setting_src()/,/^}/p;/^apply_status_defaults()/,/^}/p;/^load_settings()/,/^}/p;/^cmd_config()/,/^}/p;/^save_config()/,/^}/p' \
   "$REPO/pr-agent" >"$T/funcs.sh"
 
 # run.sh STATE_DIR KEY... -> source funcs, load_settings, report each named
@@ -50,7 +50,22 @@ repo() { echo owner/repo; }
 load_settings
 cmd_config
 EOF
-chmod +x "$T/run.sh" "$T/mode.sh" "$T/cfg.sh"
+
+# save.sh STATE_DIR [MODE] -> load_settings (+ apply_status_defaults MODE) +
+# save_config, then print the config it wrote
+cat >"$T/save.sh" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+STATE_DIR="\$1"
+SETTING_NOTES='' RES='' RES_SRC=''
+SETTINGS='TABLE_ROWS ACTIVITY_LINES TITLE_W TITLE_LINES'
+. "$T/funcs.sh"
+load_settings
+[ -n "\${2:-}" ] && apply_status_defaults "\$2"
+save_config
+cat "\$STATE_DIR/config"
+EOF
+chmod +x "$T/run.sh" "$T/mode.sh" "$T/cfg.sh" "$T/save.sh"
 
 KEYS='TABLE_ROWS ACTIVITY_LINES TITLE_W TITLE_LINES AUTHOR_FILTER SKIP_RE'
 
@@ -154,6 +169,19 @@ O="$(PR_AGENT_TITLE_LINES=0 "$T/cfg.sh" "$d")"
 has "env provenance shown"    "$O" '(env)'
 has "invalid input reported"  "$O" 'ignored invalid input: TABLE_ROWS:saved'
 has "fallback value shown"    "$O" 'titles uncapped'
+
+echo "== save: only env/saved provenance is pinned =="
+d="$(cfg savefresh '')"; rm "$d/config"
+eq "defaults stay unpinned"    "$("$T/save.sh" "$d" | paste -sd'|' -)" ''
+eq "mode-default unpinned"     "$("$T/save.sh" "$d" watch | paste -sd'|' -)" ''
+eq "env pinned"                "$(PR_AGENT_TITLE_LINES=7 "$T/save.sh" "$d" | paste -sd'|' -)" 'CFG_TITLE_LINES=7'
+d="$(cfg savelc '')"; rm "$d/config"
+"$T/save.sh" "$d" >/dev/null   # a fresh `on` writes no display keys…
+eq "watch cap after fresh on"  "$("$T/mode.sh" "$d" watch)" 'TITLE_LINES=0(mode-default)'   # …so -w still gets its mode default
+d="$(cfg savesaved 'CFG_TITLE_LINES=3')"
+eq "saved kept"                "$("$T/save.sh" "$d" | paste -sd'|' -)" 'CFG_TITLE_LINES=3'
+d="$(cfg savemix 'CFG_TABLE_ROWS=10')"
+eq "only saved key written"    "$("$T/save.sh" "$d" | paste -sd'|' -)" 'CFG_TABLE_ROWS=10'
 
 echo
 echo "$pass passed, $fail failed"

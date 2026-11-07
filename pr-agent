@@ -180,7 +180,7 @@ resolve_num() { # NAME ENVNAME default -> RES + RES_SRC like resolve_str, but th
   [ -n "$RES_SRC" ] || { RES="$def"; RES_SRC=default; }
 }
 
-setting_src() { # NAME -> provenance label env|saved|default (default when unset, e.g. older scripts)
+setting_src() { # NAME -> provenance label env|saved|mode-default|default (default when unset, e.g. older scripts)
   eval "printf '%s' \"\${SRC_$1:-default}\""
 }
 
@@ -229,9 +229,11 @@ FULL_CHECK_EVERY=10   # cycles; forces a full feedback fetch even if nothing loo
 
 SETTINGS="INTERVAL PERM_MODE SANDBOX AUTHOR_FILTER PR_AUTHOR_FILTER BOTS TRIGGER MAX_FAILS MAX_ROUNDS STOP_ON_APPROVE CONCURRENCY CI_TRIGGER CONFLICT_TRIGGER NOTIFY RETRY RETRY_MAX RETRY_RE RETRY_MSG SKIP_RE BOT_STATUS_RE SETUP_CMD MAIN_SYNC TABLE_ROWS ACTIVITY_LINES TITLE_W TITLE_LINES UPDATE_CHECK UPDATE_CHECK_EVERY"
 
-save_config() {
+save_config() { # -> snapshot user-chosen settings to $STATE_DIR/config; only env|saved provenance is written — resolver defaults stay unpinned so they can vary (mode-defaults, upgraded defaults)
   local k; : >"$STATE_DIR/config"
-  for k in $SETTINGS; do printf 'CFG_%s=%q\n' "$k" "${!k}" >>"$STATE_DIR/config"; done
+  for k in $SETTINGS; do
+    case "$(setting_src "$k")" in env|saved) printf 'CFG_%s=%q\n' "$k" "${!k}" >>"$STATE_DIR/config" ;; esac
+  done
 }
 
 log() {
