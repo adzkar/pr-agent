@@ -116,11 +116,14 @@ the intent.
   "needs you" state for approved/paused PRs the watcher itself skips.
 - **`save_config` v2 preserves foreign lines and records display-key
   provenance.** The rewrite drops only managed lines (`CFG_<each SETTINGS
-  key>` + `CFG_SRC_*`) and the old `# pr-agent config` header — comments and
-  unknown `CFG_*` keys survive. For `DISPLAY_SETTINGS` keys it appends
-  `CFG_SRC_<k>=default` when the resolved provenance is `default`, and the
-  resolvers demote such values back to `default` on load — so a `pr-agent on`
-  run can't fossilize an inherited default into a saved choice. Env/saved
+  key>` + every `CFG_SRC_*` — the marker namespace is tool-owned) and the
+  old `# pr-agent config` header — comments and unknown `CFG_*` keys
+  survive. For `DISPLAY_SETTINGS` keys it appends `CFG_SRC_<k>=default`
+  when the resolved provenance is `default`, and the resolvers demote such
+  values back to `default` on load — so a `pr-agent on` run can't fossilize
+  an inherited default into a saved choice. Markers govern `DISPLAY_SETTINGS`
+  keys only (`cfg_src` gates the consult): a foreign `CFG_SRC_INTERVAL=default`
+  can't shadow `CFG_INTERVAL` — inert on load, dropped on resave. Env/saved
   provenance writes no marker and stays authoritative. `status`/`config`/
   `update` never call `save_config`; fixtures check byte-identical configs.
 - **`render_status` draws every selected record — no fit-budget.** `TABLE_ROWS`

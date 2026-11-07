@@ -158,31 +158,37 @@ mkdir -p "$STATE_DIR"/{locks,running,seen,feedback,logs}
 
 SETTING_NOTES=''   # "NAME:src" entries for rejected invalid numeric values — reported by config, source files untouched
 
-resolve_str() { # NAME ENVNAME default -> RES + RES_SRC (env > saved CFG_NAME > default; first non-empty wins). A CFG_SRC_NAME=default marker demotes a saved value to default.
+SETTINGS="INTERVAL PERM_MODE SANDBOX AUTHOR_FILTER PR_AUTHOR_FILTER BOTS TRIGGER MAX_FAILS MAX_ROUNDS STOP_ON_APPROVE CONCURRENCY CI_TRIGGER CONFLICT_TRIGGER NOTIFY RETRY RETRY_MAX RETRY_RE RETRY_MSG SKIP_RE BOT_STATUS_RE SETUP_CMD MAIN_SYNC TABLE_ROWS ACTIVITY_LINES TITLE_W TITLE_LINES UPDATE_CHECK UPDATE_CHECK_EVERY"
+
+DISPLAY_SETTINGS="TABLE_ROWS ACTIVITY_LINES TITLE_W TITLE_LINES"   # keys whose provenance persists via CFG_SRC_* markers — the only keys a marker may demote
+
+cfg_src() { # NAME -> CFG_SRC_NAME for display keys; a CFG_SRC marker on any other key is inert
+  local v='' s="CFG_SRC_$1"
+  case " ${DISPLAY_SETTINGS:-} " in *" $1 "*) v="${!s:-}" ;; esac
+  printf '%s' "$v"
+}
+
+resolve_str() { # NAME ENVNAME default -> RES + RES_SRC (env > saved CFG_NAME > default; first non-empty wins). A CFG_SRC_NAME=default marker demotes a saved value to default (display keys only).
   # ENVNAME is the documented PR_AGENT_* name, passed in full: six settings' env names differ
   # from PR_AGENT_<NAME> (PERM_MODE→PR_AGENT_MODE et al.) so the name must not be derived.
-  local n="$1" e="$2" def="$3" c="CFG_$1" cs="CFG_SRC_$1" ev cv csv
+  local n="$1" e="$2" def="$3" c="CFG_$1" ev cv
   ev="${!e:-}"; cv="${!c:-}"
   if [ -n "$ev" ]; then RES="$ev"; RES_SRC=env
   elif [ -n "$cv" ]; then
-    csv="${!cs:-}"
-    if [ "$csv" = default ]; then RES="$def"; RES_SRC=default
+    if [ "$(cfg_src "$n")" = default ]; then RES="$def"; RES_SRC=default
     else RES="$cv"; RES_SRC=saved; fi
   else RES="$def"; RES_SRC=default; fi
 }
 
-resolve_num() { # NAME ENVNAME default -> RES + RES_SRC like resolve_str, but the first *valid digits* layer wins; rejected values join SETTING_NOTES; CFG_SRC_NAME=default demotes like resolve_str
-  local n="$1" e="$2" def="$3" c="CFG_$1" cs="CFG_SRC_$1" v src csv
+resolve_num() { # NAME ENVNAME default -> RES + RES_SRC like resolve_str, but the first *valid digits* layer wins; rejected values join SETTING_NOTES; CFG_SRC_NAME=default demotes like resolve_str (display keys only)
+  local n="$1" e="$2" def="$3" c="CFG_$1" v src
   RES=''; RES_SRC=''
   for src in env saved; do
     if [ "$src" = env ]; then v="${!e:-}"; else v="${!c:-}"; fi
     [ -z "$v" ] && continue
     if [[ "$v" =~ ^[0-9]+$ ]]; then
       RES="$v"; RES_SRC="$src"
-      if [ "$src" = saved ]; then
-        csv="${!cs:-}"
-        [ "$csv" = default ] && { RES="$def"; RES_SRC=default; }
-      fi
+      [ "$src" = saved ] && [ "$(cfg_src "$n")" = default ] && { RES="$def"; RES_SRC=default; }
       break
     fi
     SETTING_NOTES+=" $n:$src"

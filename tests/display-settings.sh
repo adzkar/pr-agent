@@ -9,7 +9,7 @@ T="$(mktemp -d)"
 trap 'rm -rf "$T"' EXIT
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-sed -n '/^resolve_str()/,/^}/p;/^resolve_num()/,/^}/p;/^setting_src()/,/^}/p;/^apply_status_defaults()/,/^}/p;/^load_settings()/,/^}/p;/^cmd_config()/,/^}/p;/^save_config()/,/^}/p' \
+sed -n '/^cfg_src()/,/^}/p;/^resolve_str()/,/^}/p;/^resolve_num()/,/^}/p;/^setting_src()/,/^}/p;/^apply_status_defaults()/,/^}/p;/^load_settings()/,/^}/p;/^cmd_config()/,/^}/p;/^save_config()/,/^}/p' \
   "$REPO/pr-agent" >"$T/funcs.sh"
 
 # run.sh STATE_DIR KEY... -> source funcs, load_settings, report each named
@@ -69,7 +69,21 @@ if [ -n "\${2:-}" ]; then apply_status_defaults "\$2"; fi
 save_config
 cat "\$STATE_DIR/config"
 EOF
-chmod +x "$T/run.sh" "$T/mode.sh" "$T/cfg.sh" "$T/save.sh"
+
+# mark.sh STATE_DIR -> load_settings, report INTERVAL+TITLE_LINES provenance —
+# pins which keys a CFG_SRC_*=default marker may demote (display keys only)
+cat >"$T/mark.sh" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+STATE_DIR="\$1"
+SETTING_NOTES='' RES='' RES_SRC=''
+DISPLAY_SETTINGS='TABLE_ROWS ACTIVITY_LINES TITLE_W TITLE_LINES'
+. "$T/funcs.sh"
+load_settings
+printf 'INTERVAL=%s(%s)\n' "\$INTERVAL" "\$(setting_src INTERVAL)"
+printf 'TITLE_LINES=%s(%s)\n' "\$TITLE_LINES" "\$(setting_src TITLE_LINES)"
+EOF
+chmod +x "$T/run.sh" "$T/mode.sh" "$T/cfg.sh" "$T/save.sh" "$T/mark.sh"
 
 KEYS='TABLE_ROWS ACTIVITY_LINES TITLE_W TITLE_LINES AUTHOR_FILTER SKIP_RE'
 
@@ -230,6 +244,20 @@ has "comment kept"           "$O" '# hand-added note'
 has "unknown key kept"       "$O" 'CFG_FUTURE=sparkles'
 lacks "stale marker dropped" "$O" 'CFG_SRC_TITLE_LINES'
 lacks "demoted value gone"   "$O" 'CFG_TITLE_LINES='
+
+echo "-- CFG_SRC markers govern display keys only --"
+d="$(cfg fsrc 'CFG_INTERVAL=45
+CFG_SRC_INTERVAL=default
+CFG_TITLE_LINES=9
+CFG_SRC_TITLE_LINES=default')"
+eq "foreign marker inert, display marker demotes" \
+   "$("$T/mark.sh" "$d" | paste -sd'|' -)" 'INTERVAL=45(saved)|TITLE_LINES=3(default)'
+O="$("$T/save.sh" "$d" 'INTERVAL=45 SRC_INTERVAL=saved TITLE_LINES=3 SRC_TITLE_LINES=default')"
+has "foreign marker cleaned"  "$([ "$O" != "${O/CFG_SRC_INTERVAL/}" ] && echo kept || echo gone)" gone
+has "interval value resaved"  "$O" 'CFG_INTERVAL=45'
+has "display marker reissued" "$O" 'CFG_SRC_TITLE_LINES=default'
+eq "post-resave state pins both" \
+   "$("$T/mark.sh" "$d" | paste -sd'|' -)" 'INTERVAL=45(saved)|TITLE_LINES=3(default)'
 
 echo "-- resave is idempotent --"
 d="$(cfg idem '')"; rm "$d/config"
