@@ -1864,6 +1864,7 @@ wrap() { # text width max -> WRAP_LINES: greedy word wrap at one logical width (
          # (max 0 = no cap). WRAP_FULL = uncapped line count, WRAP_W = per-line cell
          # widths. width floors at 1 — ≤0 would loop forever
   local s w max line='' linew=0 word wordw i base ci=0 take tw rest; local -a out=() outw=() wcs=()
+  local LC_ALL=en_US.UTF-8   # ${#}/${var:i:j} must count codepoints — wcs[] is indexed by them
   s="$(printf '%s' "$1" | sed -E 's/[[:space:]]+/ /g; s/^ //; s/ $//')"
   w="$2"; max="${3:-0}"; [ "$w" -gt 0 ] || w=1
   if [ -n "$s" ]; then

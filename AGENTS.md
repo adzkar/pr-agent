@@ -183,7 +183,12 @@ the intent.
   to 0 — use decimal) and doesn't allow bare newlines mid-statement.
   `wrap`'s per-char widths come from one `ws` pass per title, the grid's
   column widths from one `max` pass per frame — don't reintroduce per-cell
-  subprocess calls into the draw loop.
+  subprocess calls into the draw loop. But char count *follows the ambient
+  locale*: under `LC_ALL=C`, `${#var}` counts bytes and `${var:i:j}`
+  byte-slices (splitting UTF-8 mid-codepoint) while `wcs[]` stays
+  per-codepoint — `wrap` pins `local LC_ALL=en_US.UTF-8` so its own
+  index/length math always matches `wcs[]`. Any function that mixes bash
+  string ops with cell_ops codepoint indexing needs the same pin.
 - **`save_config` pins only `env`/`saved`-provenance keys.** `pr-agent on`
   snapshots `CFG_*` for the detached watcher, but a key still at its resolver
   `default` (or `mode-default`) stays unwritten — writing it would pin the

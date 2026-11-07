@@ -24,6 +24,12 @@ for i in "\${!WRAP_LINES[@]}"; do printf '[%s]%s\n' "\${WRAP_W[i]}" "\${WRAP_LIN
 EOF
 chmod +x "$T/run.sh"
 
+# runc.sh — same, but under LC_ALL=C: wrap pins its own UTF-8 ctype, so the C
+# ambient must produce identical (codepoint-sliced, never byte-sliced) output
+sed 's/export LC_ALL=en_US.UTF-8.*/export LC_ALL=C   # hostile ambient — wrap self-pins UTF-8/' \
+  "$T/run.sh" >"$T/runc.sh"
+chmod +x "$T/runc.sh"
+
 pass=0; fail=0
 ok()  { pass=$((pass+1)); echo "ok   $1"; }
 bad() { fail=$((fail+1)); echo "FAIL $1 — $2"; }
@@ -72,6 +78,17 @@ try "cjk counts cells"             "FULL=3|[4]café|[12]ドキュメン …" "ca
 try "combining mark joins"         "FULL=1|[2]$(printf 'e\xcc\x81x')" "$(printf 'e\xcc\x81x')" 10 0
 try "wide char straddles split"    "FULL=2|[4]aaド|[3]ドb"            "aaドドb" 5 0
 try "wide word fills exactly"      "FULL=1|[10]ドキュメン"           "ドキュメン" 10 0
+
+echo "== C ambient locale: wrap still counts codepoints =="
+tryc() {
+  local name="$1" want="$2" got
+  shift 2
+  got="$("$T/runc.sh" "$@" | paste -sd'|' -)"
+  eq "$name" "$got" "$want"
+}
+tryc "cjk under LC_ALL=C"            "FULL=3|[4]café|[12]ドキュメン …" "café ドキュメントいタイトル" 12 2
+tryc "wide char straddles under C"   "FULL=2|[4]aaド|[3]ドb"            "aaドドb" 5 0
+tryc "ascii identical under C"       "FULL=2|[5]alpha|[4]beta"          "alpha beta" 9 3
 
 echo
 echo "$pass passed, $fail failed"
