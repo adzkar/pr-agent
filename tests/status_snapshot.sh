@@ -190,6 +190,13 @@ SNAP2="$(mktemp)"
 PR_AGENT_TABLE_ROWS=2 ./pr-agent _gather 0 >"$SNAP2"
 FRAME4="$(./pr-agent _layout "$SNAP2" 100)"
 check_in "record cap row"   "$FRAME4" "… 2 more (1 open) — TABLE_ROWS=2"
+
+# TABLE_ROWS=1 pushes #1 (pending) below the cap — the pre-pass must still see it
+SNAP3="$(mktemp)"
+PR_AGENT_TABLE_ROWS=1 ./pr-agent _gather 0 >"$SNAP3"
+FRAME5="$(./pr-agent _layout "$SNAP3" 100)"
+check_in "cap row: 3 hidden, 2 open"   "$FRAME5" "… 3 more (2 open) — TABLE_ROWS=1"
+check_in "hint sees pending below cap" "$FRAME5" "watcher is off — new feedback on #1 won't be handled"
 META="$(mktemp)"
 ./pr-agent _layout "$SNAP" 100 "" "" "$META" >/dev/null
 check "meta geometry"                  "1" "$(jq -se 'map(select(.type == "geometry" and .cols == 100)) | length == 1' "$META" >/dev/null && echo 1 || echo 0)"
