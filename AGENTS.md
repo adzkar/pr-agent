@@ -19,6 +19,7 @@
 | `tests/review_verdict.sh` | Fixture checks for the `PR_JQ` `.review` verdict derivation (jq only) |
 | `tests/author_match.sh` | Extracted-function fixtures for case-insensitive author/login matching (jq only) |
 | `tests/title_wrap.sh` | Extracted-function fixtures for `wrap` — the status TITLE column's multi-line cell wrap (bash only) |
+| `tests/display-settings.sh` | Extracted-function fixtures for the settings resolver — precedence, `SRC_*` provenance, invalid-input notes (bash only) |
 | `AGENTS.md` | This file |
 
 ## Deploy model
@@ -45,14 +46,16 @@ was never released.
 
 ## Verify before committing
 
-Five scratch-repo harnesses cover what CI doesn't: `tests/smoke.sh`
+Six scratch-repo harnesses cover what CI doesn't: `tests/smoke.sh`
 exercises the worktree-blocked lifecycle on local git alone;
 `tests/review_verdict.sh` runs the `PR_JQ` verdict derivation over fixture
 payloads; `tests/author_match.sh` lifts the author-matching jq out of
 `pr-agent` and checks configured-vs-API login casing; `tests/release.sh`
 drives the `release` state machine and `cmd_update` end-to-end with a
 stubbed `gh`; `tests/update-check.sh` extracts the update-check functions
-from `pr-agent` and exercises the stamp/throttle edge cases. Minimum checks:
+from `pr-agent` and exercises the stamp/throttle edge cases; `display-settings.sh`
+extracts the settings resolver and checks precedence/provenance/invalid inputs.
+Minimum checks:
 
 ```sh
 bash -n pr-agent                       # syntax
@@ -62,6 +65,7 @@ tests/smoke.sh                         # worktree-blocked lifecycle in a scratch
 tests/review_verdict.sh                # .review verdict derivation fixtures (no gh)
 tests/author_match.sh                  # author/login matching fixtures (no gh)
 tests/title_wrap.sh                    # TITLE-cell wrap fixtures (no gh)
+tests/display-settings.sh              # settings precedence/provenance fixtures (no gh)
 ./tests/release.sh                     # release + update scenarios (run when `release` or `cmd_update` changes)
 ./tests/update-check.sh                # update-check edge cases (run when the check changes)
 cd /path/to/a/watched/repo             # then run READ-ONLY commands only:
