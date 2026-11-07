@@ -127,6 +127,13 @@ the intent.
   via `draw_span`. Column set is width-driven: SESSION needs `cols ≥ 125`;
   below a usable `title_w` (~25) `LAST RUN` then `ROUNDS` drop out — keep
   `fixed`/`n` in step when adding a column.
+- **`save_config` pins only `env`/`saved`-provenance keys.** `pr-agent on`
+  snapshots `CFG_*` for the detached watcher, but a key still at its resolver
+  `default` (or `mode-default`) stays unwritten — writing it would pin the
+  plain-mode `3` at `on` time and make `apply_status_defaults`'s `-w` `0`
+  unreachable for every watched repo. Keep the `case` guard on provenance,
+  never on the key name: it also keeps generated fallbacks (e.g. `RETRY_MSG`'s
+  template) from being frozen as `saved`.
 - **`running/<pr>` marker = "stopped by user".** `run_agent` treats a deleted
   marker as an intentional stop (rc 3), not a crash — remove the marker before
   killing a pid, never after.

@@ -129,7 +129,9 @@ recent activity  (full log: pr-agent logs · agent transcript: pr-agent logs N)
 ## Configuration
 
 Env vars always win over the per-repo config saved by `pr-agent on`
-(`pr-agent config` shows the effective values):
+(`pr-agent config` shows the effective values). `on` only pins values
+that came from env or an earlier save — a setting still at its built-in
+default stays unpinned, so defaults like `TITLE_LINES` can vary by mode:
 
 | Var | Default | Meaning |
 | --- | --- | --- |

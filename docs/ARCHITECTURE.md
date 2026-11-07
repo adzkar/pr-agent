@@ -16,7 +16,7 @@ Sections are delimited by `# --- name ---` banners, in file order:
 | --- | --- | --- |
 | header + bootstrap | 1–117 | Usage doc comment, `set -euo pipefail`, `VERSION`/`UPDATE_REPO`/`STATE_ROOT`/`DEVIN_BIN`/`SELF`, `die` |
 | per-repo state | 118–156 | `slug_of`, `git_repo_name`, `migrate_legacy_state` (pre-per-repo flat layout → `repos/<slug>`), `resolve_repo_slug` → `REPO_SLUG`, `STATE_DIR` + state paths (`PID_FILE`, `MAP_FILE`, `LOG_FILE`, `PRS_CACHE`, `PRS_EXTRA`) |
-| settings | 157–248 | `resolve_str`/`resolve_num`/`load_settings` — env → saved `CFG_*` → default resolution with `SRC_<name>` provenance (`invalid` inputs rejected into `SETTING_NOTES`, files untouched); the documented `PR_AGENT_*` env name is passed explicitly (six differ from `PR_AGENT_<setting>` — `MODE`→`PERM_MODE` etc.); `setting_src`, `apply_status_defaults`, `save_config`, `log`, `notify` (osascript) |
+| settings | 157–248 | `resolve_str`/`resolve_num`/`load_settings` — env → saved `CFG_*` → default resolution with `SRC_<name>` provenance (`invalid` inputs rejected into `SETTING_NOTES`, files untouched); the documented `PR_AGENT_*` env name is passed explicitly (six differ from `PR_AGENT_<setting>` — `MODE`→`PERM_MODE` etc.); `setting_src`, `apply_status_defaults`, `save_config` (persists only env|saved-provenance keys — defaults stay unpinned), `log`, `notify` (osascript) |
 | repo context | 249–271 | `repo`/`repo_dir`/`me` accessors, `need_repo`, `detect_repo` (writes repo, repo_dir, me, base into state) |
 | map | 272–300 | `map.json` accessors (`map_get/set/del/rm/num`) behind `with_map_lock` (mkdir lock, ~10 s stale break) |
 | PR list | 301–398 | `refresh_prs` — one `gh pr list` call → `prs.jsonl` cache (number, title, state, draft, review, updated, branch, head, base, mergeable, ci, ci_failed, body, cross, author — `review` is `reviewDecision`, derived from non-author `reviews` (latest opinionated per reviewer) when empty); `backfill_prs` — one `gh pr view` per tracked PR missing from both caches → `prs_extra.jsonl` (once each ever); `pr_info` (list first, extras fallback), `targets` ("all" mode scoped by `PR_AUTHOR_FILTER` via `PR_AUTHOR_JQ`), `scope_label` (that scope as display text) |
@@ -45,7 +45,7 @@ Sections are delimited by `# --- name ---` banners, in file order:
   repos/<owner>__<repo>/
     repo repo_dir me base      # written by detect_repo
     targets                    # "all" or explicit PR numbers
-    config                     # CFG_* saved by `pr-agent on`
+    config                     # CFG_* env/saved settings pinned by `pr-agent on` (defaults stay unpinned)
     pid                        # watcher pid
     map.json                   # PR → session/worktree/counters (see below)
     map.lock                   # mkdir lock dir for map writes
