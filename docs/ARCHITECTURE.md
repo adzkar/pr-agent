@@ -1,6 +1,6 @@
 # Architecture
 
-`pr-agent` is a single bash script (~2230 lines). It polls GitHub for new PR
+`pr-agent` is a single bash script (~2420 lines). It polls GitHub for new PR
 feedback and hands each round to a **persistent Devin CLI session per PR**
 running inside that PR's dedicated git worktree — so the agent keeps context
 across review rounds and never touches your checkout.
@@ -31,7 +31,7 @@ Sections are delimited by `# --- name ---` banners, in file order:
 | manual commands | 1352–1568 | `need_pr`/`need_real_pr`/`gh_err_not_pr` (every command acting on a user-supplied N — `on`/`add` targets included — resolves it through `need_real_pr`'s `gh pr view` first, `sync --apply` excepted (own resolution); `gh_err_not_pr` reads the stderr — only "Could not resolve to a PullRequest" marks a non-PR), `run`, `tell`/`_tell`, `attach`, `retry`, `peek`, `mark-seen`, `forget_pr`, `gc`, `sync`, `config`, `logs` (`version` is a dispatch one-liner) |
 | self-update | 1569–1690 | `ver_gt`, `latest_release_tag`, `cmd_update` — downloads release assets from `UPDATE_REPO`, verifies sha256, atomic-installs over the (symlink-resolved) install; `maybe_update_check`/`pending_update_version` — throttled background release check (OMZ-style), both gated on `UPDATE_CHECK` |
 | status rendering | 1691–2345 | `fmt_*`, `trunc`/`pad`/`wrap` (TITLE cells wrap to `TITLE_LINES` lines), `vis_len`/`phys_lines` (ANSI-stripped soft-wrap count), `draw_*`, `status_prs`, `status_pending_count`/`refresh_status_pending` (pending counts without `seed_seen` — an absent marker gets `last_seen_ts` applied in memory), `refresh_blocked_flags` (lazy `still_blocked` re-probe — clears a freed flag even with the watcher off), `recent_event_groups`/`recent_events`, `status_gather` — emits the versioned JSON snapshot and is the *only* side-effecting stage (cache refresh + lock-protected blocked-flag maintenance); `review_cell`/`state_cell` (pure: read the record's snapshot fields; only side effect is the `H_*` hint buckets), `render_hint`, `status_layout` — pure paint from the snapshot + optional per-record `meta-out` anchors, `render_status` (gather → temp file → layout), `cmd_status` (alt-screen watch loop + fallback clip), `usage` |
-| dispatch | 2346–endnd | `case "$1"` router (`usage` sits just above the banner) — inline cases: `add`/`rm`, `pause`/`resume`, `reset`, `reset-rounds`, `map`, `version`, `help`; `_loop`/`_check`/`_tell`/`_ensure`/`_blocked`/`_gather`/`_layout` are internal entries (`_gather` prints the status snapshot, `_layout` renders one — `tests/status_snapshot.sh` drives both). `maybe_update_check` runs just before dispatch; the notice is skipped for internal/machine-readable commands (`_loop` logs it) |
+| dispatch | 2346–end | `case "$1"` router (`usage` sits just above the banner) — inline cases: `add`/`rm`, `pause`/`resume`, `reset`, `reset-rounds`, `map`, `version`, `help`; `_loop`/`_check`/`_tell`/`_ensure`/`_blocked`/`_gather`/`_layout` are internal entries (`_gather` prints the status snapshot, `_layout` renders one — `tests/status_snapshot.sh` drives both). `maybe_update_check` runs just before dispatch; the notice is skipped for internal/machine-readable commands (`_loop` logs it) |
 
 ## On-disk state
 
