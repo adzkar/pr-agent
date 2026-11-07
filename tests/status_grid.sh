@@ -205,6 +205,28 @@ echo "== frame clip: soft-wrap-aware bottom clip (cell_ops clip contract) =="
 { printf 'a\nb\nc\nd\n'; } | cell_ops clip -v cols=10 -v rows=3 >"$T/clip.out"
 [ "$(nlines "$T/clip.out")" -eq 3 ] && [ "$(tail -1 "$T/clip.out" | od -An -tx1 | tr -d ' \n')" = "02320a" ] \
   && ok "clip keeps prefix + sentinel" || bad "clip sentinel" "$(cat -v "$T/clip.out" | tail -1)"
+printf 'a\nb\nc\n' | cell_ops clip -v cols=10 -v rows=1 >"$T/clip1.out"
+[ "$(od -An -tx1 <"$T/clip1.out" | tr -d ' \n')" = "02330a" ] \
+  && ok "bare sentinel when nothing fits (rows=1)" || bad "bare sentinel" "$(cat -v "$T/clip1.out")"
+
+echo "== row budget: activity shrink accounts for its trailing blank =="
+jq '.cfg.activity_lines = 8 | .activity = ["1\t[2026-11-07 08:00:00] watcher started (interval=120s)",
+     "1\t[2026-11-07 08:01:00] PR #266: 2 new feedback item(s) since last check",
+     "1\t[2026-11-07 08:02:00] PR #266: starting new session in wt",
+     "1\t[2026-11-07 09:00:00] PR #266: round done at 09:00",
+     "1\t[2026-11-07 09:01:00] PR #252: mapped to session calm-river",
+     "1\t[2026-11-07 09:02:00] PR #300: skipped — session busy",
+     "1\t[2026-11-07 09:03:00] PR #266: resuming session pumped-leaf",
+     "1\t[2026-11-07 09:04:00] PR #266: 1 new comment",
+     "1\t[2026-11-07 09:05:00] watcher poll complete",
+     "1\t[2026-11-07 09:06:00] PR #266: handled feedback"]' "$SNAP" >"$T/act.json"
+for r in 21 22 23 24 25 26; do   # saturation range: act_n clamps inside 1..ACTIVITY_LINES
+  lay "$T/act.json" 80 "$r" 5 >"$T/act$r.out"
+  ph="$(cell_ops len <"$T/act$r.out" | awk -v c=80 '{t+=($1>0?int(($1+c-1)/c):1)} END{print t}')"
+  contains "$T/act$r.out" "recent activity" "activity section emitted at rows=$r"
+  [ "$ph" -le $(( r - 1 )) ] && ok "budgeted frame fits rows=$r (phys $ph)" \
+                             || bad "budgeted frame fits rows=$r" "phys $ph > $((r-1))"
+done
 
 echo
 echo "$pass passed, $fail failed"
