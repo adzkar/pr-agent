@@ -248,12 +248,14 @@ lacks "demoted value gone"   "$O" 'CFG_TITLE_LINES='
 echo "-- CFG_SRC markers govern display keys only --"
 d="$(cfg fsrc 'CFG_INTERVAL=45
 CFG_SRC_INTERVAL=default
+CFG_SRC_FOO2=default
 CFG_TITLE_LINES=9
 CFG_SRC_TITLE_LINES=default')"
 eq "foreign marker inert, display marker demotes" \
    "$("$T/mark.sh" "$d" | paste -sd'|' -)" 'INTERVAL=45(saved)|TITLE_LINES=3(default)'
 O="$("$T/save.sh" "$d" 'INTERVAL=45 SRC_INTERVAL=saved TITLE_LINES=3 SRC_TITLE_LINES=default')"
 has "foreign marker cleaned"  "$([ "$O" != "${O/CFG_SRC_INTERVAL/}" ] && echo kept || echo gone)" gone
+has "digit marker cleaned"    "$([ "$O" != "${O/CFG_SRC_FOO2/}" ] && echo kept || echo gone)" gone
 has "interval value resaved"  "$O" 'CFG_INTERVAL=45'
 has "display marker reissued" "$O" 'CFG_SRC_TITLE_LINES=default'
 eq "post-resave state pins both" \
