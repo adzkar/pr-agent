@@ -1,6 +1,6 @@
 # Architecture
 
-`pr-agent` is a single bash script (~2225 lines). It polls GitHub for new PR
+`pr-agent` is a single bash script (~2230 lines). It polls GitHub for new PR
 feedback and hands each round to a **persistent Devin CLI session per PR**
 running inside that PR's dedicated git worktree — so the agent keeps context
 across review rounds and never touches your checkout.
