@@ -114,6 +114,15 @@ the intent.
   `skip_reason` (paused/round-limit/approved) → pending items → idle. The
   sync cells must stay above `skip_reason`: `sync_blocked` is a sticky
   "needs you" state for approved/paused PRs the watcher itself skips.
+- **`save_config` v2 preserves foreign lines and records display-key
+  provenance.** The rewrite drops only managed lines (`CFG_<each SETTINGS
+  key>` + `CFG_SRC_*`) and the old `# pr-agent config` header — comments and
+  unknown `CFG_*` keys survive. For `DISPLAY_SETTINGS` keys it appends
+  `CFG_SRC_<k>=default` when the resolved provenance is `default`, and the
+  resolvers demote such values back to `default` on load — so a `pr-agent on`
+  run can't fossilize an inherited default into a saved choice. Env/saved
+  provenance writes no marker and stays authoritative. `status`/`config`/
+  `update` never call `save_config`; fixtures check byte-identical configs.
 - **`render_status` draws every selected record — no fit-budget.** `TABLE_ROWS`
   counts *records* (`0` = all render; `N` = first `N`, rest collapse into the
   `… N more — TABLE_ROWS=N` row), and `TITLE_LINES` is a resolved user cap

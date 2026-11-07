@@ -9,7 +9,7 @@ T="$(mktemp -d)"
 trap 'rm -rf "$T"' EXIT
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-sed -n '/^resolve_str()/,/^}/p;/^resolve_num()/,/^}/p;/^setting_src()/,/^}/p;/^apply_status_defaults()/,/^}/p;/^load_settings()/,/^}/p;/^cmd_config()/,/^}/p' \
+sed -n '/^resolve_str()/,/^}/p;/^resolve_num()/,/^}/p;/^setting_src()/,/^}/p;/^apply_status_defaults()/,/^}/p;/^load_settings()/,/^}/p;/^cmd_config()/,/^}/p;/^save_config()/,/^}/p' \
   "$REPO/pr-agent" >"$T/funcs.sh"
 
 # run.sh STATE_DIR -> source funcs, load_settings, report key display settings
@@ -54,7 +54,24 @@ repo() { echo owner/repo; }
 load_settings
 cmd_config
 EOF
-chmod +x "$T/run.sh" "$T/mode.sh" "$T/cfg.sh"
+
+# save.sh STATE_DIR SPECVARS -> set values+SRC_* from \$2 (eval'd), save_config,
+# print the resulting file. Simulates `on`-time provenance without a watcher.
+cat >"$T/save.sh" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+STATE_DIR="\$1"
+SETTING_NOTES='' RES='' RES_SRC=''
+SETTINGS='INTERVAL TABLE_ROWS TITLE_LINES'
+DISPLAY_SETTINGS='TABLE_ROWS TITLE_LINES'
+INTERVAL=120 TABLE_ROWS=0 TITLE_LINES=3
+SRC_INTERVAL=default SRC_TABLE_ROWS=default SRC_TITLE_LINES=default
+if [ -n "\${2:-}" ]; then eval "\$2"; fi
+. "$T/funcs.sh"
+save_config
+cat "\$STATE_DIR/config"
+EOF
+chmod +x "$T/run.sh" "$T/mode.sh" "$T/cfg.sh" "$T/save.sh"
 
 pass=0; fail=0
 ok()  { pass=$((pass+1)); echo "ok   $1"; }
@@ -142,6 +159,56 @@ O="$(PR_AGENT_TITLE_LINES=0 "$T/cfg.sh" "$d")"
 has "env provenance shown"    "$O" '(env)'
 has "invalid input reported"  "$O" 'ignored invalid input: TABLE_ROWS:saved'
 has "fallback value shown"    "$O" 'titles uncapped'
+
+echo "== save_config v2 =="
+echo "-- default-sourced display key gets a CFG_SRC marker --"
+d="$(cfg savedef '')"; rm "$d/config"
+O="$("$T/save.sh" "$d" 'SRC_TITLE_LINES=default SRC_TABLE_ROWS=default')"
+has "v2 header"            "$O" '# pr-agent config v2'
+has "title marker"         "$O" 'CFG_SRC_TITLE_LINES=default'
+has "rows marker"          "$O" 'CFG_SRC_TABLE_ROWS=default'
+eq "marker demotes to mode default (watch)" \
+   "$("$T/mode.sh" "$d" watch)" 'TITLE_LINES=0(mode-default)'
+eq "marker demotes to mode default (plain)" \
+   "$("$T/mode.sh" "$d" plain)" 'TITLE_LINES=3(mode-default)'
+
+echo "-- env/saved-sourced display keys stay authoritative --"
+d="$(cfg saveexp '')"; rm "$d/config"
+O="$("$T/save.sh" "$d" 'TITLE_LINES=1 SRC_TITLE_LINES=saved TABLE_ROWS=10 SRC_TABLE_ROWS=env')"
+has "saved value written"     "$O" 'CFG_TITLE_LINES=1'
+has "no title marker"         "$([ "$O" != "${O/CFG_SRC_TITLE_LINES/}" ] && echo marker || echo none)" none
+has "rows value written"      "$O" 'CFG_TABLE_ROWS=10'
+eq "explicit cap survives reload (watch)" \
+   "$("$T/mode.sh" "$d" watch)" 'TITLE_LINES=1(saved)'
+eq "explicit rows survive reload" \
+   "$("$T/run.sh" "$d" | grep '^TABLE_ROWS=')" 'TABLE_ROWS=10(saved)'
+
+echo "-- legacy v1 file (no markers): saved cap stays authoritative --"
+d="$(cfg v1 'CFG_TITLE_LINES=3')"
+eq "legacy 3 wins (watch)" "$("$T/mode.sh" "$d" watch)" 'TITLE_LINES=3(saved)'
+O="$("$T/save.sh" "$d" 'TITLE_LINES=3 SRC_TITLE_LINES=saved')"
+has "resave upgrades to v2"    "$O" '# pr-agent config v2'
+has "no marker for saved key"  "$([ "$O" != "${O/CFG_SRC_TITLE_LINES/}" ] && echo marker || echo none)" none
+eq "cap survives v1→v2 resave" "$("$T/mode.sh" "$d" watch)" 'TITLE_LINES=3(saved)'
+
+echo "-- foreign lines survive a resave --"
+d="$(cfg foreign '# hand-added note
+CFG_FUTURE=sparkles
+CFG_SRC_TITLE_LINES=default
+CFG_TITLE_LINES=9')"
+O="$("$T/save.sh" "$d" 'TITLE_LINES=3 SRC_TITLE_LINES=default')"
+has "comment kept"          "$O" '# hand-added note'
+has "unknown key kept"      "$O" 'CFG_FUTURE=sparkles'
+has "stale marker replaced" "$O" 'CFG_SRC_TITLE_LINES=default'
+has "managed value resaved" "$O" 'CFG_TITLE_LINES=3'
+has "old value gone"        "$([ "$O" != "${O/CFG_TITLE_LINES=9/}" ] && echo stale || echo clean)" clean
+
+echo "-- resave is idempotent --"
+d="$(cfg idem '')"; rm "$d/config"
+"$T/save.sh" "$d" '' >/dev/null
+first="$(shasum "$d/config" | cut -d' ' -f1)"
+"$T/save.sh" "$d" '' >/dev/null
+eq "same file twice" "$(shasum "$d/config" | cut -d' ' -f1)" "$first"
 
 echo
 echo "$pass passed, $fail failed"

@@ -158,21 +158,31 @@ mkdir -p "$STATE_DIR"/{locks,running,seen,feedback,logs}
 
 SETTING_NOTES=''   # "NAME(src)" entries for rejected invalid numeric values — reported by config, source files untouched
 
-resolve_str() { # NAME default -> RES + RES_SRC (env > saved > default; first non-empty wins)
-  local n="$1" def="$2" ev cv
+resolve_str() { # NAME default -> RES + RES_SRC (env > saved > default; first non-empty wins). A CFG_SRC_NAME=default marker demotes a saved value to default
+  local n="$1" def="$2" ev cv cs
   eval "ev=\${PR_AGENT_$n:-}"; eval "cv=\${CFG_$n:-}"
   if [ -n "$ev" ]; then RES="$ev"; RES_SRC=env
-  elif [ -n "$cv" ]; then RES="$cv"; RES_SRC=saved
+  elif [ -n "$cv" ]; then
+    eval "cs=\${CFG_SRC_$n:-}"
+    if [ "$cs" = default ]; then RES="$def"; RES_SRC=default
+    else RES="$cv"; RES_SRC=saved; fi
   else RES="$def"; RES_SRC=default; fi
 }
 
-resolve_num() { # NAME default -> RES + RES_SRC like resolve_str, but the first *valid digits* layer wins; rejected values join SETTING_NOTES
-  local n="$1" def="$2" v src
+resolve_num() { # NAME default -> RES + RES_SRC like resolve_str, but the first *valid digits* layer wins; rejected values join SETTING_NOTES; CFG_SRC_NAME=default demotes like resolve_str
+  local n="$1" def="$2" v src cs
   RES=''; RES_SRC=''
   for src in env saved; do
     if [ "$src" = env ]; then eval "v=\${PR_AGENT_$n:-}"; else eval "v=\${CFG_$n:-}"; fi
     [ -z "$v" ] && continue
-    if [[ "$v" =~ ^[0-9]+$ ]]; then RES="$v"; RES_SRC="$src"; break; fi
+    if [[ "$v" =~ ^[0-9]+$ ]]; then
+      RES="$v"; RES_SRC="$src"
+      if [ "$src" = saved ]; then
+        eval "cs=\${CFG_SRC_$n:-}"
+        [ "$cs" = default ] && { RES="$def"; RES_SRC=default; }
+      fi
+      break
+    fi
     SETTING_NOTES+=" $n:$src"
   done
   [ -n "$RES_SRC" ] || { RES="$def"; RES_SRC=default; }
@@ -227,9 +237,27 @@ FULL_CHECK_EVERY=10   # cycles; forces a full feedback fetch even if nothing loo
 
 SETTINGS="INTERVAL PERM_MODE SANDBOX AUTHOR_FILTER PR_AUTHOR_FILTER BOTS TRIGGER MAX_FAILS MAX_ROUNDS STOP_ON_APPROVE CONCURRENCY CI_TRIGGER CONFLICT_TRIGGER NOTIFY RETRY RETRY_MAX RETRY_RE RETRY_MSG SKIP_RE BOT_STATUS_RE SETUP_CMD MAIN_SYNC TABLE_ROWS ACTIVITY_LINES TITLE_W TITLE_LINES UPDATE_CHECK UPDATE_CHECK_EVERY"
 
-save_config() {
-  local k; : >"$STATE_DIR/config"
-  for k in $SETTINGS; do printf 'CFG_%s=%q\n' "$k" "${!k}" >>"$STATE_DIR/config"; done
+DISPLAY_SETTINGS="TABLE_ROWS ACTIVITY_LINES TITLE_W TITLE_LINES"   # keys whose provenance is persisted via CFG_SRC_* markers
+
+save_config() { # -> rewrite $STATE_DIR/config (v2): resolved values + CFG_SRC_*=default markers for default-sourced display keys; foreign lines preserved
+  local tmp k re
+  re='^CFG_(SRC_TABLE_ROWS|SRC_ACTIVITY_LINES|SRC_TITLE_W|SRC_TITLE_LINES'
+  for k in $SETTINGS; do re+="|$k"; done
+  re+=')='
+  tmp="$(mktemp)"
+  if [ -f "$STATE_DIR/config" ]; then
+    { grep -vE "$re" "$STATE_DIR/config" | grep -v '^# pr-agent config' || true; } >"$tmp"
+  fi
+  {
+    echo '# pr-agent config v2'
+    for k in $SETTINGS; do
+      printf 'CFG_%s=%q\n' "$k" "${!k}"
+      case " $DISPLAY_SETTINGS " in
+        *" $k "*) [ "$(setting_src "$k")" = default ] && printf 'CFG_SRC_%s=default\n' "$k" ;;
+      esac
+    done
+  } >>"$tmp"
+  mv -f "$tmp" "$STATE_DIR/config"
 }
 
 log() {

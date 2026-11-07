@@ -400,6 +400,21 @@ try_release o 0.1.1
 eq "rc 0" "$RC" 0
 has "generated fallback" "$(cat "$GH_STUB_STATE/v0.1.1.notes")" 'generated'
 
+echo "== S30: update never rewrites the repo config =="
+new_repo u30 0.1.0
+seed_update 0.1.0 9.9.9
+mkdir -p "$T/upstate/repos/a__b"
+echo a__b >"$T/upstate/current"
+cat >"$T/upstate/repos/a__b/config" <<'CFG'
+# my note
+CFG_FUTURE=sparkles
+CFG_TITLE_LINES=3
+CFG
+ucsum="$(shasum "$T/upstate/repos/a__b/config" | cut -d' ' -f1)"
+try_update o "$T/upd/pr-agent"
+eq "update rc" "$RC" 0
+eq "config untouched by update" "$(shasum "$T/upstate/repos/a__b/config" | cut -d' ' -f1)" "$ucsum"
+
 echo
 echo "$pass passed, $fail failed"
 [ "$fail" -eq 0 ]
