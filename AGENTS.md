@@ -20,6 +20,7 @@
 | `tests/author_match.sh` | Extracted-function fixtures for case-insensitive author/login matching (jq only) |
 | `tests/title_wrap.sh` | Extracted-function fixtures for `wrap` — the status TITLE column's multi-line cell wrap (bash only) |
 | `tests/display-settings.sh` | Extracted-function fixtures for the settings resolver — precedence, `SRC_*` provenance, invalid-input notes (bash only) |
+| `tests/status_snapshot.sh` | Scratch-state + stubbed-`gh` fixtures for the status gather/snapshot/layout split — record data, ordering, pending counts without `seen` writes, layout purity, incomplete-snapshot rejection, concurrent gathers |
 | `AGENTS.md` | This file |
 
 ## Deploy model
@@ -46,7 +47,7 @@ was never released.
 
 ## Verify before committing
 
-Six scratch-repo harnesses cover what CI doesn't: `tests/smoke.sh`
+Seven scratch-repo harnesses cover what CI doesn't: `tests/smoke.sh`
 exercises the worktree-blocked lifecycle on local git alone;
 `tests/review_verdict.sh` runs the `PR_JQ` verdict derivation over fixture
 payloads; `tests/author_match.sh` lifts the author-matching jq out of
@@ -54,7 +55,9 @@ payloads; `tests/author_match.sh` lifts the author-matching jq out of
 drives the `release` state machine and `cmd_update` end-to-end with a
 stubbed `gh`; `tests/update-check.sh` extracts the update-check functions
 from `pr-agent` and exercises the stamp/throttle edge cases; `display-settings.sh`
-extracts the settings resolver and checks precedence/provenance/invalid inputs.
+extracts the settings resolver and checks precedence/provenance/invalid inputs;
+`tests/status_snapshot.sh` drives `_gather`/`_layout` over a scratch state dir
+and checks the snapshot contract + layout purity.
 Minimum checks:
 
 ```sh
@@ -66,6 +69,7 @@ tests/review_verdict.sh                # .review verdict derivation fixtures (no
 tests/author_match.sh                  # author/login matching fixtures (no gh)
 tests/title_wrap.sh                    # TITLE-cell wrap fixtures (no gh)
 tests/display-settings.sh              # settings precedence/provenance fixtures (no gh)
+tests/status_snapshot.sh               # gather/snapshot/layout fixtures (stubbed gh)
 ./tests/release.sh                     # release + update scenarios (run when `release` or `cmd_update` changes)
 ./tests/update-check.sh                # update-check edge cases (run when the check changes)
 cd /path/to/a/watched/repo             # then run READ-ONLY commands only:
@@ -104,11 +108,25 @@ the intent.
   at loop entry covers a deleted *launch* dir; repeating it at the top of
   `while` covers `repo_dir` itself being deleted mid-run — forked jobs in
   an unreachable cwd spam getcwd errors. Don't hoist the in-loop `cd`.
-- **`state_cell`/`review_cell` have side effects** — `state_cell` populates
-  the `H_*` hint buckets that drive the bottom "what now" line. A pre-pass
-  calls both once per PR (open pass, then done pass) and caches the cells in
+- **`state_cell`/`review_cell` still have a side effect** — they populate the
+  `H_*` hint buckets that drive the bottom "what now" line. `state_cell` is
+  otherwise pure: it reads the record's `S_*` snapshot fields (agent marker,
+  blocked/sync flags, skip, fail/round counters — `status_layout`'s pre-pass
+  sets them per record) and must never probe markers, `map.json`, `seen/`, or
+  `pr_info` — those reads belong to `status_gather`. The pre-pass calls both
+  cells once per record (open pass, then done pass) and caches the cells in
   the `o*` arrays for the draw loop — so the hint sees every tracked PR, not
   just the ones the screen shows.
+- **Status is gather → snapshot → pure layout.** `status_gather` is the only
+  side-effecting stage (enumerated in its comment: prs/pending/blocked-flag
+  cache refreshes + `map_init`); `status_layout` renders the frame from the
+  snapshot file alone — no `gh`/Devin calls, no worktree probes, no
+  config/map/seen writes — so `-w` repaints and resizes may repeat it freely.
+  Snapshot fields cross stages as `\x1f`-joined TSV rows (`IFS=$'\x1f'`,
+  non-whitespace — tab IFS would collapse empty fields); the layout clock is
+  frozen to `snapshot.now` via `SNOW` so repeat paints are byte-identical;
+  and empty `lines`/`meta_rec` arrays need a `${#a[@]} -gt 0` guard before
+  `"${a[@]}"` under bash 3.2 `set -u`.
 - **`state_cell` precedence is deliberate** — working/interrupted →
   merged/closed → `worktree_blocked` → `sync_blocked`/`sync_pending` →
   `skip_reason` (paused/round-limit/approved) → pending items → idle. The
@@ -128,19 +146,21 @@ the intent.
   shadow `CFG_INTERVAL` — inert on load, dropped on resave. Env/saved
   provenance writes no marker and stays authoritative. `status`/`config`/
   `update` never call `save_config`; fixtures check byte-identical configs.
-- **`render_status` draws every selected record — no fit-budget.** `TABLE_ROWS`
-  counts *records* (`0` = all render; `N` = first `N`, rest collapse into the
-  `… N more — TABLE_ROWS=N` row), and `TITLE_LINES` is a resolved user cap
-  that's **never** shrunk for screen fit — env → saved → mode default via
-  `apply_status_defaults` (interactive `0`, plain `3`, only when provenance is
-  `default`; a saved legacy `3` stays authoritative in `-w`). Overflow belongs
-  to the `-w` frame clip in `cmd_status`, which counts *physical* lines
-  (`phys_lines`, ANSI-stripped soft-wrap) and keeps the prefix that fits
-  `rows − 1`. TITLE cells wrap via `wrap` (result in `WRAP_LINES`) — the
-  first line is `title_w` wide, continuation lines span TITLE..last column
-  via `draw_span`. Column set is width-driven: SESSION needs `cols ≥ 125`;
-  below a usable `title_w` (~25) `LAST RUN` then `ROUNDS` drop out — keep
-  `fixed`/`n` in step when adding a column.
+- **The status table draws every selected record — no fit-budget.**
+  `TABLE_ROWS` counts *records* (`0` = all render; `N` = first `N`, rest
+  collapse into the `… N more — TABLE_ROWS=N` row), and `TITLE_LINES` is a
+  resolved user cap that's **never** shrunk for screen fit — env → saved →
+  mode default via `apply_status_defaults` (interactive `0`, plain `3`, only
+  when provenance is `default`; a saved legacy `3` stays authoritative in
+  `-w`). Overflow belongs to the `-w` frame clip in `cmd_status`, which counts
+  *physical* lines (`phys_lines`, ANSI-stripped soft-wrap) and keeps the
+  prefix that fits `rows − 1`. TITLE cells wrap via `wrap` (result in
+  `WRAP_LINES`) — the first line is `title_w` wide, continuation lines span
+  TITLE..last column via `draw_span`. Column set is width-driven: SESSION
+  needs `cols ≥ 125`; below a usable `title_w` (~25) `LAST RUN` then `ROUNDS`
+  drop out — keep `fixed`/`n` in step when adding a column. All of this is
+  layout-side: `status_layout` reads the resolved values from the snapshot's
+  `cfg` block, never the process env.
 - **`save_config` pins only `env`/`saved`-provenance keys.** `pr-agent on`
   snapshots `CFG_*` for the detached watcher, but a key still at its resolver
   `default` (or `mode-default`) stays unwritten — writing it would pin the
@@ -153,7 +173,8 @@ the intent.
   killing a pid, never after.
 - **`prs_extra.jsonl` is display-only.** It holds last-known PR objects for
   tracked PRs that aged out of `prs.jsonl`'s `--limit 100` window (backfilled
-  once each by `backfill_prs`, pruned by `gc --yes`). `pr_info` falls back to
+  once each by `backfill_prs` — merges serialized under `prs.lock` and
+  published tmp+`mv`, pruned by `gc --yes`). `pr_info` falls back to
   it so the status table keeps title/state, but `targets`/`pr_sig` must keep
   reading `prs.jsonl` alone — a stale OPEN entry would make a dead PR
   watchable forever, and a frozen `updated` would mask real changes.
@@ -183,7 +204,11 @@ the intent.
   `scope_label`'s `@all` check in step or the label disagrees with the
   filter. Fixtures: `tests/author_match.sh`.
 - **`seen/<pr>` keys are content-derived** (`id:body-len` / `id:updated_at`) —
-  an *edited* review or comment re-triggers. Don't switch to plain ids.
+  an *edited* review or comment re-triggers. Don't switch to plain ids. The
+  files are watcher-owned: `check_pr`/`mark-seen` write them via `seed_seen`;
+  status counting must use `status_pending_count` (an absent marker gets the
+  `last_seen_ts` cutoff applied in memory) — never `pending_feedback`, which
+  seeds on sight and would mask real news from the watcher.
 - **`worktree_blocked` is a last-known flag, refreshed locally.** `run_agent`
   sets it on `ensure_worktree` rc 4 and clears it on *any* other prep outcome
   (success or failure) so a stale flag can't mask real state. Freeing the
@@ -196,9 +221,10 @@ the intent.
   `repo_dir`/`branch`, moved/broken repo, `worktree list` failed) — callers
   keep flag + sig and skip on rc 2, because forcing a round on a repo we
   can't read would burn `fail_count`, the exact escalation class rc 4 exists
-  to avoid. `render_status` also re-probes flagged PRs (`refresh_blocked_flags`)
-  so the flag un-stales when the watcher is off, and `sync_scan watch` skips
-  flagged PRs since a blocked `check_sync` only defers anyway.
+  to avoid. `status_gather` also re-probes flagged PRs
+  (`refresh_blocked_flags`) so the flag un-stales when the watcher is off, and
+  `sync_scan watch` skips flagged PRs since a blocked `check_sync` only
+  defers anyway.
 - **Feedback `key` ≠ seen marker ≠ skip state.** Marking a key seen only stops
   *that* item; the PR may still have pending items.
 - **The `… N more` table row and the fallback `… N more lines` clip are
