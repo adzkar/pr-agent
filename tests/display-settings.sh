@@ -259,6 +259,15 @@ has "display marker reissued" "$O" 'CFG_SRC_TITLE_LINES=default'
 eq "post-resave state pins both" \
    "$("$T/mark.sh" "$d" | paste -sd'|' -)" 'INTERVAL=45(saved)|TITLE_LINES=3(default)'
 
+echo "-- only the tool's own config header is stripped --"
+d="$(cfg hdr '# pr-agent config notes
+# pr-agent config v9
+# pr-agent config')"
+O="$("$T/save.sh" "$d" '')"
+has "foreign header comment kept" "$O" '# pr-agent config notes'
+eq  "versioned headers managed" \
+    "$(printf '%s\n' "$O" | { grep -c '^# pr-agent config v[0-9]' || true; })" 1
+
 echo "-- resave is idempotent --"
 d="$(cfg idem '')"; rm "$d/config"
 "$T/save.sh" "$d" >/dev/null
