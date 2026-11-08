@@ -126,8 +126,9 @@ def env(extra=None):
     e.pop("NO_COLOR", None)
     e.pop("COLUMNS", None)          # stale exports must not poison winsize
     e.pop("LINES", None)
-    if extra:
-        e.update(extra)
+    e.pop("TMPDIR", None)           # ambient TMPDIR would route stub-mktemps
+    if extra:                       # outside MKTEMP_STUB_DIR, vacating the
+        e.update(extra)             # leak asserts
     return e
 
 
@@ -153,7 +154,10 @@ def finish(p, pid, secs=15):
     read a live snap and the child can't leak into the next scenario."""
     rc = p.wait(pid, secs)
     if rc is None:
-        os.killpg(pid, signal.SIGTERM)
+        try:
+            os.killpg(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass                    # child exited in the WNOHANG→kill gap
         p.wait(pid, 5)
     return rc
 
@@ -201,6 +205,7 @@ def norm_lflag(s):
 def s_nav():
     p = Pty(24, 80)
     wtmp = os.path.join(STATE, "wtmp-nav")
+    os.makedirs(wtmp)           # stub_leftovers([]) must mean empty, not absent
     pid = p.spawn('trap ":" INT; stty -g >"%s/tty.before"; "%s" status -w 60; '
                   'echo "rc=$?" >"%s/watch.rc"; stty -g >"%s/tty.after"'
                   % (STATE, TOOL, STATE, STATE), env({"MKTEMP_STUB_DIR": wtmp}))
@@ -275,6 +280,7 @@ def _restore_check(p, name):
 def s_sigint():
     p = Pty(24, 80)
     wtmp = os.path.join(STATE, "wtmp-sigint")
+    os.makedirs(wtmp)
     pid = p.spawn('trap ":" INT; stty -g >"%s/tty.before"; "%s" status -w 60; '
                   'echo "rc=$?" >"%s/watch.rc"; stty -g >"%s/tty.after"'
                   % (STATE, TOOL, STATE, STATE), env({"MKTEMP_STUB_DIR": wtmp}))
@@ -396,6 +402,7 @@ def s_badinterval():
     the alt screen, and empty must not hot re-gather on every input tick."""
     for arg, want in (("abc", b"refresh 5s"), (".5", b"refresh 5s"), ("008", b"refresh 8s")):
         wtmp = os.path.join(STATE, "wtmp-i" + arg.replace(".", "d"))
+        os.makedirs(wtmp)
         p = Pty(24, 80)
         pid = p.spawn('exec "%s" status -w %s' % (TOOL, arg),
                       env({"MKTEMP_STUB_DIR": wtmp}))
@@ -428,6 +435,7 @@ def s_retry_quit():
     """Broken jq -> status_gather emits nothing and the watch retries; the
     retry loop must poll input so q still exits (sleep-only loops hung)."""
     wtmp = os.path.join(STATE, "wtmp-retry")
+    os.makedirs(wtmp)
     badbin = os.path.join(STATE, "badbin")
     os.makedirs(badbin, exist_ok=True)
     jqpath = os.path.join(badbin, "jq")
@@ -455,18 +463,37 @@ def s_retry_quit():
 def s_sigint_mid_gather():
     """Signal mid-status_gather: gather-internal mktemps (recs/act/refresh
     tmps) must not leak — the watch runs mktemp under a private TMPDIR the
-    EXIT trap rm -rf's. A slow gh stretches the gather window wide enough to
-    land the signal inside it deterministically."""
+    EXIT trap rm -rf's. The window is stretched deterministically: numeric
+    targets make status_prs return six PRs, aged caches force refresh_prs +
+    refresh_status_pending, and a slow gh (0.4s/call) turns the per-PR
+    fetch_feedback fan-out into ~19 gh calls (~8s). The signal lands at
+    ~2s — asserted inside the window (no paint yet, gh.log growing)."""
     wtmp = os.path.join(STATE, "wtmp-midg")
+    os.makedirs(wtmp)
+    d = os.path.join(STATE, "repos", "test__pty")
+    # the gh stub replays this seed on `pr list` so refresh_prs repopulates;
+    # numeric targets make status_prs fan fetch_feedback out per PR
+    seed = os.path.join(STATE, "prs_seed.jsonl")
+    with open(seed, "w") as f:
+        for i in range(6):
+            f.write(json.dumps({
+                "number": 200 + i, "state": "OPEN", "title": "seed %d" % i,
+                "review": "APPROVED", "draft": False, "updated": "u",
+                "branch": "b", "head": "h", "base": "main",
+                "mergeable": "MERGEABLE", "ci": "pass", "ci_failed": [],
+                "author": "alice"}) + "\n")
+    old_targets = open(os.path.join(d, "targets")).read()
+    open(os.path.join(d, "targets"), "w").write("200 201 202 203 204 205\n")
     slowbin = os.path.join(STATE, "slowbin")
     os.makedirs(slowbin, exist_ok=True)
     ghpath = os.path.join(slowbin, "gh")
-    open(ghpath, "w").write('#!/usr/bin/env bash\nsleep 0.4\n'
-                          'printf "%%s\\n" "$*" >>"%s/gh.log"\nexit 0\n' % STATE)
+    open(ghpath, "w").write(
+        '#!/usr/bin/env bash\nsleep 0.4\nprintf "%%s\\n" "$*" >>"%s/gh.log"\n'
+        'case "$*" in *"pr list"*) cat "%s/prs_seed.jsonl" ;; esac\nexit 0\n'
+        % (STATE, STATE))
     os.chmod(ghpath, 0o755)
     e = env({"MKTEMP_STUB_DIR": wtmp})
     e["PATH"] = slowbin + ":" + e["PATH"]
-    d = os.path.join(STATE, "repos", "test__pty")
     for f in ("prs.jsonl", "status_pending"):   # age out -> refresh_* run real
         try:                                    # gather work (mktemp + gh calls)
             os.utime(os.path.join(d, f), (0, 0))
@@ -474,7 +501,14 @@ def s_sigint_mid_gather():
             pass
     p = Pty(24, 80)
     pid = p.spawn('exec "%s" status -w 60' % TOOL, e)
-    p.pump(1.5)                 # well inside the now-multi-second first gather
+    p.pump(2.0)
+    # loud precondition: the signal must land mid-gather — no paint emitted yet
+    # and the slow-gh fan-out already logging calls; otherwise this scenario
+    # degrades into s_sigint and passes vacuously
+    ok("signal lands mid-gather") \
+        if p.paints() == 0 and gh_calls() > 0 else \
+        bad("signal lands mid-gather",
+            "paints=%d gh=%d — gather window missed" % (p.paints(), gh_calls()))
     os.killpg(pid, signal.SIGINT)
     rc = p.wait(pid, 10)
     ok("mid-gather SIGINT exits 0") if rc == 0 else \
@@ -485,6 +519,7 @@ def s_sigint_mid_gather():
     left = stub_leftovers(wtmp)
     ok("mid-gather SIGINT leaves no tempfiles") if not left else \
         bad("mid-gather SIGINT leaves no tempfiles", left)
+    open(os.path.join(d, "targets"), "w").write(old_targets)
     p.close()
 
 
