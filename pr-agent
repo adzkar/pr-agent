@@ -2853,7 +2853,7 @@ status_watch() { # every -> the interactive two-axis status viewport (TTYs and
       clip_hint="make the terminal taller"
       [ "$TABLE_ROWS" -gt 0 ] && clip_hint="lower TABLE_ROWS or make the terminal taller"
       frame="${clipped%%$'\x02'*}"
-      frame="${frame}${C_DIM}… ${clipped##*$'\x02'} more lines — ${clip_hint}${C_RESET}"
+      frame+="$(trunc "${C_DIM}… ${clipped##*$'\x02'} more lines — ${clip_hint}${C_RESET}" "$cols")"
     else frame="$clipped"; fi
     printf '\033[H%s\033[0m\033[J' "${frame//$'\n'/$'\033[K\n'}"
     while true; do                        # input phase: keys until the repaint,
