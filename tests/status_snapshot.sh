@@ -137,6 +137,8 @@ check "no seen file created for #2"    "0" "$(ls "$D/seen" | grep -c '^2$' || tr
 check "seen/1 unchanged"               "$seen1_sum" "$(md5 -q "$D/seen/1")"
 check "map.json untouched"             "$map_sum" "$(md5 -q "$D/map.json")"
 check "status_pending written"         "2 1 1 1 4 0" "$(awk '{print $1, $2}' "$D/status_pending" | tr '\n' ' ' | sed 's/ $//')"
+check "pending stamp written"          "1" "$([ -f "$D/status_pending.ts" ] && echo 1 || echo 0)"
+check "pending_ts is the stamp"        "$(cat "$D/status_pending.ts")" "$(jq -r '.pending_ts' "$SNAP")"
 check "merged PR fetched no feedback"  "0" "$(grep -c 'pulls/3/\|issues/3/' "$GH_LOG" || true)"
 check "feedback fetched: 3x3 open PRs" "9" "$(wc -l <"$GH_LOG" | tr -d ' ')"
 
@@ -243,6 +245,7 @@ echo "status_snapshot: a bound-out PR keeps its prior pending count"
 # per-PR bound keeps the prior count line instead of stalling the whole phase
 printf '1 5\n2 7\n4 2\n' >"$D/status_pending"
 touch -t 202001010000 "$D/status_pending"     # stale -> refresh must run
+stamp0="$(cat "$D/status_pending.ts")"
 SECONDS=0
 SNAP_B="$(mktemp)"
 GH_SLOW_URL='/issues/2/comments' GH_SLOW_SECS=60 PR_AGENT_PENDING_TIMEOUT=1 \
@@ -252,6 +255,9 @@ check "bound-out pending keeps prior"  "7" "$(jq -r '.prs[] | select(.n==2) | .p
 check "prior count in refreshed file"  "2 7" "$(awk '$1 == 2' "$D/status_pending")"
 check "bounded pending phase prompt"   "1" "$([ "$el" -lt 30 ] && echo 1 || echo 0)"
 check "other PRs still recounted"      "1" "$(jq -r '.prs[] | select(.n==1) | .pending' "$SNAP_B")"
+check "stamp survives the bound-out"   "$stamp0" "$(cat "$D/status_pending.ts")"
+check "pending_ts is stamp, not mtime" "$stamp0" "$(jq -r '.pending_ts' "$SNAP_B")"
+check "stamp lags the republish mtime" "1" "$([ "$stamp0" -lt "$(stat -f %m "$D/status_pending")" ] && echo 1 || echo 0)"
 unset GH_SLOW_URL GH_SLOW_SECS PR_AGENT_PENDING_TIMEOUT
 
 echo

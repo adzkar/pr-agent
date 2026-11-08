@@ -56,6 +56,8 @@ Sections are delimited by `# --- name ---` banners, in file order:
     gh_error                   # exists ⇔ last refresh_prs failed
     cycle_active / last_cycle  # poll-in-progress marker / last poll epoch
     status_pending             # "pr count" lines — counted without seeding seen markers
+    status_pending.ts          # epoch of the last fully-recounted rebuild — a bound-out
+                               # republish keeps it behind, so it measures data freshness
     status_models              # "pr model" lines — last observed session-model evidence
     retry_cutoff               # ISO ts; bot failures older than this stay manual
     locks/<pr>                 # mkdir lock: a check_pr round is in flight
@@ -260,9 +262,11 @@ terminal loop; `status_gather` runs in exactly one bounded background worker:
   the live snapshot.
 - **Bounded sub-gathers.** `refresh_status_pending` wraps each PR's
   three-endpoint count in `run_bounded $PR_AGENT_PENDING_TIMEOUT` (default
-  15s — a stalled PR keeps its prior count), and `refresh_status_models`
-  wraps the whole model phase in `run_bounded $PR_AGENT_MODEL_TIMEOUT`
-  (default 10s — a hung source keeps prior evidence). `status_model_lookup`
+  15s — a stalled PR keeps its prior count, and the `status_pending.ts`
+  freshness stamp stays behind so the footer's age note still fires), and
+  `refresh_status_models` wraps the whole model phase in `run_bounded
+  $PR_AGENT_MODEL_TIMEOUT` (default 10s — a hung source keeps prior
+  evidence). `status_model_lookup`
   is the model-evidence seam: `PR_AGENT_MODEL_LOOKUP` names an external
   probe command today (test seam) and is where per-session model
   verification lands.

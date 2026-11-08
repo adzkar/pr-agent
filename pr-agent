@@ -1698,6 +1698,7 @@ fmt_ago() { # seconds -> 45s / 3m12s / 1h05m
 }
 
 STATUS_PENDING="$STATE_DIR/status_pending"
+STATUS_PENDING_TS="$STATE_DIR/status_pending.ts"   # epoch of the last fully-recounted rebuild
 STATUS_MODELS="$STATE_DIR/status_models"
 COL_W=() COLS='' NEXT_POLL='' CELL_T='' CELL_C=''
 WRAP_LINES=() WRAP_FULL=0 WRAP_W=()
@@ -2076,18 +2077,24 @@ refresh_status_pending() { # ttl -> recount unprocessed feedback per open PR unl
                            # keeps its prior count line, so one stalled endpoint can't
                            # hold the whole phase hostage; the file still publishes
                            # atomically (tmp+mv) — a killed phase keeps the old counts.
+                           # status_pending.ts stamps only a fully-recounted rebuild:
+                           # a bound-out republishes a carried count behind a fresh
+                           # mtime, so mtime can't measure data freshness — the stamp
+                           # stays behind and the footer's age note can still fire.
   if [ -f "$STATUS_PENDING" ] && [ $(( $(date +%s) - $(stat -f %m "$STATUS_PENDING") )) -lt "$1" ]; then return 0; fi
-  local tmp pr n bound; tmp="$(mktemp)"
+  local tmp pr n bound full=1; tmp="$(mktemp)"
   bound="${PR_AGENT_PENDING_TIMEOUT:-15}"
   [[ "$bound" =~ ^[0-9]+$ ]] || bound=15; bound=$((10#$bound)); [ "$bound" -lt 1 ] && bound=15
   for pr in $(status_prs); do
     [ "$(pr_info "$pr" state)" = "CLOSED" ] || [ "$(pr_info "$pr" state)" = "MERGED" ] && continue
     if ! n="$(run_bounded "$bound" status_pending_count "$pr")"; then
       n="$(awk -v n="$pr" '$1 == n { print $2; exit }' "$STATUS_PENDING" 2>/dev/null)"   # prior count stands
+      full=0
     fi
     echo "$pr ${n:-0}" >>"$tmp"
   done
   mv "$tmp" "$STATUS_PENDING"
+  if [ "$full" -eq 1 ]; then date +%s >"$STATUS_PENDING_TS" 2>/dev/null || true; fi
 }
 
 status_model_lookup() { # pr session_id -> observed model label ('' = unknown). Seam
@@ -2148,8 +2155,9 @@ last_run_epoch() { # pr -> epoch of the last finished agent run (map, falling ba
 #     stdout so results cross subshell/worker boundaries explicitly instead of relying on
 #     command-substitution globals surviving in the parent. Side effects, all enumerated:
 #       refresh_prs / backfill_prs → prs.jsonl, prs_extra.jsonl (locked merge), gh_error
-#       refresh_status_pending     → status_pending (counts via status_pending_count — no
-#                                    seen-marker writes; those belong to the watcher)
+#       refresh_status_pending     → status_pending + status_pending.ts (counts via
+#                                    status_pending_count — no seen-marker writes;
+#                                    those belong to the watcher)
 #       refresh_status_models      → status_models (bounded phase; prior file kept on
 #                                    bound-out — model lookups can never stall records)
 #       refresh_blocked_flags      → lock-protected worktree_blocked map_dels
@@ -2189,7 +2197,10 @@ status_gather() { # ttl -> status snapshot (JSON v1) on stdout — see the inven
 
   recs="$(mktemp)"; act="$(mktemp)"
   local pts=0 mts=0 model
-  [ -f "$STATUS_PENDING" ] && pts="$(stat -f %m "$STATUS_PENDING" 2>/dev/null || echo 0)"
+  if [ -f "$STATUS_PENDING" ]; then
+    pts="$(cat "$STATUS_PENDING_TS" 2>/dev/null || true)"   # last full recount —
+    [[ "$pts" =~ ^[0-9]+$ ]] || pts="$(stat -f %m "$STATUS_PENDING" 2>/dev/null || echo 0)"   # mtime: pre-stamp cache
+  fi
   [ -f "$STATUS_MODELS" ] && mts="$(stat -f %m "$STATUS_MODELS" 2>/dev/null || echo 0)"
   for num in $(status_prs); do
     info="$(pr_info "$num")"; [ -n "$info" ] || info='{}'
