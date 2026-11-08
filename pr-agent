@@ -2650,8 +2650,9 @@ status_key() { # -> KEY: up/down/left/right/pgup/pgdn/top/bot/hmin/hmax/quit/eof
                # instant failures: several empty reads inside one wall second
                # mean EOF (real ticks take ~1s each; a WINCH interruption resets
                # the count). ESC opens a small CSI/SS3 decoder — a byte that
-               # can't extend a known sequence is left in KEYBUF and dispatched
-               # as its own key next call, so ESC-then-q still quits.
+               # can't extend a known sequence is left in (or pushed back
+               # into) KEYBUF and dispatched as its own key next call, so
+               # ESC-then-q still quits.
   KEY=none
   local ch c p='' final=''
   if [ -n "$KEYBUF" ]; then ch="${KEYBUF:0:1}"; KEYBUF="${KEYBUF:1}"
@@ -2689,7 +2690,8 @@ status_key() { # -> KEY: up/down/left/right/pgup/pgdn/top/bot/hmin/hmax/quit/eof
                       5) KEY=pgup ;; 6) KEY=pgdn ;;
                       1|7) KEY=top ;; 4|8) KEY=bot ;;
                     esac ;;
-             esac ;;
+               ?) KEYBUF="$final$KEYBUF" ;;   # unknown final — requeue it to
+             esac ;;                          # dispatch as its own key next call
         O) KEYBUF="${KEYBUF:1}"
            [ -z "$KEYBUF" ] && keybuf_drain
            c="${KEYBUF:0:1}"; [ -n "$c" ] && KEYBUF="${KEYBUF:1}"
@@ -2697,6 +2699,7 @@ status_key() { # -> KEY: up/down/left/right/pgup/pgdn/top/bot/hmin/hmax/quit/eof
              A) KEY=up ;;   B) KEY=down ;;
              C) KEY=right ;; D) KEY=left ;;
              H) KEY=top ;;  F) KEY=bot ;;
+             ?) KEYBUF="$c$KEYBUF" ;;
            esac ;;
       esac ;;
   esac
