@@ -1698,6 +1698,8 @@ fmt_ago() { # seconds -> 45s / 3m12s / 1h05m
 }
 
 STATUS_PENDING="$STATE_DIR/status_pending"
+STATUS_PENDING_TS="$STATE_DIR/status_pending.ts"   # epoch of the last fully-recounted rebuild
+STATUS_MODELS="$STATE_DIR/status_models"
 COL_W=() COLS='' NEXT_POLL='' CELL_T='' CELL_C=''
 WRAP_LINES=() WRAP_FULL=0 WRAP_W=()
 SNOW=''   # snapshot epoch — status_layout freezes the relative-time helpers to it; empty = live clock
@@ -1709,7 +1711,7 @@ ST_BODYLINES=0 ST_VREG=0 ST_MAXVOFF=0 ST_MAXHOFF=0 ST_VOFF=0 ST_HOFF=0
 ST_MORE='' ST_MORE_F=0 ST_MORE_B=0 ST_FOOT=''
 ST_HEAD=() ST_TAIL=() ST_TBL=() ST_REC_N=() ST_REC_B=() ST_REC_C=() ST_REC_F=()
 # -w keyboard viewport state — EXIT-trap cleanup reads these, so globals only
-STTY_SAVE='' WATCH_TTY=0 WATCH_RESIZE=0 WATCH_SNAP='' WATCH_TMPD=''
+STTY_SAVE='' WATCH_TTY=0 WATCH_RESIZE=0 WATCH_SNAP='' WATCH_TMPD='' WATCH_WORKER=''
 KEY=none KEYBUF='' KEY_EOF_S='' KEY_EOF_N=0 ANCHOR_N='' ANCHOR_D=0 ANCHOR_C=0
 
 setup_colors() { # enable ANSI styling only when stdout is a terminal and NO_COLOR is unset
@@ -1995,6 +1997,60 @@ status_prs() { # -> PR numbers shown in status, most recent activity first: watc
     | sort_by(.t) | reverse | .[].n'
 }
 
+worker_tree() { # pid -> live descendants of pid, deepest first (pgrep -P walk).
+                # Collect while the worker still parents them — once it dies the
+                # children reparent to launchd and become invisible to -P.
+  local c
+  for c in $(pgrep -P "$1" 2>/dev/null || true); do
+    worker_tree "$c"; echo "$c"
+  done
+  return 0
+}
+
+worker_kill() { # pid -> cancel a dashboard-owned worker subtree and reap the
+                # worker: collect descendants first (the worker still anchors
+                # them), TERM the lot, resweep for anything forked mid-kill,
+                # then wait. Only pids collected while parented to the worker
+                # are touched — never watcher/agent processes.
+  local p="$1" kids i
+  for i in 1 2; do
+    kids="$(worker_tree "$p")"
+    [ -n "$kids" ] && kill -TERM $kids 2>/dev/null || true
+    kill -TERM "$p" 2>/dev/null || true
+  done
+  kids="$(worker_tree "$p")"
+  [ -n "$kids" ] && kill -KILL $kids 2>/dev/null || true
+  wait "$p" 2>/dev/null || true
+  return 0
+}
+
+run_bounded() { # secs cmd... -> run cmd as a background child bounded at secs;
+                # rc = the command's rc, 124 when the deadline TERM'd its
+                # subtree. BSD-safe — sleep+kill+wait, no GNU timeout needed.
+                # The killer's fds are detached: it must never inherit a
+                # command-substitution capture pipe — a held-open pipe blocks
+                # the caller's read, and its orphaned sleep would leak it for
+                # the full bound.
+  local secs="$1" pid rc=0 killer; shift
+  "$@" & pid=$!
+  ( sleep "$secs"; worker_kill "$pid" ) </dev/null >&- 2>&- &
+  killer=$!
+  wait "$pid" 2>/dev/null || rc=$?    # || — a TERM'd bound-out command returns
+  worker_kill "$killer"   # reaps the sleeper too — a bare kill orphans it mid-sleep
+                          # >128 and set -e must not abort the caller on it
+  [ "$rc" -gt 128 ] && return 124
+  return "$rc"
+}
+
+snapshot_valid() { # file -> 0 when the snapshot is complete enough to paint —
+                   # the gate every stage transition uses so a partial snapshot
+                   # is never published or laid out.
+  jq -e '(.v == 1) and (.now | type == "number") and (.repo | type == "string")
+         and (.watcher | type == "object") and (.cfg | type == "object")
+         and (.prs | type == "array") and (.activity | type == "array")' \
+    "$1" >/dev/null 2>&1
+}
+
 status_pending_count() { # pr -> unprocessed-feedback count as status reports it — never creates or
                          # rewrites seen/<pr> (the watcher owns those): when the marker is absent
                          # the legacy last_seen_ts cutoff is applied in memory, exactly the keys
@@ -2015,15 +2071,66 @@ status_pending_count() { # pr -> unprocessed-feedback count as status reports it
   echo "${n:-0}"
 }
 
-refresh_status_pending() { # ttl -> recount unprocessed feedback per open PR unless younger than ttl
+refresh_status_pending() { # ttl -> recount unprocessed feedback per open PR unless younger than ttl.
+                           # Each PR's three-endpoint fetch runs under run_bounded: a PR
+                           # that can't finish inside PR_AGENT_PENDING_TIMEOUT seconds
+                           # keeps its prior count line, so one stalled endpoint can't
+                           # hold the whole phase hostage; the file still publishes
+                           # atomically (tmp+mv) — a killed phase keeps the old counts.
+                           # status_pending.ts stamps only a fully-recounted rebuild:
+                           # a bound-out republishes a carried count behind a fresh
+                           # mtime, so mtime can't measure data freshness — the stamp
+                           # stays behind and the footer's age note can still fire.
   if [ -f "$STATUS_PENDING" ] && [ $(( $(date +%s) - $(stat -f %m "$STATUS_PENDING") )) -lt "$1" ]; then return 0; fi
-  local tmp pr n; tmp="$(mktemp)"
+  local tmp pr n bound full=1; tmp="$(mktemp)"
+  bound="${PR_AGENT_PENDING_TIMEOUT:-15}"
+  [[ "$bound" =~ ^[0-9]+$ ]] || bound=15; bound=$((10#$bound)); [ "$bound" -lt 1 ] && bound=15
   for pr in $(status_prs); do
     [ "$(pr_info "$pr" state)" = "CLOSED" ] || [ "$(pr_info "$pr" state)" = "MERGED" ] && continue
-    n="$(status_pending_count "$pr")"
-    echo "$pr $n" >>"$tmp"
+    if ! n="$(run_bounded "$bound" status_pending_count "$pr")"; then
+      n="$(awk -v n="$pr" '$1 == n { print $2; exit }' "$STATUS_PENDING" 2>/dev/null)"   # prior count stands
+      full=0
+    fi
+    echo "$pr ${n:-0}" >>"$tmp"
   done
   mv "$tmp" "$STATUS_PENDING"
+  if [ "$full" -eq 1 ]; then date +%s >"$STATUS_PENDING_TS" 2>/dev/null || true; fi
+}
+
+status_model_lookup() { # pr session_id -> observed model label ('' = unknown). Seam
+                        # for the session-model reporting issue (#42): today it surfaces
+                        # the map-recorded model only. PR_AGENT_MODEL_LOOKUP names an
+                        # external probe command (test seam) — refresh_status_models
+                        # wraps the whole phase in run_bounded, so a hung or slow
+                        # source keeps prior evidence and can never stall records.
+  local probe="${PR_AGENT_MODEL_LOOKUP:-}"
+  if [ -n "$probe" ]; then "$probe" "$1" "${2:-}" 2>/dev/null || true; return 0; fi
+  map_get "$1" model
+}
+
+status_models_collect() { # -> "pr model" lines for every record carrying a session_id
+  local num sid mdl
+  for num in $(status_prs); do
+    sid="$(map_get "$num" session_id)"
+    [ -n "$sid" ] || continue
+    mdl="$(status_model_lookup "$num" "$sid")"
+    [ -n "$mdl" ] && echo "$num $mdl"
+  done
+  return 0    # an empty list is success — the last loop's [ -n ] isn't the result
+}
+
+refresh_status_models() { # ttl -> refresh the session-model cache unless younger than
+                          # ttl (status_models: "pr model" lines, published tmp+mv like
+                          # the other shared caches). The whole phase is bounded at
+                          # PR_AGENT_MODEL_TIMEOUT seconds — a bound-out or failed
+                          # phase keeps the prior file, so a slow model source can
+                          # never hold back otherwise usable PR data.
+  if [ -f "$STATUS_MODELS" ] && [ $(( $(date +%s) - $(stat -f %m "$STATUS_MODELS") )) -lt "$1" ]; then return 0; fi
+  local tmp bound; tmp="$(mktemp)"
+  bound="${PR_AGENT_MODEL_TIMEOUT:-10}"
+  [[ "$bound" =~ ^[0-9]+$ ]] || bound=10; bound=$((10#$bound)); [ "$bound" -lt 1 ] && bound=10
+  if run_bounded "$bound" status_models_collect >"$tmp"; then mv "$tmp" "$STATUS_MODELS"
+  else rm -f "$tmp"; fi
 }
 
 refresh_blocked_flags() { # -> still_blocked re-probe per flagged PR so a freed branch un-stales the display when the watcher is off; rc 2 (indeterminate) keeps the flag
@@ -2048,8 +2155,11 @@ last_run_epoch() { # pr -> epoch of the last finished agent run (map, falling ba
 #     stdout so results cross subshell/worker boundaries explicitly instead of relying on
 #     command-substitution globals surviving in the parent. Side effects, all enumerated:
 #       refresh_prs / backfill_prs → prs.jsonl, prs_extra.jsonl (locked merge), gh_error
-#       refresh_status_pending     → status_pending (counts via status_pending_count — no
-#                                    seen-marker writes; those belong to the watcher)
+#       refresh_status_pending     → status_pending + status_pending.ts (counts via
+#                                    status_pending_count — no seen-marker writes;
+#                                    those belong to the watcher)
+#       refresh_status_models      → status_models (bounded phase; prior file kept on
+#                                    bound-out — model lookups can never stall records)
 #       refresh_blocked_flags      → lock-protected worktree_blocked map_dels
 #       map_init                   → creates map.json when absent
 #     Everything else is a read: map.json, targets, seen/, running/, locks/, watch.log,
@@ -2065,6 +2175,7 @@ status_gather() { # ttl -> status snapshot (JSON v1) on stdout — see the inven
   map_init
   refresh_prs "$1" || true
   refresh_status_pending "$1"
+  refresh_status_models "$1"
   refresh_blocked_flags
 
   local now running=0 pid='' launchd=0 cyc=0 last_cycle=0 t watch_lbl reacts extras=''
@@ -2085,9 +2196,17 @@ status_gather() { # ttl -> status snapshot (JSON v1) on stdout — see the inven
   upd="$(pending_update_version || true)"
 
   recs="$(mktemp)"; act="$(mktemp)"
+  local pts=0 mts=0 model
+  if [ -f "$STATUS_PENDING" ]; then
+    pts="$(cat "$STATUS_PENDING_TS" 2>/dev/null || true)"   # last full recount —
+    [[ "$pts" =~ ^[0-9]+$ ]] || pts="$(stat -f %m "$STATUS_PENDING" 2>/dev/null || echo 0)"   # mtime: pre-stamp cache
+  fi
+  [ -f "$STATUS_MODELS" ] && mts="$(stat -f %m "$STATUS_MODELS" 2>/dev/null || echo 0)"
   for num in $(status_prs); do
     info="$(pr_info "$num")"; [ -n "$info" ] || info='{}'
-    pending="$(awk -v n="$num" '$1 == n { print $2 }' "$STATUS_PENDING" 2>/dev/null)"
+    pending="$(awk -v n="$num" '$1 == n { print $2 }' "$STATUS_PENDING" 2>/dev/null || true)"
+    model="$(sed -n "s/^$num //p" "$STATUS_MODELS" 2>/dev/null | head -1 || true)"
+    [ -n "$model" ] || model="$(map_get "$num" model)"   # cache miss → map evidence
     agent='' astarted=0
     marker="$STATE_DIR/running/$num"
     if [ -f "$marker" ]; then
@@ -2104,7 +2223,7 @@ status_gather() { # ttl -> status snapshot (JSON v1) on stdout — see the inven
       --arg sync_blocked "$(map_get "$num" sync_blocked)" --arg sync_pending "$(map_get "$num" sync_pending)" \
       --arg skip "$skip" --arg agent "$agent" --arg agent_started "$astarted" \
       --arg session_id "$(map_get "$num" session_id)" --arg last_run "$lrun" \
-      --arg model "$(map_get "$num" model)" \
+      --arg model "$model" \
       '{n:$n,
         state: (if ($info.state // "") == "" then "OPEN" else $info.state end),
         title: ($info.title // ""), review: ($info.review // ""), draft: ($info.draft // false),
@@ -2124,8 +2243,10 @@ status_gather() { # ttl -> status snapshot (JSON v1) on stdout — see the inven
     --arg max_rounds "$MAX_ROUNDS" --arg max_fails "$MAX_FAILS" --arg retry_max "$RETRY_MAX" \
     --arg reacts "$reacts" --arg table_rows "$TABLE_ROWS" --arg activity_lines "$ACTIVITY_LINES" \
     --arg title_w "$TITLE_W" --arg title_lines "$TITLE_LINES" \
+    --argjson pending_ts "${pts:-0}" --argjson models_ts "${mts:-0}" \
     --slurpfile prs "$recs" --rawfile activity "$act" \
     '{v: 1, now: $now, repo: $repo, update: $update, gh_error: ($gh_err == "1"),
+      pending_ts: $pending_ts, models_ts: $models_ts,
       watcher: {running: ($running == "1"), pid: $pid, launchd: ($launchd == "1"),
                 cycle_active: ($cycle_active == "1"),
                 last_cycle: ($last_cycle | tonumber? // 0), interval: ($interval | tonumber? // 120)},
@@ -2138,6 +2259,49 @@ status_gather() { # ttl -> status snapshot (JSON v1) on stdout — see the inven
       prs: $prs,
       activity: ($activity | split("\n") | map(select(length > 0)))}'
   rm -f "$recs" "$act"
+}
+
+status_skeleton() { # -> the "loading" snapshot: live watcher/cfg reads, empty
+                    # prs/activity, loading:true. status -w paints it through the
+                    # normal layout path so the first frame is immediate instead
+                    # of waiting on the gather worker. Read-only like the layout
+                    # side — the field set mirrors status_gather's jq emission.
+  local now running=0 pid='' launchd=0 cyc=0 last_cycle=0 t watch_lbl reacts extras=''
+  local gh_err=0 upd
+  now="$(date +%s)"
+  if is_running; then running=1; pid="$(cat "$PID_FILE" 2>/dev/null)"; fi
+  [ -f "$LAUNCHD_PLIST" ] && launchd=1
+  [ -f "$STATE_DIR/cycle_active" ] && cyc=1
+  [ -f "$STATE_DIR/last_cycle" ] && last_cycle="$(cat "$STATE_DIR/last_cycle")"
+  t="$(cat "$STATE_DIR/targets" 2>/dev/null || echo all)"
+  if [ "$t" = "all" ] || [ -z "$t" ]; then watch_lbl="$(scope_label)"; else watch_lbl="$(hash_list "$t")"; fi
+  if [ -n "$AUTHOR_FILTER" ]; then reacts="$AUTHOR_FILTER"; else reacts="humans"; [ -n "$BOTS" ] && reacts+=" + $BOTS"; fi
+  [ "$SANDBOX" = "1" ] && extras+=" · sandbox"
+  [ "$CI_TRIGGER" = "1" ] && extras+=" · CI"
+  [ "$CONFLICT_TRIGGER" = "1" ] && extras+=" · conflicts"
+  [ "$MAIN_SYNC" = "1" ] && extras+=" · main-sync"
+  [ -f "$STATE_DIR/gh_error" ] && gh_err=1
+  upd="$(pending_update_version || true)"
+  jq -n --argjson now "$now" --arg repo "$(repo)" --arg update "$upd" \
+    --arg running "$running" --arg pid "$pid" --arg launchd "$launchd" \
+    --arg cycle_active "$cyc" --arg last_cycle "$last_cycle" --arg gh_err "$gh_err" \
+    --arg watch "$watch_lbl" --arg interval "$INTERVAL" --arg perm_mode "$PERM_MODE" \
+    --arg extras "$extras" --arg concurrency "$CONCURRENCY" \
+    --arg max_rounds "$MAX_ROUNDS" --arg max_fails "$MAX_FAILS" --arg retry_max "$RETRY_MAX" \
+    --arg reacts "$reacts" --arg table_rows "$TABLE_ROWS" --arg activity_lines "$ACTIVITY_LINES" \
+    --arg title_w "$TITLE_W" --arg title_lines "$TITLE_LINES" \
+    '{v: 1, now: $now, repo: $repo, update: $update, gh_error: ($gh_err == "1"),
+      loading: true, pending_ts: 0, models_ts: 0,
+      watcher: {running: ($running == "1"), pid: $pid, launchd: ($launchd == "1"),
+                cycle_active: ($cycle_active == "1"),
+                last_cycle: ($last_cycle | tonumber? // 0), interval: ($interval | tonumber? // 120)},
+      watch: $watch,
+      cfg: {perm_mode: $perm_mode, extras: $extras, concurrency: ($concurrency | tonumber? // 2),
+            max_rounds: ($max_rounds | tonumber? // 10), max_fails: ($max_fails | tonumber? // 3),
+            retry_max: ($retry_max | tonumber? // 3), reacts: $reacts,
+            table_rows: ($table_rows | tonumber? // 0), activity_lines: ($activity_lines | tonumber? // 6),
+            title_w: ($title_w | tonumber? // 0), title_lines: ($title_lines | tonumber? // 3)},
+      prs: [], activity: []}'
 }
 
 review_cell() { # reviewDecision isDraft -> sets CELL_T / CELL_C
@@ -2267,7 +2431,7 @@ render_hint() { # running -> one contextual "what now" line
   printf '%s\n' "$hint"
 }
 
-status_table() { # snapshot-file cols [term-rows [watch-every]] -> builds the frame's
+status_table() { # snapshot-file cols [term-rows [watch-every [live]]] -> builds the frame's
                   # fixed and scrollable parts into ST_* globals. Pure — renders only
                   # from the snapshot: no gh/Devin calls, no worktree probes, no
                   # config/map/seen writes, so repaints and resizes may rebuild it
@@ -2284,22 +2448,25 @@ status_table() { # snapshot-file cols [term-rows [watch-every]] -> builds the fr
                   # back as ST_REC_N/ST_REC_B/ST_REC_C/ST_REC_F (+ ST_MORE* cap row).
                   # ST_MODE: table | empty | compact. All settings read the snapshot's
                   # cfg block, never the process env; the clock freezes to .now.
-  local snap="$1" cols="$2" term_rows="${3:-}" every="${4:-}"
-  jq -e '(.v == 1) and (.now | type == "number") and (.repo | type == "string")
-         and (.watcher | type == "object") and (.cfg | type == "object")
-         and (.prs | type == "array") and (.activity | type == "array")' \
-    "$snap" >/dev/null 2>&1 || die "status snapshot incomplete — gather it again"
+                  # `live` is the watch's refresh state — live|refreshing|stale|
+                  # loading|retry — it only shapes the -w footer; plain callers
+                  # leave it empty.
+  local snap="$1" cols="$2" term_rows="${3:-}" every="${4:-}" live="${5:-}"
+  snapshot_valid "$snap" || die "status snapshot incomplete — gather it again"
 
   # resolved settings + clock frozen to the snapshot so repeated paints stay identical
   local SNOW repo_n upd gh_err watch_lbl w_run w_pid w_launchd w_cyc w_last
+  local loading p_ts m_ts
   local PERM_MODE INTERVAL CONCURRENCY MAX_ROUNDS MAX_FAILS RETRY_MAX \
         TABLE_ROWS ACTIVITY_LINES TITLE_W TITLE_LINES reacts extras
   # \x1f is a non-whitespace IFS — empty fields survive the read (tab would collapse them)
   IFS=$'\x1f' read -r SNOW repo_n upd gh_err watch_lbl w_run w_pid w_launchd w_cyc w_last INTERVAL \
+                  loading p_ts m_ts \
     <<<"$(jq -r '[.now, .repo, .update, (.gh_error | tostring), .watch,
                  (.watcher.running | tostring), .watcher.pid, (.watcher.launchd | tostring),
                  (.watcher.cycle_active | tostring), (.watcher.last_cycle | tostring),
-                 (.watcher.interval | tostring)] | join("\u001f")' "$snap")"
+                 (.watcher.interval | tostring), ((.loading // false) | tostring),
+                 ((.pending_ts // 0) | tostring), ((.models_ts // 0) | tostring)] | join("\u001f")' "$snap")"
   IFS=$'\x1f' read -r PERM_MODE extras CONCURRENCY MAX_ROUNDS MAX_FAILS RETRY_MAX reacts \
                  TABLE_ROWS ACTIVITY_LINES TITLE_W TITLE_LINES \
     <<<"$(jq -r '[.cfg.perm_mode, .cfg.extras, (.cfg.concurrency | tostring),
@@ -2333,7 +2500,46 @@ status_table() { # snapshot-file cols [term-rows [watch-every]] -> builds the fr
   [ "$gh_err" = "true" ] && gherr_line="${C_YELLOW}⚠ couldn't reach GitHub — showing cached data (check: gh auth status)${C_RESET}"
 
   if [ -n "$every" ]; then   # -w: the live footer doubles as the fixed controls
-    foot_line="${C_DIM}live · refresh ${every}s · updated $(date +%H:%M:%S) · ${C_BOLD}↑↓/jk ←→/hl PgUp/PgDn g/G 0/\$${C_RESET}${C_DIM} · ${C_BOLD}q${C_RESET}${C_DIM} quit${C_RESET}"
+    # `updated` reports the snapshot's own clock (data time), not the paint's —
+    # a stale or refreshing frame must not look freshly fetched. `live` comes
+    # from the watch: refreshing while a worker is out, stale when the last
+    # attempt failed or hit its bound, loading/retry before the first data.
+    local ftime data_age p_age m_age fresh
+    ftime="$(date -r "$SNOW" +%H:%M:%S 2>/dev/null || date +%H:%M:%S)"
+    data_age=$(( $(date +%s) - SNOW )); [ "$data_age" -lt 0 ] && data_age=0
+    case "$live" in
+      loading)    foot_line="${C_DIM}… gathering status${C_RESET}${C_DIM} · refresh ${every}s${C_RESET}" ;;
+      retry)      foot_line="${C_YELLOW}⚠ gather failed — retrying${C_RESET}" ;;
+      refreshing) foot_line="${C_DIM}live · refresh ${every}s${C_RESET}" ;;
+      stale)      foot_line="${C_YELLOW}⚠ refresh failed${C_RESET}" ;;
+      *)          foot_line="${C_DIM}live · refresh ${every}s · updated ${ftime}${C_RESET}" ;;
+    esac
+    # the controls are the footer's fixed half — they land before the variable
+    # state/cache notes so trunc drops a note, never the help, in exactly the
+    # annotated states where the help matters most (annotated bases stay short
+    # so base + controls + the state note still fit at 80 cols)
+    foot_line+="${C_DIM} · ${C_BOLD}↑↓/jk ←→/hl PgUp/PgDn g/G 0/\$${C_RESET}${C_DIM} · ${C_BOLD}q${C_RESET}${C_DIM} quit${C_RESET}"
+    case "$live" in
+      refreshing) foot_line+="${C_DIM} · ${C_CYAN}↻ refreshing${C_RESET}" ;;
+      stale)      foot_line+="${C_DIM} · data $(fmt_ago "$data_age") old${C_RESET}" ;;
+    esac
+    # freshness notes for the shared caches: past ~2 refresh cycles old means
+    # the bounded refresh couldn't replace them and prior data is being shown.
+    # A cycle is the slower of the watch interval and the caches' own 30s ttl —
+    # under -w N the caches legitimately age to N between gathers, so a flat
+    # 60s would flag a healthy -w 300 for most of every cycle.
+    fresh=60
+    [[ "$every" =~ ^[0-9]+$ ]] && [ "$every" -gt 30 ] 2>/dev/null && fresh=$(( 2 * every ))
+    p_age=0; m_age=0
+    [ "${p_ts:-0}" -gt 0 ] 2>/dev/null && p_age=$(( $(date +%s) - p_ts ))
+    [ "${m_ts:-0}" -gt 0 ] 2>/dev/null && m_age=$(( $(date +%s) - m_ts ))
+    case "$live" in
+      loading|retry) ;;
+      *) [ "$p_age" -gt "$fresh" ] 2>/dev/null && \
+           foot_line+="${C_DIM} · counts $(fmt_ago "$p_age") old${C_RESET}"
+         [ "$m_age" -gt "$fresh" ] 2>/dev/null && \
+           foot_line+="${C_DIM} · model $(fmt_ago "$m_age") old${C_RESET}" ;;
+    esac
   fi                           # line — kept short so it stays one physical line
   if [ "$ACTIVITY_LINES" -gt 0 ]; then
     act_hdr="${C_BOLD}recent activity${C_RESET}${C_DIM}  (full log: pr-agent logs · agent transcript: pr-agent logs N)${C_RESET}"
@@ -2416,7 +2622,11 @@ status_table() { # snapshot-file cols [term-rows [watch-every]] -> builds the fr
 
   if [ "${#lines[@]}" -eq 0 ]; then
     ST_MODE=empty   # defined no-anchor state: no records, no scroll geometry
-    ST_HEAD+=( "${C_DIM}no PRs to show — no open non-draft PRs and no agent history yet${C_RESET}" )
+    if [ "$loading" = "true" ]; then
+      ST_HEAD+=( "$(trunc "${C_DIM}gathering status — the first snapshot is on its way…${C_RESET}" "$cols")" )
+    else
+      ST_HEAD+=( "$(trunc "${C_DIM}no PRs to show — no open non-draft PRs and no agent history yet${C_RESET}" "$cols")" )
+    fi
   else
     # measure every cell once (headings included) — metadata columns get their true
     # content width so long agent states and model ids stay reachable off-screen
@@ -2550,13 +2760,13 @@ status_table() { # snapshot-file cols [term-rows [watch-every]] -> builds the fr
 
   ST_TAIL+=( '' )
   if [ "$act_n" -gt 0 ]; then
-    ST_TAIL+=( "$act_hdr" )
+    ST_TAIL+=( "$(trunc "$act_hdr" "$cols")" )
     local ev
     while IFS= read -r ev; do ST_TAIL+=( "$ev" ); done \
       < <(jq -r '.activity[]?' "$snap" | recent_events "$act_n" "$cols")
     ST_TAIL+=( '' )
   fi
-  ST_TAIL+=( "$hint_line" )
+  ST_TAIL+=( "$(trunc "$hint_line" "$cols")" )
 }
 
 status_view() { # cols every hoff voff -> one frame (stdout) composed from the ST_*
@@ -2601,13 +2811,14 @@ status_meta() { # meta-out -> geometry + per-record anchors (jsonl) from the ST_
   } >"$out" 2>/dev/null || true
 }
 
-status_layout() { # snapshot-file cols [term-rows [watch-every [meta-out [hoff [voff]]]]] ->
+status_layout() { # snapshot-file cols [term-rows [watch-every [meta-out [hoff [voff [live]]]]]] ->
                   # the status frame, rendered purely from the snapshot: build
                   # (status_table) then paint (status_view). watch-every non-empty
                   # bounds the viewport — pinned rules, frozen PR gutter, body
                   # window [voff, voff+vreg) at hoff — while plain status prints
                   # the whole logical table; meta-out gets the scroll anchors.
-  status_table "$1" "$2" "${3:-}" "${4:-}"
+                  # live is the watch's refresh-state word for the footer.
+  status_table "$1" "$2" "${3:-}" "${4:-}" "${8:-}"
   status_view "$2" "${4:-}" "${6:-0}" "${7:-0}"
   [ -z "${5:-}" ] || status_meta "$5"
   return 0
@@ -2621,16 +2832,18 @@ status_interactive() { # -> 0 when -w can drive the keyboard viewport: usable
 }
 
 status_tty_restore() { # EXIT-trap terminal restore — reads globals only (function
-                       # locals are already unwound when EXIT fires): saved
-                       # termios, cursor visibility, the alt screen, the watch
-                       # snapshot + its private TMPDIR. Idempotent. Emit to
-                       # /dev/tty, never stdout: a signal caught mid
-                       # `status_gather >"$snap.new"` makes the trap inherit
-                       # the interrupted redirect, and plain-stdout sequences
-                       # would land in the snapshot instead of the terminal.
+                       # locals are already unwound when EXIT fires): cancel the
+                       # in-flight gather worker subtree (WATCH_WORKER — the
+                       # dashboard's own children only, never watcher/agent
+                       # processes), the saved termios, cursor visibility, the
+                       # alt screen, the watch snapshot + its private TMPDIR.
+                       # Idempotent. Emit to /dev/tty, never stdout: nothing may
+                       # leak control sequences into a redirected stdout.
   [ "${WATCH_TTY:-0}" = "1" ] || return 0
   WATCH_TTY=0
-  [ -n "${WATCH_SNAP:-}" ] && rm -f "$WATCH_SNAP" "$WATCH_SNAP.new"; WATCH_SNAP=''
+  trap '' INT TERM HUP 2>/dev/null || true   # cleanup runs to completion — a second
+  [ -n "${WATCH_WORKER:-}" ] && { worker_kill "$WATCH_WORKER"; WATCH_WORKER=''; }  # signal can't re-enter
+  [ -n "${WATCH_SNAP:-}" ] && rm -f "$WATCH_SNAP" "$WATCH_SNAP.new" "$WATCH_SNAP.done"; WATCH_SNAP=''
   [ -n "${WATCH_TMPD:-}" ] && rm -rf "$WATCH_TMPD"; WATCH_TMPD=''
   [ -n "${STTY_SAVE:-}" ] && stty "$STTY_SAVE" </dev/tty 2>/dev/null
   { tput cnorm 2>/dev/null; tput rmcup 2>/dev/null || printf '\033[?1049l'; } >/dev/tty 2>/dev/null || true
@@ -2795,47 +3008,84 @@ key_nav() { # KEY -> applies one navigation key to the caller's voff/hoff (bash
 }
 
 status_watch() { # every -> the interactive two-axis status viewport (TTYs and
-                 # terminal controls already verified). The loop owns the
-                 # snapshot, voff/hoff and the anchor: status_gather runs only on
-                 # the refresh deadline; status_table rebuilds on gather or
-                 # resize; status_view repaints the cached build per keypress —
-                 # navigation never fetches, probes, or writes state. Returns on
-                 # q, EOF, or a signal; the EXIT trap restores the terminal.
+                 # terminal controls already verified). Refresh is asynchronous:
+                 # status_gather runs in a single background worker that writes
+                 # snap.new and publishes snap.done (the explicit transfer point);
+                 # the parent loop only adopts a completed, valid snapshot — so a
+                 # delayed, hung, or failing gather never blocks keys, resize,
+                 # repaint, q, or a real SIGINT. The worker is bounded at
+                 # PR_AGENT_GATHER_TIMEOUT seconds; expiry kills its subtree and
+                 # the last good snapshot stays on screen marked stale. Before
+                 # the first data lands the skeleton snapshot paints a loading
+                 # frame. status_table rebuilds on adoption/resize; status_view
+                 # repaints the cached build per keypress — navigation never
+                 # fetches, probes, or writes state. Returns on q, EOF, or a
+                 # signal; the EXIT trap kills the worker and restores the tty.
   local every="$1"
-  local snap cols rows frame clipped clip_hint next_gather=0 watch_tmpd
+  local snap skel cols rows frame clipped clip_hint next_gather=0 watch_tmpd
   local voff=0 hoff=0 gather=1 rebuild=1 old_order='' aremode=refresh
   local last_cols='' last_rows='' every_i="${every%.*}"
+  local w_pid='' w_deadline=0 w_new='' w_done='' w_rc=0 have_snap=0 last_fail=0
+  local g_to live psnap
   STTY_SAVE="$(stty -g 2>/dev/null)" || return 1
   WATCH_TTY=1
   trap status_tty_restore EXIT
-  trap 'exit 0' INT TERM HUP
+  # deferred signals: the trap only sets a flag — the input loop maps it onto
+  # the ordinary quit path, so the kill/restore work never runs in signal
+  # context (bash 3.2 re-entering wait/process-sub inside a trap segfaults)
+  trap 'WATCH_SIG=1' INT TERM HUP
   trap 'WATCH_RESIZE=1' WINCH
   tput smcup 2>/dev/null || printf '\033[?1049h' # alt screen: repaints stay out of scrollback
   tput civis 2>/dev/null
   stty -icanon -echo 2>/dev/null      # VMIN=1 VTIME=0; ISIG kept — ^C stays a signal
   printf '\033[2J'
-  # private TMPDIR for the watch's lifetime: every mktemp downstream (the snap
-  # plus gather-internal recs/act/refresh tmps) lands inside, so the EXIT trap
-  # removes them all even when a signal lands mid-status_gather
+  # private TMPDIR for the watch's lifetime: every mktemp downstream (the snap,
+  # worker .new/.done transfer files, and gather-internal recs/act/refresh tmps)
+  # lands inside, so the EXIT trap removes them all even when a signal lands
+  # mid-gather
   watch_tmpd="$(mktemp -d)"; WATCH_TMPD="$watch_tmpd"; TMPDIR="$watch_tmpd"; export TMPDIR
   snap="$(mktemp)"; WATCH_SNAP="$snap"; KEYBUF=''
+  w_new="$snap.new"; w_done="$snap.done"
+  skel="$(mktemp)"; status_skeleton >"$skel" 2>/dev/null || : >"$skel"
   [[ "$every_i" =~ ^[0-9]+$ ]] || every_i=5   # garbage interval -> the -w default
   every_i=$((10#$every_i))                    # digits only, or 008 trips octal math
   [ "$every_i" -lt 1 ] && every_i=1
+  g_to="${PR_AGENT_GATHER_TIMEOUT:-60}"       # worker bound — env-tunable, not a
+  [[ "$g_to" =~ ^[0-9]+$ ]] || g_to=60; g_to=$((10#$g_to)); [ "$g_to" -lt 1 ] && g_to=60
+  # safe ST_* defaults so status_view can paint an empty frame even when no
+  # snapshot (or skeleton) has ever built (e.g. jq unusable — q must still work)
+  ST_HEAD=() ST_TAIL=() ST_TBL=() ST_FOOT='' ST_MODE=empty ST_GUTTER=0
+  ST_VREG=0 ST_MAXVOFF=0 ST_MAXHOFF=0 ST_VOFF=0 ST_HOFF=0
   while true; do
-    if [ "$gather" -eq 1 ]; then
-      old_order="${ST_REC_N[*]-}"          # the order the user last saw — the
-      if status_gather 30 >"$snap.new" 2>/dev/null && [ -s "$snap.new" ]; then
-        mv -f "$snap.new" "$snap"          # eviction fallback walks it on refresh
-        gather=0; rebuild=1; aremode=refresh
-        next_gather=$(( $(date +%s) + every_i ))
+    # refresh deadline -> spawn the one allowed worker (snap.new + snap.done is
+    # the transfer mechanism: nothing reads the new snapshot before .done lands)
+    if [ "$gather" -eq 1 ] && [ -z "$w_pid" ]; then
+      rm -f "$w_new" "$w_done"
+      ( set +e
+        status_gather 30 >"$w_new" 2>/dev/null
+        echo "$?" >"$w_done.tmp"; mv -f "$w_done.tmp" "$w_done" 2>/dev/null || true
+      ) </dev/null &
+      w_pid=$!; WATCH_WORKER="$w_pid"
+      w_deadline=$(( $(date +%s) + g_to ))
+      next_gather=$(( $(date +%s) + every_i ))
+      gather=0; rebuild=1                    # repaint now: footer flips to refreshing
+    fi
+    # adopt a completed snapshot, or bound out a worker that overran its deadline
+    if [ -n "$w_pid" ] && [ -f "$w_done" ]; then
+      w_rc="$(cat "$w_done" 2>/dev/null || echo 1)"; rm -f "$w_done"
+      wait "$w_pid" 2>/dev/null || true; w_pid=''; WATCH_WORKER=''
+      old_order="${ST_REC_N[*]-}"            # the order the user last saw — the
+      if [ "$w_rc" = "0" ] && [ -s "$w_new" ] && snapshot_valid "$w_new"; then
+        mv -f "$w_new" "$snap"               # eviction fallback walks it on refresh
+        have_snap=1; last_fail=0
       else
-        rm -f "$snap.new"
-        if [ -s "$snap" ]; then gather=0; next_gather=$(( $(date +%s) + every_i ))
-        else status_key                  # no snapshot yet — retry on the input
-          case "$KEY" in eof|quit) rm -f "$snap"; return 0 ;; esac
-          continue; fi                   # tick so q/EOF still get through
+        rm -f "$w_new"; last_fail="$(date +%s)"
       fi
+      next_gather=$(( $(date +%s) + every_i )); rebuild=1; aremode=refresh
+    elif [ -n "$w_pid" ] && [ "$(date +%s)" -ge "$w_deadline" ]; then
+      worker_kill "$w_pid"; w_pid=''; WATCH_WORKER=''
+      rm -f "$w_new" "$w_done"; last_fail="$(date +%s)"
+      next_gather=$(( $(date +%s) + every_i )); rebuild=1
     fi
     cols="$(term_cols)"; rows="$(term_lines)"
     if [ "$WATCH_RESIZE" = "1" ]; then WATCH_RESIZE=0; rebuild=1; aremode=resize
@@ -2843,9 +3093,21 @@ status_watch() { # every -> the interactive two-axis status viewport (TTYs and
       [ -n "$last_cols" ] && { rebuild=1; aremode=resize; }   # WINCH missed — geometry moved
     fi
     last_cols="$cols"; last_rows="$rows"
+    # the refresh-state word for the footer: skeleton until first data, then
+    # live/refreshing/stale as workers land, run, and miss
+    if [ "$have_snap" -eq 0 ]; then
+      [ "$last_fail" -gt 0 ] && live=retry || live=loading
+    elif [ -n "$w_pid" ]; then live=refreshing
+    elif [ "$last_fail" -gt 0 ]; then live=stale
+    else live=live; fi
     if [ "$rebuild" -eq 1 ]; then
-      status_table "$snap" "$cols" "$rows" "$every_i"
-      voff="$(status_anchor "$ANCHOR_N" "$ANCHOR_D" "$([ "$aremode" = resize ] && echo "$ANCHOR_C" || echo 0)" "$old_order" "$voff")"
+      psnap=''
+      [ "$have_snap" -eq 1 ] && psnap="$snap"
+      [ -z "$psnap" ] && [ -s "$skel" ] && snapshot_valid "$skel" && psnap="$skel"
+      if [ -n "$psnap" ]; then
+        status_table "$psnap" "$cols" "$rows" "$every_i" "$live"
+        voff="$(status_anchor "$ANCHOR_N" "$ANCHOR_D" "$([ "$aremode" = resize ] && echo "$ANCHOR_C" || echo 0)" "$old_order" "$voff")"
+      fi
       rebuild=0
     fi
     # status_view runs in $() — its ST_HOFF/ST_VOFF clamps die in the subshell,
@@ -2865,15 +3127,27 @@ status_watch() { # every -> the interactive two-axis status viewport (TTYs and
       frame+="$(trunc "${C_DIM}… ${clipped##*$'\x02'} more lines — ${clip_hint}${C_RESET}" "$cols")"
     else frame="$clipped"; fi
     printf '\033[H%s\033[0m\033[J' "${frame//$'\n'/$'\033[K\n'}"
-    while true; do                        # input phase: keys until the repaint,
-      status_key                          # resize or refresh deadline breaks it
-      case "$KEY" in eof|quit) rm -f "$snap"; return 0 ;; esac
+    while true; do                        # input phase: keys until a repaint,
+      status_key                          # resize, worker completion/bound, or
+      [ "${WATCH_SIG:-0}" = "1" ] && KEY=quit   # refresh deadline breaks the phase
+      case "$KEY" in eof|quit)            # a caught signal quits like q — worker
+        [ -n "$w_pid" ] && { worker_kill "$w_pid"; w_pid=''; WATCH_WORKER=''; }
+        rm -f "$snap"; return 0 ;; esac   # killed + tty restored, never in a trap
+      # apply the key's offset move first so an event break can't swallow it;
+      # then worker events and the absolute refresh deadline break BEFORE a
+      # plain nav repaint — a sustained key stream must not postpone them
+      local nav=0
+      key_nav "$KEY" && nav=1
+      [ "${WATCH_RESIZE:-0}" = "1" ] && break
+      [ -n "$w_pid" ] && [ -f "$w_done" ] && break        # adopt on the next pass
+      [ -n "$w_pid" ] && [ "$(date +%s)" -ge "$w_deadline" ] && break
+      # deadline breaks only when no worker is out — otherwise this check would
+      # fire every pass while a slow gather runs, spinning the repaint loop
+      [ -z "$w_pid" ] && [ "$(date +%s)" -ge "$next_gather" ] && { gather=1; break; }
       # nav key → repaint; queued repeats surface on the next iterations —
       # a pending byte makes read -n1 return instantly, so bursts process
       # at full speed without a poll primitive (bash 3.2 has none)
-      key_nav "$KEY" && break
-      [ "${WATCH_RESIZE:-0}" = "1" ] && break
-      [ "$(date +%s)" -ge "$next_gather" ] && { gather=1; break; }
+      [ "$nav" -eq 1 ] && break
     done
   done
 }
@@ -2951,8 +3225,8 @@ case "${1:-}" in
   _ensure)   shift; need_repo; map_init; ensure_worktree "$@" ;;   # internal — test/smoke.sh drives these
   _blocked)  shift; need_repo; still_blocked "$@" ;;               # internal — rc 0 blocked / 1 free / 2 indeterminate
   _gather)   shift; need_repo; status_gather "${1:-0}" ;;          # internal — prints the status snapshot (JSON)
-  _layout)   shift; [ -f "${1:-}" ] || die "usage: pr-agent _layout SNAPSHOT [COLS [ROWS [EVERY [META_OUT [HOFF [VOFF]]]]]]"
-             setup_colors; status_layout "$1" "${2:-$(term_cols)}" "${3:-}" "${4:-}" "${5:-}" "${6:-0}" "${7:-0}" ;;
+  _layout)   shift; [ -f "${1:-}" ] || die "usage: pr-agent _layout SNAPSHOT [COLS [ROWS [EVERY [META_OUT [HOFF [VOFF [LIVE]]]]]]]"
+             setup_colors; status_layout "$1" "${2:-$(term_cols)}" "${3:-}" "${4:-}" "${5:-}" "${6:-0}" "${7:-0}" "${8:-}" ;;
   attach)    shift; need_repo; cmd_attach "$@" ;;
   peek)      shift; cmd_peek "$@" ;;
   mark-seen) shift; cmd_mark_seen "$@" ;;

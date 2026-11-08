@@ -12,7 +12,9 @@ trap 'rm -rf "$T"' EXIT
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 sed -n '/^keybuf_drain()/,/^}/p;/^status_key()/,/^}/p;/^key_nav()/,/^}/p;
-        /^status_anchor()/,/^}/p;/^anchor_update()/,/^}/p' \
+        /^status_anchor()/,/^}/p;/^anchor_update()/,/^}/p;
+        /^worker_tree()/,/^}/p;/^worker_kill()/,/^}/p;/^run_bounded()/,/^}/p;
+        /^snapshot_valid()/,/^}/p' \
   "$REPO/pr-agent" >"$T/funcs.sh"
 
 pass=0; fail=0
@@ -239,6 +241,61 @@ contains "$T/mhuge2.out" 'verylongword' 'huge title tail reachable at max_voff'
 # compact tiny-terminal state: no box, safe one-liner
 lay "$SNAP_TALL" 24 8 30 "$T/metat.jsonl" >"$T/mt.out"
 contains "$T/mt.out" 'terminal too small' 'compact state at 24x8'
+
+# --- async-refresh worker helpers ----------------------------------------------
+# run_bounded: a fast command returns its own rc/output immediately — the
+# detached killer must neither hold a $( ) capture pipe nor leak its sleeper
+OUT="$(/bin/bash -c 'set -uo pipefail; . "'"$T"'/funcs.sh"
+  s=$(date +%s); v="$(run_bounded 47 printf quick)"; t=$(( $(date +%s) - s ))
+  sleep 0.3
+  leak=$(pgrep -f "sleep 47" | wc -l | tr -d " ")
+  printf "%s:%s:%s" "$v" "$t" "$leak"')"
+case "$OUT" in        # t 0|1 is a second-boundary flake — a held pipe costs 47s
+  quick:0:0|quick:1:0) ok 'run_bounded fast cmd: value+prompt+no-leak' ;;
+  *) bad 'run_bounded fast cmd' "got $OUT, want quick:~0:0" ;;
+esac
+
+# a hung command is bounded: rc 124, ~the bound elapsed, no orphan sleep left
+OUT="$(/bin/bash -c 'set -uo pipefail; . "'"$T"'/funcs.sh"
+  s=$(date +%s)
+  run_bounded 1 sleep 47; rc=$?
+  t=$(( $(date +%s) - s ))
+  sleep 0.3
+  leak=$(pgrep -f "sleep 47" | wc -l | tr -d " ")
+  printf "%s:%s:%s" "$rc" "$t" "$leak"')"
+case "$OUT" in
+  124:1:0|124:2:0) ok 'run_bounded bound-out: rc124+elapsed+no-leak' ;;
+  *) bad 'run_bounded bound-out' "got $OUT, want 124:~1:0" ;;
+esac
+
+# the bound also sweeps grandchildren — a child fork inside the command dies too
+OUT="$(/bin/bash -c 'set -uo pipefail; . "'"$T"'/funcs.sh"
+  run_bounded 1 bash -c "( sleep 47 & sleep 47 & wait )" 2>/dev/null; rc=$?
+  sleep 0.3
+  leak=$(pgrep -f "sleep 47" | wc -l | tr -d " ")
+  printf "%s:%s" "$rc" "$leak"')"
+eq 'run_bounded sweeps grandchildren' "$OUT" '124:0'
+
+# worker_tree lists a live subtree; worker_kill cancels and reaps the lot
+OUT="$(/bin/bash -c 'set -uo pipefail; . "'"$T"'/funcs.sh"
+  ( sleep 47 & sleep 47 & wait ) & p=$!
+  sleep 0.3
+  kids=$(worker_tree "$p" | wc -l | tr -d " ")
+  worker_kill "$p"
+  sleep 0.2
+  kill -0 "$p" 2>/dev/null && alive=1 || alive=0
+  left=$(pgrep -f "sleep 47" | wc -l | tr -d " ")
+  printf "%s:%s:%s" "$kids" "$alive" "$left"')"
+eq 'worker_kill cancels a subtree' "$OUT" '2:0:0'
+
+# snapshot_valid gates stage transitions — only complete snapshots may pass
+OUT="$(/bin/bash -c 'set -uo pipefail; . "'"$T"'/funcs.sh"
+  snapshot_valid "'"$SNAP_TALL"'" && a=0 || a=1
+  jq "del(.prs)" "'"$SNAP_TALL"'" >"'"$T"'/bad.json"
+  snapshot_valid "'"$T"'/bad.json" && b=0 || b=1
+  snapshot_valid "'"$T"'/missing.json" && c=0 || c=1
+  printf "%s:%s:%s" "$a" "$b" "$c"')"
+eq 'snapshot_valid gates completeness' "$OUT" '0:1:1'
 
 echo "--- status_nav: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

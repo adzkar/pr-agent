@@ -3,8 +3,9 @@
 # horizontal projection. Drives `pr-agent _layout` on handcrafted snapshots —
 # layout is pure, so no scratch state, no gh stub.
 #   logical table:  PR | TITLE | REVIEW | AGENT STATE | ROUNDS | MODEL (+opt)
-#   projected mode: _layout SNAP COLS ROWS EVERY [META_OUT [HOFF]] clips the
-#                   table to COLS cells behind a frozen PR gutter at HOFF
+#   projected mode: _layout SNAP COLS ROWS EVERY [META_OUT [HOFF [VOFF [LIVE]]]]
+#                   clips the table to COLS cells behind a frozen PR gutter at
+#                   HOFF/VOFF; LIVE names the watch's refresh state for the footer
 set -euo pipefail
 T="$(mktemp -d)"
 trap 'rm -rf "$T"' EXIT
@@ -227,6 +228,31 @@ for r in 21 22 23 24 25 26; do   # saturation range: act_n clamps inside 1..ACTI
   [ "$ph" -le $(( r - 1 )) ] && ok "budgeted frame fits rows=$r (phys $ph)" \
                              || bad "budgeted frame fits rows=$r" "phys $ph > $((r-1))"
 done
+
+echo "== -w footer: the controls are the fixed half; state/cache notes trail =="
+# base + controls fits at 80 in every live state, so trunc drops a trailing
+# note, never the help (annotated bases stay short on purpose)
+for st in live refreshing stale loading retry; do
+  lay "$SNAP" 80 24 5 "" 0 0 "$st" >"$T/foot-$st.out"
+  contains "$T/foot-$st.out" "q quit" "footer controls survive at 80 (live=$st)"
+done
+contains "$T/foot-live.out"       "updated"          "live footer carries the data clock"
+contains "$T/foot-refreshing.out" "↻ refreshing"     "refreshing note still shows at 80"
+contains "$T/foot-stale.out"      "⚠ refresh failed" "stale footer names the state"
+contains "$T/foot-stale.out"      "old"              "stale footer carries the data age"
+contains "$T/foot-loading.out"    "gathering status" "loading footer"
+contains "$T/foot-retry.out"      "retrying"         "retry footer"
+
+echo "== cache-freshness notes: the cycle is max(30s ttl, watch interval) =="
+jq --argjson t $(( $(date +%s) - 250 )) '.pending_ts = $t | .models_ts = $t' \
+  "$SNAP" >"$T/aged.json"
+# cols=120 so the trailing notes fit — at 80 they're the first thing trunc drops
+lay "$T/aged.json" 120 24 5   "" 0 0 live >"$T/foot-age5.out"
+lay "$T/aged.json" 120 24 300 "" 0 0 live >"$T/foot-age300.out"
+contains "$T/foot-age5.out"   "counts" "4m-old counts flag under -w 5 (cycle=ttl)"
+contains "$T/foot-age5.out"   "model " "4m-old model flag under -w 5"
+lacks    "$T/foot-age300.out" "counts" "4m-old counts quiet under -w 300 (cycle=300)"
+lacks    "$T/foot-age300.out" "model " "4m-old model quiet under -w 300"
 
 echo
 echo "$pass passed, $fail failed"

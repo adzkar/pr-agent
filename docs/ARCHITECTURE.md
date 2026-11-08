@@ -1,6 +1,6 @@
 # Architecture
 
-`pr-agent` is a single bash script (~2420 lines). It polls GitHub for new PR
+`pr-agent` is a single bash script (~3250 lines). It polls GitHub for new PR
 feedback and hands each round to a **persistent Devin CLI session per PR**
 running inside that PR's dedicated git worktree — so the agent keeps context
 across review rounds and never touches your checkout.
@@ -14,24 +14,24 @@ Sections are delimited by `# --- name ---` banners, in file order:
 
 | Section | Approx. lines | Contents |
 | --- | --- | --- |
-| header + bootstrap | 1–117 | Usage doc comment, `set -euo pipefail`, `VERSION`/`UPDATE_REPO`/`STATE_ROOT`/`DEVIN_BIN`/`SELF`, `die` |
-| per-repo state | 118–157 | `slug_of`, `git_repo_name`, `migrate_legacy_state` (pre-per-repo flat layout → `repos/<slug>`), `resolve_repo_slug` → `REPO_SLUG`, `STATE_DIR` + state paths (`PID_FILE`, `MAP_FILE`, `LOG_FILE`, `PRS_CACHE`, `PRS_EXTRA`, `PRS_LOCK`) |
-| settings | 158–280 | `SETTINGS`/`DISPLAY_SETTINGS` key lists, `resolve_str`/`resolve_num`/`load_settings` — env → saved `CFG_*` → default resolution with `SRC_<name>` provenance (a `CFG_SRC_<name>=default` file marker demotes a saved value to `default`, but `cfg_src` gates the consult to `DISPLAY_SETTINGS` keys — foreign markers are inert; `invalid` inputs rejected into `SETTING_NOTES`, files untouched); the documented `PR_AGENT_*` env name is passed explicitly (six differ from `PR_AGENT_<setting>` — `MODE`→`PERM_MODE` etc.); `setting_src`, `apply_status_defaults`, `save_config` (v2 header; persists only env|saved-provenance keys — defaults stay unpinned; `CFG_SRC_*` lines are managed, foreign lines preserved), `log`, `notify` (osascript) |
-| repo context | 281–303 | `repo`/`repo_dir`/`me` accessors, `need_repo`, `detect_repo` (writes repo, repo_dir, me, base into state) |
-| map | 304–336 | `map.json` accessors (`map_get/set/del/rm/num`) behind `with_map_lock`; `with_lock` is the generic mkdir lock (~10 s stale break) |
-| PR list | 337–444 | `refresh_prs` — one `gh pr list` call → `prs.jsonl` cache, published tmp+`mv` (number, title, state, draft, review, updated, branch, head, base, mergeable, ci, ci_failed, body, cross, author — `review` is `reviewDecision`, derived from non-author `reviews` (latest opinionated per reviewer) when empty); `backfill_prs` — one `gh pr view` per tracked PR missing from both caches → `prs_extra.jsonl` (once each ever; `prs_extra_merge` appends under `prs.lock` + tmp/`mv` so concurrent dashboards never see a partial file); `pr_info` (list first, extras fallback), `targets` ("all" mode scoped by `PR_AUTHOR_FILTER` via `PR_AUTHOR_JQ`), `scope_label` (that scope as display text) |
-| feedback collection | 445–523 | `fetch_feedback` (3 `gh api` endpoints + `synthetic_feedback`), `seed_seen`, `filter_feedback` (seen/author/bot/skip rules; optional seen-file arg so status can count without touching watcher markers), `pending_feedback` |
-| failed review runs | 524–645 | `handle_review_failure` + helpers (`retry_cutoff`, `review_failure_plan`, `retry_reset_if_reviewed`) — pings the review bot (`RETRY_MSG`) on `Review failed:` notices, `RETRY_MAX` cap, `retry_cutoff` keeps pre-existing failures manual-only |
-| formatting | 646–662 | `format_feedback` — jsonl → markdown prompt sections |
-| worktree | 663–753 | `ensure_worktree` (`<repo>-pr-<N>` next to the main checkout), `worktree_holding`/`still_blocked` (local-only `git worktree list` probes — `still_blocked` rc: 0 blocked / 1 confirmed free / 2 indeterminate), `setup_worktree` (copies `.env*`/`config.local.json`, reuses `node_modules` when manifests match else `bun install --frozen-lockfile`, husky prepare), `sync_worktree` |
-| main-sync | 754–1010 | Post-merge catch-up: `sync_scan` → `check_sync` merges base into PR branch **via the PR's agent session**, then `verify_synced` + `apply_unblock` (dep-gated draft unbanner/ready, `sync_unblock` state machine); rc 4 defers like a busy session — no `sync_fails`; `sync_scan watch` skips `worktree_blocked` PRs outright |
-| agent | 1011–1112 | `build_prompt`, `devin_flags`, `session_ids`/`new_session_id` (diff `devin list` before/after), `run_agent` (resume `devin -r` else start new; `ensure_worktree` rc 4 → `worktree_blocked`) |
-| per-PR check | 1113–1188 | `check_pr` — the per-PR round; `skip_reason` |
-| watcher | 1189–1351 | `watch_loop` (re-cd's to `repo_dir` each cycle; re-probes `worktree_blocked` PRs via `still_blocked`), `pid_is_watcher`/`is_running`, `pr_sig`, `install_launchd` (launchd plist), `cmd_on`, `kill_agents`, `cmd_off` |
-| manual commands | 1352–1568 | `need_pr`/`need_real_pr`/`gh_err_not_pr` (every command acting on a user-supplied N — `on`/`add` targets included — resolves it through `need_real_pr`'s `gh pr view` first, `sync --apply` excepted (own resolution); `gh_err_not_pr` reads the stderr — only "Could not resolve to a PullRequest" marks a non-PR), `run`, `tell`/`_tell`, `attach`, `retry`, `peek`, `mark-seen`, `forget_pr`, `gc`, `sync`, `config`, `logs` (`version` is a dispatch one-liner) |
-| self-update | 1569–1690 | `ver_gt`, `latest_release_tag`, `cmd_update` — downloads release assets from `UPDATE_REPO`, verifies sha256, atomic-installs over the (symlink-resolved) install; `maybe_update_check`/`pending_update_version` — throttled background release check (OMZ-style), both gated on `UPDATE_CHECK` |
-| status rendering | 1693–2913 | `fmt_*`, `cell_ops` — one `LC_ALL=C` awk engine for display-cell ops (UTF-8 decode → wcwidth-style classes; ANSI escapes transparent): `len`/`max`/`ws`/`cut`/`trunc`/`proj`/`clip`/`pos` — backing `trunc`/`pad`/`vis_len`/`phys_lines`/`wrap` so `${#var}` is never used as a display width — `draw_*`, `status_prs`, `status_pending_count`/`refresh_status_pending` (pending counts without `seed_seen` — an absent marker gets `last_seen_ts` applied in memory), `refresh_blocked_flags` (lazy `still_blocked` re-probe — clears a freed flag even with the watcher off), `recent_event_groups`/`recent_events`, `status_gather` — emits the versioned JSON snapshot and is the *only* side-effecting stage (cache refresh + lock-protected blocked-flag maintenance); `review_cell`/`state_cell` (pure: read the record's snapshot fields; only side effect is the `H_*` hint buckets), `render_hint`, `status_layout` — pure paint: `status_table` builds the logical grid + scroll geometry (frozen `[0,gutter)` PR gutter, `ST_VREG`/`ST_MAXVOFF`/`ST_MAXHOFF`, per-record line anchors), `status_view` composes one frame — whole table (plain) or a two-axis `[hoff,voff)` window behind pinned rules (watch) — `status_meta` reports the geometry + anchors; `render_status` (gather → temp file → layout), `status_watch` — the interactive `-w` loop: alt-screen + cursor-hidden + `-icanon -echo` lifecycle with `EXIT`/`INT`/`TERM`/`HUP`/`WINCH` restore traps plus a private `TMPDIR` (`WATCH_TMPD`) the trap `rm -rf`s — the snapshot, `.new`, and every gather-internal tempfile can't leak on signal exits — `status_key`/`key_nav` (CSI/SS3 key decoder → `hoff`/`voff` mutation), `status_anchor`/`anchor_update` (re-anchor the same record line across rebuilds/resizes), `cell_ops clip` frame clip; `cmd_status` (interactive gate + non-interactive fallback), `usage` |
-| dispatch | 2914–end | `case "$1"` router (`usage` sits just above the banner) — inline cases: `add`/`rm`, `pause`/`resume`, `reset`, `reset-rounds`, `map`, `version`, `help`; `_loop`/`_check`/`_tell`/`_ensure`/`_blocked`/`_gather`/`_layout` are internal entries (`_gather` prints the status snapshot, `_layout` renders one — `tests/status_snapshot.sh` and `tests/status_grid.sh` drive both). `maybe_update_check` runs just before dispatch; the notice is skipped for internal/machine-readable commands (`_loop` logs it) |
+| header + bootstrap | 1–119 | Usage doc comment, `set -euo pipefail`, `VERSION`/`UPDATE_REPO`/`STATE_ROOT`/`DEVIN_BIN`/`SELF`, `die` |
+| per-repo state | 120–159 | `slug_of`, `git_repo_name`, `migrate_legacy_state` (pre-per-repo flat layout → `repos/<slug>`), `resolve_repo_slug` → `REPO_SLUG`, `STATE_DIR` + state paths (`PID_FILE`, `MAP_FILE`, `LOG_FILE`, `PRS_CACHE`, `PRS_EXTRA`, `PRS_LOCK`) |
+| settings | 160–282 | `SETTINGS`/`DISPLAY_SETTINGS` key lists, `resolve_str`/`resolve_num`/`load_settings` — env → saved `CFG_*` → default resolution with `SRC_<name>` provenance (a `CFG_SRC_<name>=default` file marker demotes a saved value to `default`, but `cfg_src` gates the consult to `DISPLAY_SETTINGS` keys — foreign markers are inert; `invalid` inputs rejected into `SETTING_NOTES`, files untouched); the documented `PR_AGENT_*` env name is passed explicitly (six differ from `PR_AGENT_<setting>` — `MODE`→`PERM_MODE` etc.); `setting_src`, `apply_status_defaults`, `save_config` (v2 header; persists only env|saved-provenance keys — defaults stay unpinned; `CFG_SRC_*` lines are managed, foreign lines preserved), `log`, `notify` (osascript) |
+| repo context | 283–305 | `repo`/`repo_dir`/`me` accessors, `need_repo`, `detect_repo` (writes repo, repo_dir, me, base into state) |
+| map | 306–338 | `map.json` accessors (`map_get/set/del/rm/num`) behind `with_map_lock`; `with_lock` is the generic mkdir lock (~10 s stale break) |
+| PR list | 339–446 | `refresh_prs` — one `gh pr list` call → `prs.jsonl` cache, published tmp+`mv` (number, title, state, draft, review, updated, branch, head, base, mergeable, ci, ci_failed, body, cross, author — `review` is `reviewDecision`, derived from non-author `reviews` (latest opinionated per reviewer) when empty); `backfill_prs` — one `gh pr view` per tracked PR missing from both caches → `prs_extra.jsonl` (once each ever; `prs_extra_merge` appends under `prs.lock` + tmp/`mv` so concurrent dashboards never see a partial file); `pr_info` (list first, extras fallback), `targets` ("all" mode scoped by `PR_AUTHOR_FILTER` via `PR_AUTHOR_JQ`), `scope_label` (that scope as display text) |
+| feedback collection | 447–525 | `fetch_feedback` (3 `gh api` endpoints + `synthetic_feedback`), `seed_seen`, `filter_feedback` (seen/author/bot/skip rules; optional seen-file arg so status can count without touching watcher markers), `pending_feedback` |
+| failed review runs | 526–647 | `handle_review_failure` + helpers (`retry_cutoff`, `review_failure_plan`, `retry_reset_if_reviewed`) — pings the review bot (`RETRY_MSG`) on `Review failed:` notices, `RETRY_MAX` cap, `retry_cutoff` keeps pre-existing failures manual-only |
+| formatting | 648–664 | `format_feedback` — jsonl → markdown prompt sections |
+| worktree | 665–755 | `ensure_worktree` (`<repo>-pr-<N>` next to the main checkout), `worktree_holding`/`still_blocked` (local-only `git worktree list` probes — `still_blocked` rc: 0 blocked / 1 confirmed free / 2 indeterminate), `setup_worktree` (copies `.env*`/`config.local.json`, reuses `node_modules` when manifests match else `bun install --frozen-lockfile`, husky prepare), `sync_worktree` |
+| main-sync | 756–1012 | Post-merge catch-up: `sync_scan` → `check_sync` merges base into PR branch **via the PR's agent session**, then `verify_synced` + `apply_unblock` (dep-gated draft unbanner/ready, `sync_unblock` state machine); rc 4 defers like a busy session — no `sync_fails`; `sync_scan watch` skips `worktree_blocked` PRs outright |
+| agent | 1013–1114 | `build_prompt`, `devin_flags`, `session_ids`/`new_session_id` (diff `devin list` before/after), `run_agent` (resume `devin -r` else start new; `ensure_worktree` rc 4 → `worktree_blocked`) |
+| per-PR check | 1115–1190 | `check_pr` — the per-PR round; `skip_reason` |
+| watcher | 1191–1353 | `watch_loop` (re-cd's to `repo_dir` each cycle; re-probes `worktree_blocked` PRs via `still_blocked`), `pid_is_watcher`/`is_running`, `pr_sig`, `install_launchd` (launchd plist), `cmd_on`, `kill_agents`, `cmd_off` |
+| manual commands | 1354–1570 | `need_pr`/`need_real_pr`/`gh_err_not_pr` (every command acting on a user-supplied N — `on`/`add` targets included — resolves it through `need_real_pr`'s `gh pr view` first, `sync --apply` excepted (own resolution); `gh_err_not_pr` reads the stderr — only "Could not resolve to a PullRequest" marks a non-PR), `run`, `tell`/`_tell`, `attach`, `retry`, `peek`, `mark-seen`, `forget_pr`, `gc`, `sync`, `config`, `logs` (`version` is a dispatch one-liner) |
+| self-update | 1571–1692 | `ver_gt`, `latest_release_tag`, `cmd_update` — downloads release assets from `UPDATE_REPO`, verifies sha256, atomic-installs over the (symlink-resolved) install; `maybe_update_check`/`pending_update_version` — throttled background release check (OMZ-style), both gated on `UPDATE_CHECK` |
+| status rendering | 1693–3187 | `fmt_*`, `cell_ops` — one `LC_ALL=C` awk engine for display-cell ops (UTF-8 decode → wcwidth-style classes; ANSI escapes transparent): `len`/`max`/`ws`/`cut`/`trunc`/`proj`/`clip`/`pos` — backing `trunc`/`pad`/`vis_len`/`phys_lines`/`wrap` so `${#var}` is never used as a display width — `draw_*`, `status_prs`, `status_pending_count`/`refresh_status_pending` (pending counts without `seed_seen` — an absent marker gets `last_seen_ts` applied in memory), `refresh_blocked_flags` (lazy `still_blocked` re-probe — clears a freed flag even with the watcher off), `recent_event_groups`/`recent_events`, `status_gather` — emits the versioned JSON snapshot and is the *only* side-effecting stage (cache refresh + lock-protected blocked-flag maintenance); `review_cell`/`state_cell` (pure: read the record's snapshot fields; only side effect is the `H_*` hint buckets), `render_hint`, `status_layout` — pure paint: `status_table` builds the logical grid + scroll geometry (frozen `[0,gutter)` PR gutter, `ST_VREG`/`ST_MAXVOFF`/`ST_MAXHOFF`, per-record line anchors), `status_view` composes one frame — whole table (plain) or a two-axis `[hoff,voff)` window behind pinned rules (watch) — `status_meta` reports the geometry + anchors; `render_status` (gather → temp file → layout), `status_watch` — the interactive `-w` loop: alt-screen + cursor-hidden + `-icanon -echo` lifecycle with an `EXIT` restore trap plus a private `TMPDIR` (`WATCH_TMPD`) the trap `rm -rf`s — the snapshot, `.new`/`.done`, and every gather-internal tempfile can't leak on signal exits — signal traps only set flags (`WATCH_SIG`, `WATCH_RESIZE`) that the input loop drains through the ordinary quit/repaint paths, so nothing runs in trap context — `snapshot_valid`/`worker_kill`/`run_bounded` bound and gate the single background gather worker `status_watch` spawns inline (deadline-driven adoption, `.new`+`.done` transfer), `status_key`/`key_nav` (CSI/SS3 key decoder → `hoff`/`voff` mutation), `status_anchor`/`anchor_update` (re-anchor the same record line across rebuilds/resizes), `cell_ops clip` frame clip; `cmd_status` (interactive gate + non-interactive fallback), `usage` |
+| dispatch | 3188–end | `case "$1"` router (`usage` sits just above the banner) — inline cases: `add`/`rm`, `pause`/`resume`, `reset`, `reset-rounds`, `map`, `version`, `help`; `_loop`/`_check`/`_tell`/`_ensure`/`_blocked`/`_gather`/`_layout` are internal entries (`_gather` prints the status snapshot, `_layout` renders one — `tests/status_snapshot.sh` and `tests/status_grid.sh` drive both). `maybe_update_check` runs just before dispatch; the notice is skipped for internal/machine-readable commands (`_loop` logs it) |
 
 ## On-disk state
 
@@ -56,6 +56,9 @@ Sections are delimited by `# --- name ---` banners, in file order:
     gh_error                   # exists ⇔ last refresh_prs failed
     cycle_active / last_cycle  # poll-in-progress marker / last poll epoch
     status_pending             # "pr count" lines — counted without seeding seen markers
+    status_pending.ts          # epoch of the last fully-recounted rebuild — a bound-out
+                               # republish keeps it behind, so it measures data freshness
+    status_models              # "pr model" lines — last observed session-model evidence
     retry_cutoff               # ISO ts; bot failures older than this stay manual
     locks/<pr>                 # mkdir lock: a check_pr round is in flight
     running/<pr>               # "pid epoch new|resume" while an agent runs
@@ -240,12 +243,55 @@ its own key), `key_nav` moves `hoff`/`voff` inside the `ST_MAX*` bounds, and
 `status_anchor`/`anchor_update` re-anchor the same record line across refresh
 rebuilds, evictions, and resizes.
 
+#### `status -w` refresh contract (async gather)
+
+The interactive dashboard never blocks on gathering. `status_watch` owns the
+terminal loop; `status_gather` runs in exactly one bounded background worker:
+
+- **Deadline-driven, one worker in flight.** `next_gather` is an absolute
+  deadline advanced when the worker spawns — a refresh cannot slip because
+  keys stream (navigation mutates offsets first, then worker events and the
+  deadline break before the nav repaint). A worker out at `next_gather +
+  PR_AGENT_GATHER_TIMEOUT` (default 60s) is killed via `worker_kill` and the
+  footer flips to `⚠ refresh failed` — the last good snapshot stays on screen
+  (stale beats blank). While a worker is out the footer shows `↻ refreshing`.
+- **Atomic transfer.** The worker writes the complete snapshot to
+  `$snap.new`, then publishes a completion marker `$snap.done` (itself
+  tmp+`mv`). The parent adopts only after `snapshot_valid` confirms the
+  `v`-versioned doc is complete — a killed or failed gather never replaces
+  the live snapshot.
+- **Bounded sub-gathers.** `refresh_status_pending` wraps each PR's
+  three-endpoint count in `run_bounded $PR_AGENT_PENDING_TIMEOUT` (default
+  15s — a stalled PR keeps its prior count, and the `status_pending.ts`
+  freshness stamp stays behind so the footer's age note still fires), and
+  `refresh_status_models` wraps the whole model phase in `run_bounded
+  $PR_AGENT_MODEL_TIMEOUT` (default 10s — a hung source keeps prior
+  evidence). `status_model_lookup`
+  is the model-evidence seam: `PR_AGENT_MODEL_LOOKUP` names an external
+  probe command today (test seam) and is where per-session model
+  verification lands.
+- **`run_bounded`/`worker_kill`** are the BSD/macOS timeout+tree primitives:
+  the bounded command runs under a detached sleeper-killer that sweeps the
+  whole descendant tree (`pgrep -P` walk while still parented, TERM then a
+  KILL resweep) — a bound-out command returns 124 and nothing leaks. `wait`
+  on a TERM'd child must be `|| rc=$?`-guarded: it returns >128, and
+  `set -e` would otherwise abort the caller at bound-out.
+- **Signals are deferred.** `INT`/`TERM`/`HUP` only set `WATCH_SIG`; the
+  input loop converts the flag into the ordinary quit path (kill the worker,
+  restore the tty) — running kills/termios restores inside a trap handler
+  used to SIGSEGV bash. `WINCH` similarly just flags `WATCH_RESIZE`.
+- **Loading skeleton.** Before the first snapshot lands, `status_skeleton`
+  paints the same layout the real data will fill (`loading: true` in the
+  snapshot shape), so navigation is interactive immediately.
+
 ### Concurrency & locking
 
 - `map.lock` (mkdir) serializes `map.json` writes; stale locks broken ~10 s.
 - `prs.lock` (mkdir) serializes `prs_extra.jsonl` merges; every shared cache
-  (`prs.jsonl`, `prs_extra.jsonl`, `status_pending`) is published tmp+`mv`, so
-  concurrent dashboards/watchers never read a partial file.
+  (`prs.jsonl`, `prs_extra.jsonl`, `status_pending`, `status_models`) is
+  published tmp+`mv`, so concurrent dashboards/watchers never read a partial
+  file. The `-w` watch's own snapshot moves the same way: worker → `.new`
+  then `.done`, parent adopts only a `snapshot_valid` doc.
 - `seen/<pr>` markers belong to the watcher/check_pr path — status counting
   never creates or rewrites them (absent markers get `last_seen_ts` applied
   in memory), which keeps older watchers' semantics intact.

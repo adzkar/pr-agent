@@ -12,6 +12,7 @@ import re
 import select
 import signal
 import struct
+import subprocess
 import sys
 import termios
 import fcntl
@@ -147,6 +148,18 @@ def stub_leftovers(d):
         return []
 
 
+def alive_pid(s):
+    """pid string -> still running (EPERM counts as alive, zombies get reaped
+    by launchd quickly so an orphan can't masquerade as dead)."""
+    try:
+        os.kill(int(s), 0)
+        return True
+    except PermissionError:
+        return True
+    except (ProcessLookupError, ValueError):
+        return False
+
+
 def finish(p, pid, secs=15):
     """Wait for the child to exit after quit/EOF was sent. If it is still
     alive past the budget — e.g. a slow gather+rebuild+paint cycle was
@@ -210,13 +223,19 @@ def s_nav():
                   'echo "rc=$?" >"%s/watch.rc"; stty -g >"%s/tty.after"'
                   % (STATE, TOOL, STATE, STATE), env({"MKTEMP_STUB_DIR": wtmp}))
     refresh_caches()
-    if not p.pump_until(b"\x1b[H", 25):
-        bad("first paint", "no frame in 12s, %d bytes" % len(p.buf))
+    # the async pipeline paints a loading frame immediately and the real table
+    # only after the first worker lands — wait for records, then assert the
+    # loading frame really did precede them in the byte stream
+    if not p.pump_until(b"#20", 25):
+        bad("records paint", "no data frame in 25s, %d bytes" % len(p.buf))
         p.close()
         return
     p.pump(1.0)
     ok("alt-screen entered") if b"\x1b[?1049h" in p.buf else bad("alt-screen entered", "no smcup")
     ok("cursor hidden") if b"\x1b[?25l" in p.buf else bad("cursor hidden", "no civis")
+    li = p.buf.find(b"gathering status"); ri = p.buf.find(b"#20")
+    ok("loading frame precedes records") if 0 <= li < ri else \
+        bad("loading frame precedes records", "gathering=%d records=%d" % (li, ri))
     f0 = bytes(p.last_frame())
     ok("first paint renders records") if b"#20" in f0 else bad("first paint renders records", "no #20x record")
     b = bounded(p.frame_lines(), 24, 80)
@@ -285,8 +304,8 @@ def s_sigint():
                   'echo "rc=$?" >"%s/watch.rc"; stty -g >"%s/tty.after"'
                   % (STATE, TOOL, STATE, STATE), env({"MKTEMP_STUB_DIR": wtmp}))
     refresh_caches()
-    if not p.pump_until(b"\x1b[H", 25):
-        bad("sigint first paint", "no frame")
+    if not p.pump_until(b"#20", 25):
+        bad("sigint first paint", "no data frame")
         p.close()
         return
     os.killpg(pid, signal.SIGINT)   # foreground process group, like a real ^C
@@ -307,8 +326,8 @@ def s_resize():
     p = Pty(24, 80)
     pid = p.spawn('"%s" status -w 60' % TOOL, env())
     refresh_caches()
-    if not p.pump_until(b"\x1b[H", 25):
-        bad("resize initial paint", "no frame")
+    if not p.pump_until(b"#20", 25):
+        bad("resize initial paint", "no data frame")
         p.close()
         return
     n0 = p.paints()
@@ -416,7 +435,9 @@ def s_badinterval():
             bad("interval %s footer" % arg, "%r not in frame" % want)
         n0 = p.paints()
         p.pump(3.0)
-        ok("interval %s no hot re-gather" % arg) if p.paints() == n0 else \
+        # async refresh legitimately repaints on worker events (spawn/adopt —
+        # up to ~2 per cycle); a garbage interval hot-loop paints ~30x more
+        ok("interval %s no hot re-gather" % arg) if p.paints() - n0 <= 4 else \
             bad("interval %s no hot re-gather" % arg,
                 "+%d paints in 3s" % (p.paints() - n0))
         p.send(b"q")
@@ -459,15 +480,14 @@ def s_retry_quit():
     p.close()
 
 
-# --- scenario 9: SIGINT mid-gather cleans gather tempfiles ---------------------
+# --- scenario 9: SIGINT mid-gather cleans worker + tempfiles -------------------
 def s_sigint_mid_gather():
-    """Signal mid-status_gather: gather-internal mktemps (recs/act/refresh
-    tmps) must not leak — the watch runs mktemp under a private TMPDIR the
-    EXIT trap rm -rf's. The window is stretched deterministically: numeric
-    targets make status_prs return six PRs, aged caches force refresh_prs +
-    refresh_status_pending, and a slow gh (0.4s/call) turns the per-PR
-    fetch_feedback fan-out into ~19 gh calls (~8s). The signal lands at
-    ~2s — asserted inside the window (no paint yet, gh.log growing)."""
+    """Signal while a gather worker is in flight: the loading frame may
+    already be painted (that's the async design), but the gather's gh fan-out
+    must still be running, and cancel must kill the worker subtree, rm the
+    gather tempfiles under the private TMPDIR, and restore the terminal.
+    Window: numeric targets fan fetch_feedback out to six PRs and the slow
+    gh (0.4s/call) stretches the gather to ~8s; signal lands at ~2s."""
     wtmp = os.path.join(STATE, "wtmp-midg")
     os.makedirs(wtmp)
     d = os.path.join(STATE, "repos", "test__pty")
@@ -484,15 +504,18 @@ def s_sigint_mid_gather():
                 "author": "alice"}) + "\n")
     old_targets = open(os.path.join(d, "targets")).read()
     open(os.path.join(d, "targets"), "w").write("200 201 202 203 204 205\n")
+    pids_file = os.path.join(STATE, "gh-midg.pids")
+    open(pids_file, "w").close()
     slowbin = os.path.join(STATE, "slowbin")
     os.makedirs(slowbin, exist_ok=True)
     ghpath = os.path.join(slowbin, "gh")
     open(ghpath, "w").write(
-        '#!/usr/bin/env bash\nsleep 0.4\nprintf "%%s\\n" "$*" >>"%s/gh.log"\n'
+        '#!/usr/bin/env bash\n[ -n "${GH_PIDFILE:-}" ] && echo "$$" >>"$GH_PIDFILE"\n'
+        'sleep 0.4\nprintf "%%s\\n" "$*" >>"%s/gh.log"\n'
         'case "$*" in *"pr list"*) cat "%s/prs_seed.jsonl" ;; esac\nexit 0\n'
         % (STATE, STATE))
     os.chmod(ghpath, 0o755)
-    e = env({"MKTEMP_STUB_DIR": wtmp})
+    e = env({"MKTEMP_STUB_DIR": wtmp, "GH_PIDFILE": pids_file})
     e["PATH"] = slowbin + ":" + e["PATH"]
     for f in ("prs.jsonl", "status_pending"):   # age out -> refresh_* run real
         try:                                    # gather work (mktemp + gh calls)
@@ -502,13 +525,14 @@ def s_sigint_mid_gather():
     p = Pty(24, 80)
     pid = p.spawn('exec "%s" status -w 60' % TOOL, e)
     p.pump(2.0)
-    # loud precondition: the signal must land mid-gather — no paint emitted yet
-    # and the slow-gh fan-out already logging calls; otherwise this scenario
-    # degrades into s_sigint and passes vacuously
+    # loud precondition: the signal must land mid-gather — the worker's slow-gh
+    # fan-out already logging calls and no data painted yet (the loading frame
+    # is fine — it's the async design); otherwise this scenario degrades into
+    # s_sigint and passes vacuously
     ok("signal lands mid-gather") \
-        if p.paints() == 0 and gh_calls() > 0 else \
+        if gh_calls() > 0 and b"\xe2\x94\x82 #200" not in p.buf else \
         bad("signal lands mid-gather",
-            "paints=%d gh=%d — gather window missed" % (p.paints(), gh_calls()))
+            "gh=%d records=%s — gather window missed" % (gh_calls(), b"\xe2\x94\x82 #200" in p.buf))
     os.killpg(pid, signal.SIGINT)
     rc = p.wait(pid, 10)
     ok("mid-gather SIGINT exits 0") if rc == 0 else \
@@ -519,7 +543,221 @@ def s_sigint_mid_gather():
     left = stub_leftovers(wtmp)
     ok("mid-gather SIGINT leaves no tempfiles") if not left else \
         bad("mid-gather SIGINT leaves no tempfiles", left)
+    live = [x for x in open(pids_file).read().split() if alive_pid(x)]
+    ok("mid-gather SIGINT reaps worker subtree") if not live else \
+        bad("mid-gather SIGINT reaps worker subtree", "orphans %r" % live)
     open(os.path.join(d, "targets"), "w").write(old_targets)
+    p.close()
+
+
+# --- scenario 10: a hung gather never blocks nav, resize, or quit --------------
+def s_hung_gather():
+    """GH_DELAY=25 execs a 25s sleep inside every gh call — the gather worker
+    can never finish inside the window. The watch must still paint the
+    loading frame, repaint on keys and resize, and exit fast on q — leaving
+    no owned subprocesses and touching no foreign watcher/agent state."""
+    wtmp = os.path.join(STATE, "wtmp-hung")
+    os.makedirs(wtmp)
+    pids_file = os.path.join(STATE, "gh-hung.pids")
+    open(pids_file, "w").close()
+    d = os.path.join(STATE, "repos", "test__pty")
+    # foreign watcher/agent state the dashboard must leave untouched
+    agent = subprocess.Popen(["sleep", "30"])     # stands in for a live agent
+    open(os.path.join(d, "seen", "7"), "w").write("old\n")
+    os.makedirs(os.path.join(d, "locks"), exist_ok=True)
+    os.makedirs(os.path.join(d, "locks", "9"))
+    os.makedirs(os.path.join(d, "running"), exist_ok=True)
+    open(os.path.join(d, "running", "21"), "w").write("%d 1\n" % agent.pid)
+    map_before = open(os.path.join(d, "map.json"), "rb").read()
+    p = Pty(24, 80)
+    pid = p.spawn('exec "%s" status -w 60' % TOOL,
+                  env({"MKTEMP_STUB_DIR": wtmp,
+                       "GH_DELAY": "25", "GH_PIDFILE": pids_file}))
+    for f in ("prs.jsonl", "status_pending"):   # stale caches -> the gather
+        try:                                    # reaches a gh call and hangs
+            os.utime(os.path.join(d, f), (0, 0))
+        except OSError:
+            pass
+    if not p.pump_until(b"gathering", 8):
+        bad("hung gather: loading frame", "no loading paint in 8s")
+        p.close(); agent.kill(); return
+    ok("hung gather: loading shows no records") \
+        if b"#20" not in p.last_frame() else \
+        bad("hung gather: loading shows no records", "records in loading frame")
+    n0 = p.paints()
+    p.send(b"j"); p.pump(1.0)
+    ok("hung gather: nav repaints") if p.paints() > n0 else \
+        bad("hung gather: nav repaints", "no repaint")
+    n1 = p.paints()
+    p.resize(18, 60); os.killpg(pid, signal.SIGWINCH); p.pump(1.5)
+    ok("hung gather: resize repaints") if p.paints() > n1 else \
+        bad("hung gather: resize repaints", "no repaint")
+    b = bounded(p.frame_lines(), 18, 60)
+    ok("hung gather: resized frame bounded") if b is None else \
+        bad("hung gather: resized frame bounded", b)
+    p.send(b"q")
+    rc = p.wait(pid, 6)
+    ok("hung gather: q exits while worker out") if rc == 0 else \
+        bad("hung gather: q exits while worker out", "rc=%r" % rc)
+    time.sleep(0.4)
+    live = [x for x in open(pids_file).read().split() if alive_pid(x)]
+    ok("hung gather: no orphan subprocesses") if not live else \
+        bad("hung gather: no orphan subprocesses", "orphans %r" % live)
+    ok("hung gather: agent process untouched") if alive_pid(agent.pid) else \
+        bad("hung gather: agent process untouched", "sleep agent killed")
+    ok("hung gather: running marker untouched") \
+        if open(os.path.join(d, "running", "21")).read() == ("%d 1\n" % agent.pid) else \
+        bad("hung gather: running marker untouched", "marker changed/missing")
+    ok("hung gather: seen marker untouched") \
+        if open(os.path.join(d, "seen", "7")).read() == "old\n" else \
+        bad("hung gather: seen marker untouched", "seen changed/missing")
+    ok("hung gather: foreign lock untouched") \
+        if os.path.isdir(os.path.join(d, "locks", "9")) else \
+        bad("hung gather: foreign lock untouched", "locks/9 removed")
+    ok("hung gather: map untouched") \
+        if open(os.path.join(d, "map.json"), "rb").read() == map_before else \
+        bad("hung gather: map untouched", "map.json changed")
+    left = stub_leftovers(wtmp)
+    ok("hung gather: no tempfile leaks") if not left else \
+        bad("hung gather: no tempfile leaks", left)
+    agent.kill()
+    p.close()
+
+
+# --- scenario 11: worker bound-out keeps the last good snapshot -----------------
+def s_worker_bound():
+    """First gather succeeds, then GH_SLOW_FILE flips gh to hang forever. The
+    next worker must be killed at PR_AGENT_GATHER_TIMEOUT while the adopted
+    snapshot stays on screen marked stale — then q still exits cleanly and
+    the killed worker's gh children are all gone."""
+    wtmp = os.path.join(STATE, "wtmp-bound")
+    os.makedirs(wtmp)
+    slowf = os.path.join(STATE, "gh_slow.flag")
+    pids_file = os.path.join(STATE, "gh-bound.pids")
+    open(pids_file, "w").close()
+    d = os.path.join(STATE, "repos", "test__pty")
+    p = Pty(24, 80)
+    pid = p.spawn('exec "%s" status -w 4' % TOOL,
+                  env({"MKTEMP_STUB_DIR": wtmp,
+                       "PR_AGENT_GATHER_TIMEOUT": "8",
+                       "GH_SLOW_FILE": slowf, "GH_SLOW_SECS": "30",
+                       "GH_PIDFILE": pids_file}))
+    refresh_caches()
+    if not p.pump_until(b"#20", 15):
+        bad("worker bound: initial data", "no records in 15s")
+        p.close(); return
+    ok("worker bound: initial data renders")
+    # age the caches AND flip gh to hang — the next gather's first refresh
+    # call sleeps 30s, so the bound must fire while the last snapshot holds
+    for f in ("prs.jsonl", "status_pending"):
+        try:
+            os.utime(os.path.join(d, f), (0, 0))
+        except OSError:
+            pass
+    open(slowf, "w").close()                    # gh now hangs on every call
+    ok("worker bound: stale footer after bound-out") \
+        if p.pump_until(b"refresh failed", 30) else \
+        bad("worker bound: stale footer after bound-out", "never went stale")
+    ok("worker bound: last snapshot retained") if b"#20" in p.last_frame() else \
+        bad("worker bound: last snapshot retained", "records dropped")
+    n0 = p.paints()
+    p.send(b"j"); p.pump(1.0)
+    ok("worker bound: nav still repaints") if p.paints() > n0 else \
+        bad("worker bound: nav still repaints", "no repaint")
+    p.send(b"q")
+    rc = p.wait(pid, 6)
+    ok("worker bound: q exits") if rc == 0 else \
+        bad("worker bound: q exits", "rc=%r" % rc)
+    time.sleep(0.4)
+    live = [x for x in open(pids_file).read().split() if alive_pid(x)]
+    ok("worker bound: killed worker left no orphans") if not live else \
+        bad("worker bound: killed worker left no orphans", "orphans %r" % live)
+    ok("worker bound: no leaked gather locks") \
+        if not os.path.isdir(os.path.join(d, "map.lock")) \
+           and not os.path.isdir(os.path.join(d, "prs.lock")) else \
+        bad("worker bound: no leaked gather locks", "lock dir left behind")
+    left = stub_leftovers(wtmp)
+    ok("worker bound: no tempfile leaks") if not left else \
+        bad("worker bound: no tempfile leaks", left)
+    try:
+        os.remove(slowf)
+    except OSError:
+        pass
+    p.close()
+
+
+# --- scenario 12: sustained key traffic must not reset the refresh deadline -----
+def s_key_burst():
+    """A constant key stream must not postpone next_gather — the deadline is
+    absolute, so a refresh worker still spawns mid-burst (the ↻ refreshing
+    footer is its signature). Fresh caches mean a completed gather may make
+    zero gh calls and adoption may lag behind the burst, so the spawn itself
+    is the right observable for 'deadline not postponed'."""
+    wtmp = os.path.join(STATE, "wtmp-burst")
+    os.makedirs(wtmp)
+
+    p = Pty(24, 80)
+    pid = p.spawn('exec "%s" status -w 3' % TOOL,
+                  env({"MKTEMP_STUB_DIR": wtmp}))
+    refresh_caches()
+    if not p.pump_until(b"#20", 15):
+        bad("key burst: initial data", "no records in 15s")
+        p.close(); return
+    # the deadline firing is observed as the ↻ refreshing footer appearing
+    # while keys still stream — adoption may lag behind the burst, but the
+    # worker must have spawned by interval's end
+    saw_refresh = False
+    end = time.time() + 6.0                      # > one 3s interval
+    while time.time() < end and not saw_refresh:
+        p.send(b"jkl")
+        p.pump(0.05)
+        saw_refresh = b"refreshing" in p.buf
+    ok("key burst: deadline still fired") if saw_refresh else \
+        bad("key burst: deadline still fired", "no worker spawned during 6s burst")
+    p.pump(1.0)                                  # let the queued burst drain
+    p.send(b"q")
+    rc = finish(p, pid, 25)                      # queued keys repaint in order
+    ok("key burst: q exits") if rc == 0 else bad("key burst: q exits", "rc=%r" % rc)
+    p.close()
+
+
+# --- scenario 13: a hung model source can't stall PR data -----------------------
+def s_model_hang():
+    """PR_AGENT_MODEL_LOOKUP names a probe that execs a 30s sleep — the model
+    phase is bounded (PR_AGENT_MODEL_TIMEOUT=2), so records still render
+    quickly on plain PR data, and cancelling the watch reaps the probe."""
+    wtmp = os.path.join(STATE, "wtmp-model")
+    os.makedirs(wtmp)
+    mpids = os.path.join(STATE, "model.pids")
+    open(mpids, "w").close()
+    probe = os.path.join(os.path.dirname(GHBIN), "model-probe")
+    p = Pty(24, 80)
+    pid = p.spawn('exec "%s" status -w 60' % TOOL,
+                  env({"MKTEMP_STUB_DIR": wtmp,
+                       "PR_AGENT_MODEL_LOOKUP": probe,
+                       "PR_AGENT_MODEL_TIMEOUT": "2",
+                       "MODEL_PROBE_SLEEP": "30",
+                       "MODEL_PIDFILE": mpids}))
+    refresh_caches()
+    try:                                        # stale model cache -> collect,
+        os.utime(os.path.join(                  # or the probe never runs
+            STATE, "repos", "test__pty", "status_models"), (0, 0))
+    except OSError:
+        pass
+    ok("model hang: records still render") if p.pump_until(b"#20", 12) else \
+        bad("model hang: records still render", "no data frame in 12s")
+    ok("model hang: probe actually ran") if os.path.getsize(mpids) > 0 else \
+        bad("model hang: probe actually ran", "no probe pid recorded")
+    p.send(b"q")
+    rc = p.wait(pid, 6)
+    ok("model hang: q exits") if rc == 0 else bad("model hang: q exits", "rc=%r" % rc)
+    time.sleep(0.4)
+    live = [x for x in open(mpids).read().split() if alive_pid(x)]
+    ok("model hang: probe reaped on exit") if not live else \
+        bad("model hang: probe reaped on exit", "orphans %r" % live)
+    left = stub_leftovers(wtmp)
+    ok("model hang: no tempfile leaks") if not left else \
+        bad("model hang: no tempfile leaks", left)
     p.close()
 
 
@@ -532,5 +770,9 @@ s_garbage()
 s_badinterval()
 s_retry_quit()
 s_sigint_mid_gather()
+s_hung_gather()
+s_worker_bound()
+s_key_burst()
+s_model_hang()
 print("--- status_pty: %d passed, %d failed" % (OKC, FAILC))
 sys.exit(1 if FAILC else 0)

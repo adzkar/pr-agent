@@ -1,7 +1,7 @@
 # pr-agent — agent rules
 
 > Read this before editing. The whole tool is **one file**: `pr-agent`
-> (~1900 lines of bash). The canonical docs are `README.md` (usage) and
+> (~3250 lines of bash). The canonical docs are `README.md` (usage) and
 > `docs/ARCHITECTURE.md` (code map + flows) — read the architecture doc
 > before touching anything past line 100.
 
@@ -23,7 +23,7 @@
 | `tests/status_snapshot.sh` | Scratch-state + stubbed-`gh` fixtures for the status gather/snapshot/layout split — record data, ordering, pending counts without `seen` writes, layout purity, incomplete-snapshot rejection, concurrent gathers |
 | `tests/status_grid.sh` | Handcrafted-snapshot fixtures driving `_layout` — logical-grid geometry (measured columns, TITLE allocation, optional LAST RUN/SESSION, pinned `TITLE_W`), bounded projection + `hoff`, blank-cell continuations, unicode/ANSI cells, compact tiny-terminal state |
 | `tests/status_nav.sh` | Extracted-function fixtures for the `-w` machinery — the `status_key` byte→key decoder (CSI/SS3, partial sequences, unknown-final requeue), `key_nav` clamps, `status_anchor` re-anchoring across rebuilds/evictions/resizes, `status_meta` geometry + record anchors |
-| `tests/status_pty.sh` + `tests/status_pty.py` | Real-PTY end-to-end for `status -w` — seeded scratch state + stubbed `gh`/`mktemp`; two-axis navigation and bounds, frame physically bounded at every size, compact safe state, alt-screen/cursor/termios restoration on `q` and SIGINT, `NO_COLOR`, garbage input, garbage `-w` intervals, quit during persistent gather failure, mid-gather-SIGINT tempfile cleanup, tempfile-leak asserts, and the "navigation never gathers" bound |
+| `tests/status_pty.sh` + `tests/status_pty.py` | Real-PTY end-to-end for `status -w` — seeded scratch state + stubbed `gh`/`mktemp`; two-axis navigation and bounds, frame physically bounded at every size, compact safe state, alt-screen/cursor/termios restoration on `q` and SIGINT, `NO_COLOR`, garbage input, garbage `-w` intervals, quit during persistent gather failure, mid-gather-SIGINT tempfile cleanup, worker bound-out keeps the stale snapshot, sustained key bursts can't postpone the refresh deadline, a hung model probe can't stall records, tempfile-leak asserts, and the "navigation never gathers" bound |
 | `AGENTS.md` | This file |
 
 ## Deploy model
@@ -205,9 +205,33 @@ the intent.
   template) from being frozen as `saved`.
 - **`status -w` owns the terminal until it hands it back.** `status_watch`
   saves `stty -g`, enters the alternate screen + hides the cursor, sets
-  `-icanon -echo` (ISIG kept — ^C stays a signal), and installs
-  `EXIT`/`INT`/`TERM`/`HUP`/`WINCH` traps that restore everything on *every*
-  exit path — never return from the loop without going through them. Input is
+  `-icanon -echo` (ISIG kept — ^C stays a signal), and installs an `EXIT`
+  trap that restores everything — never return from the loop without going
+  through it. Signals are **deferred**: `INT`/`TERM`/`HUP` only set
+  `WATCH_SIG`, `WINCH` sets `WATCH_RESIZE`, and the input loop drains the
+  flags through the ordinary quit/repaint paths — doing kills + termios
+  restores inside a trap handler SIGSEGV'd bash mid-`read` (the trap fires
+  while the shell is inside `wait`/builtin machinery). `set -m` job-control
+  is worse: non-interactive monitor mode hands each spawned command its own
+  pgrp without the foreground handoff, so `stty`/`tput` in the exit path
+  catch SIGTTOU and stop forever — don't reintroduce it. The gather is a
+  **background worker**: the parent loop only reads `$(date +%s)` deadlines,
+  `$snap.done`, and `status_key` bytes — it never calls `status_gather`
+  itself, so nav/resize/repaint can't block on GitHub. The worker writes
+  `$snap.new` then `$snap.done` (tmp+`mv`); the parent adopts only a
+  `snapshot_valid` doc — a killed/failed gather leaves the last snapshot
+  marked `⚠ refresh failed`. `next_gather` is advanced **at spawn**, not at
+  completion — setting it to 0 or forgetting the `[ -z "$w_pid" ]` guard
+  made the deadline fire every pass and fork-spun the loop at ~100% CPU.
+  `worker_kill` sweeps the worker's descendant tree via `pgrep -P` *while
+  still parented* (once the worker dies the kids reparent to launchd and
+  become invisible); `run_bounded`'s `wait` is `|| rc=$?`-guarded because a
+  TERM'd bounded command returns >128 and `set -e` would otherwise kill the
+  caller at every bound-out — the same class as the missing-cache crash:
+  `sed -n "s/^$num //p" "$STATUS_MODELS"` inside `$( )` exits 2 on a missing
+  file, `| head -1` doesn't shield it under `pipefail`, and the substitution
+  aborts the whole gather. **Every `$(...|head)` in the gather path needs
+  `|| true`.** Input is
   `read -rsn1 -t 1` (the 1s poll tick): **bash 3.2 returns rc 1 for both
   timeout and EOF**, so a dead stdin is detected by several instant failures
   inside one wall second, and `read -n` under `stty min 0` retries forever —

@@ -66,7 +66,10 @@ shows where every PR stands.
 ## The dashboard
 
 `pr-agent status` prints the state of everything being watched; `-w` repaints
-it live on the terminal's alt screen.
+it live on the terminal's alt screen. The live view never blocks on GitHub:
+refresh runs in a bounded background worker — a `↻ refreshing` footer shows
+while it's out, and a `⚠ refresh failed` footer keeps the last good snapshot
+on screen if a gather overruns `PR_AGENT_GATHER_TIMEOUT` (default 60s).
 
 ```
 pr-agent v0.3.1  ● watching (pid 10391)   owner/repo
@@ -175,6 +178,9 @@ invocation only:
 | `PR_AGENT_ACTIVITY_LINES` | `6` | Lines in the status "recent activity" section (`0` = hide — frees rows for the table) |
 | `PR_AGENT_TITLE_W` | `0` | Title column width in the status table (`0` = auto — the largest useful width the title content and the viewport beside the PR column allow; `>0` pins a logical width (min 5), which may exceed the viewport) |
 | `PR_AGENT_TITLE_LINES` | `3` plain / `0` `-w` | Max lines a TITLE cell wraps over in the status table (`1` = truncate to one line, `0` = no cap). The interactive default is uncapped; never auto-shrunk — set it explicitly to cap titles |
+| `PR_AGENT_GATHER_TIMEOUT` | `60` | Seconds a `status -w` background refresh may run before it's killed and the dashboard keeps the last snapshot (marked stale) |
+| `PR_AGENT_PENDING_TIMEOUT` | `15` | Seconds each PR's pending-feedback fetch may take inside a status gather |
+| `PR_AGENT_MODEL_TIMEOUT` | `10` | Seconds the whole session-model refresh may take inside a status gather |
 | `PR_AGENT_UPDATE_CHECK` | `1` | Check for newer releases in the background; notice appears on a later run (`0` disables the check and any pending notice) |
 | `PR_AGENT_UPDATE_CHECK_EVERY` | `86400` | Seconds between release checks |
 | `PR_AGENT_REPO` | — | `owner/name` to act on when not inside the repo |
