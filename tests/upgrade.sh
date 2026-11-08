@@ -71,7 +71,7 @@ printf 'w:0\n'   >"$D/seen/7"
 printf '{"key":"i:9:c","kind":"issue","user":{"login":"bob"}}\n' >"$D/feedback/2.jsonl"
 printf 'old run output\n' >"$D/logs/3/20260101-000000.log"
 ln -s "20260101-000000.log" "$D/logs/3/latest.log"
-printf '99999 1\n' >"$D/running/2"     # dead-pid running marker — a legacy "interrupted" run
+printf '2000000000 1\n' >"$D/running/2" # out-of-range pid — guaranteed dead ("interrupted")
 printf '[2026-01-02 00:00:00] PR #3: gave up\n[2026-01-02 00:05:00] PR #4: worktree blocked — skipped\n' >"$D/watch.log"
 
 # the older CLI's PR rows — post-PR_JQ JSONL (branches drive still_blocked's
@@ -111,7 +111,7 @@ check_in "inert marker on non-display key" "$O" 'INTERVAL          45 (saved)'
 check_in "usage footer intact"      "$O" "(saved by 'pr-agent on'"
 case "$O" in *'ignored invalid input'*) echo "  FAIL unexpected invalid-input note"; fail=1 ;; esac
 
-SNAP="$(mktemp)"; ./pr-agent _gather 0 >"$SNAP"
+SNAP="$(mktemp "$G/snap.XXXXXX")"; ./pr-agent _gather 0 >"$SNAP"   # scratch under $G — the trap cleans it
 check "snapshot parses"             "1"   "$(jq -e 'type == "object"' "$SNAP" >/dev/null && echo 1 || echo 0)"
 check "cap reaches snapshot"        "2"   "$(jq -r '.cfg.table_rows' "$SNAP")"
 check "title cap reaches snapshot"  "5"   "$(jq -r '.cfg.title_lines' "$SNAP")"
@@ -151,7 +151,7 @@ before_map="$(mapsum_keep)"; before_w="$(wsum)"
 
 echo "upgrade: old map/seen/log state survives gather + layout untouched"
 
-SNAP="$(mktemp)"; ./pr-agent _gather 0 >"$SNAP"
+SNAP="$(mktemp "$G/snap.XXXXXX")"; ./pr-agent _gather 0 >"$SNAP"
 check "gather on legacy state"      "1"   "$(jq -e 'type == "object"' "$SNAP" >/dev/null && echo 1 || echo 0)"
 check "all five records render"     "5"   "$(jq '[.prs[].n] | length' "$SNAP")"
 check "legacy paused field works"   "paused" "$(jq -r '.prs[] | select(.n == 2) | .skip' "$SNAP")"
@@ -182,7 +182,7 @@ WPID=$!
 
 i=0
 while [ "$i" -lt 5 ]; do
-  S="$(mktemp)"; ./pr-agent _gather 0 >"$S"
+  S="$(mktemp "$G/snap.XXXXXX")"; ./pr-agent _gather 0 >"$S"
   check "snapshot parses under churn (run $i)" "1" "$(jq -e 'type == "object"' "$S" >/dev/null && echo 1 || echo 0)"
   i=$((i+1))
 done
@@ -197,14 +197,17 @@ check "no seen markers invented"      "2"   "$(ls "$D/seen" | wc -l | tr -d ' ')
 check "no churn tempfiles leak"       ""    "$(ls "$D" | grep 'map\.wtmp' || true)"
 check "allowed caches still published" "1"  "$( { [ -f "$D/status_pending" ] && [ -f "$D/status_models" ]; } && echo 1 || echo 0 )"
 
-after_c_map="$(mapsum_keep)"; after_c_w="$(wsum)"; after_c_list="$(wlist)"
-
 # --- D: rollback — the previous release still runs on post-upgrade state -------
 echo "upgrade: a rolled-back release finds its state intact"
 
 OLD="$G/old-pr-agent"
+# rollback coverage needs the v0.3.0 tag — a shallow/CI checkout may not
+# have it, so fetch before degrading to a (loud) skip, not an invisible one
+git rev-parse -q --verify refs/tags/v0.3.0 >/dev/null 2>&1 || \
+  git fetch --tags -q >/dev/null 2>&1 || true
 git show v0.3.0:pr-agent >"$OLD" 2>/dev/null || true
 if [ -s "$OLD" ]; then
+  after_c_map="$(mapsum_keep)"; after_c_list="$(wlist)"
   chmod +x "$OLD"
   check "old binary reports its version" "pr-agent 0.3.0" "$("$OLD" version 2>/dev/null || true)"
   OC="$("$OLD" config 2>/dev/null || true)"
@@ -219,10 +222,10 @@ if [ -s "$OLD" ]; then
     [ -e "$D/$f" ] && [ "$(md5 -q "$D/$f")" = "$h" ] || w_lost=1
   done <<<"$after_c_list"
   check "pre-existing watcher files survive" "0" "$w_lost"
-  SNAP="$(mktemp)"; ./pr-agent _gather 0 >"$SNAP"
+  SNAP="$(mktemp "$G/snap.XXXXXX")"; ./pr-agent _gather 0 >"$SNAP"
   check "new status still gathers post-rollback" "5" "$(jq '[.prs[].n] | length' "$SNAP")"
 else
-  echo "  (v0.3.0 tag missing — rollback checks skipped)"
+  echo "  WARN: v0.3.0 tag unavailable — rollback coverage skipped (git fetch --tags to enable)"
 fi
 
 echo
