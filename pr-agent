@@ -2823,7 +2823,9 @@ status_watch() { # every -> the interactive two-axis status viewport (TTYs and
       else
         rm -f "$snap.new"
         if [ -s "$snap" ]; then gather=0; next_gather=$(( $(date +%s) + every_i ))
-        else sleep 1; continue; fi         # no snapshot yet — retry each tick
+        else status_key                  # no snapshot yet — retry on the input
+          case "$KEY" in eof|quit) rm -f "$snap"; return 0 ;; esac
+          continue; fi                   # tick so q/EOF still get through
       fi
     fi
     cols="$(term_cols)"; rows="$(term_lines)"
