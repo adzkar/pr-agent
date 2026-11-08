@@ -2343,7 +2343,7 @@ status_table() { # snapshot-file cols [term-rows [watch-every]] -> builds the fr
   local -a lines=()
   local l
   while IFS= read -r l; do lines+=( "$l" ); done \
-    < <(jq -r '.prs[] | [(.n // 0), (.state // ""), (.title // "" | gsub("[\t\u001f]"; " ")),
+    < <(jq -r '.prs[] | [(.n // 0), (.state // ""), (.title // "" | gsub("[\u0000-\u001f\u007f-\u009f]"; " ")),
                         (.review // ""), ((.draft // false) | tostring),
                         ((.pending // 0) | tostring), ((.rounds // 0) | tostring),
                         ((.fail_count // 0) | tostring),
