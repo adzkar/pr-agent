@@ -146,6 +146,18 @@ def stub_leftovers(d):
         return []
 
 
+def finish(p, pid, secs=15):
+    """Wait for the child to exit after quit/EOF was sent. If it is still
+    alive past the budget — e.g. a slow gather+rebuild+paint cycle was
+    in-flight when the key landed — SIGTERM it so cleanup asserts never
+    read a live snap and the child can't leak into the next scenario."""
+    rc = p.wait(pid, secs)
+    if rc is None:
+        os.killpg(pid, signal.SIGTERM)
+        p.wait(pid, 5)
+    return rc
+
+
 def refresh_caches():
     """Keep the seeded ttl caches fresh so status_gather stays cheap."""
     d = os.path.join(STATE, "repos", "test__pty")
@@ -401,7 +413,7 @@ def s_badinterval():
             bad("interval %s no hot re-gather" % arg,
                 "+%d paints in 3s" % (p.paints() - n0))
         p.send(b"q")
-        rc = p.wait(pid, 6)
+        rc = finish(p, pid)
         ok("interval %s q exits 0" % arg) if rc == 0 else \
             bad("interval %s q exits 0" % arg, "rc=%r" % rc)
         p.pump(0.5)
@@ -427,7 +439,7 @@ def s_retry_quit():
     pid = p.spawn('exec "%s" status -w 60' % TOOL, e)
     p.pump(3.0)                 # a few gather retries; no snapshot ever lands
     p.send(b"q")
-    rc = p.wait(pid, 6)
+    rc = finish(p, pid)
     ok("q exits while gather fails") if rc == 0 else \
         bad("q exits while gather fails", "rc=%r" % rc)
     p.pump(0.5)
@@ -439,6 +451,43 @@ def s_retry_quit():
     p.close()
 
 
+# --- scenario 9: SIGINT mid-gather cleans gather tempfiles ---------------------
+def s_sigint_mid_gather():
+    """Signal mid-status_gather: gather-internal mktemps (recs/act/refresh
+    tmps) must not leak — the watch runs mktemp under a private TMPDIR the
+    EXIT trap rm -rf's. A slow gh stretches the gather window wide enough to
+    land the signal inside it deterministically."""
+    wtmp = os.path.join(STATE, "wtmp-midg")
+    slowbin = os.path.join(STATE, "slowbin")
+    os.makedirs(slowbin, exist_ok=True)
+    ghpath = os.path.join(slowbin, "gh")
+    open(ghpath, "w").write('#!/usr/bin/env bash\nsleep 0.4\n'
+                          'printf "%%s\\n" "$*" >>"%s/gh.log"\nexit 0\n' % STATE)
+    os.chmod(ghpath, 0o755)
+    e = env({"MKTEMP_STUB_DIR": wtmp})
+    e["PATH"] = slowbin + ":" + e["PATH"]
+    d = os.path.join(STATE, "repos", "test__pty")
+    for f in ("prs.jsonl", "status_pending"):   # age out -> refresh_* run real
+        try:                                    # gather work (mktemp + gh calls)
+            os.utime(os.path.join(d, f), (0, 0))
+        except OSError:
+            pass
+    p = Pty(24, 80)
+    pid = p.spawn('exec "%s" status -w 60' % TOOL, e)
+    p.pump(1.5)                 # well inside the now-multi-second first gather
+    os.killpg(pid, signal.SIGINT)
+    rc = p.wait(pid, 10)
+    ok("mid-gather SIGINT exits 0") if rc == 0 else \
+        bad("mid-gather SIGINT exits 0", "rc=%r" % rc)
+    p.pump(0.5)
+    ok("mid-gather exit leaves alt-screen") if b"\x1b[?1049l" in p.buf else \
+        bad("mid-gather exit leaves alt-screen", "no rmcup")
+    left = stub_leftovers(wtmp)
+    ok("mid-gather SIGINT leaves no tempfiles") if not left else \
+        bad("mid-gather SIGINT leaves no tempfiles", left)
+    p.close()
+
+
 s_nav()
 s_sigint()
 s_resize()
@@ -447,5 +496,6 @@ s_nocolor()
 s_garbage()
 s_badinterval()
 s_retry_quit()
+s_sigint_mid_gather()
 print("--- status_pty: %d passed, %d failed" % (OKC, FAILC))
 sys.exit(1 if FAILC else 0)

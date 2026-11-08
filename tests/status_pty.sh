@@ -44,12 +44,13 @@ exit 0
 EOF
 chmod +x "$T/bin/gh"
 
-# mktemp stub: bare calls land in MKTEMP_STUB_DIR so scenarios can assert no
-# tempfile leaks; unset -> delegate (handles the bare `mktemp` the tool calls)
+# mktemp stub: bare calls land in ${TMPDIR:-$MKTEMP_STUB_DIR} so scenarios can
+# assert no tempfile leaks — including inside the watch's exported TMPDIR;
+# MKTEMP_STUB_DIR unset -> delegate (handles the bare `mktemp` the tool calls)
 cat >"$T/bin/mktemp" <<'EOF'
 #!/usr/bin/env bash
 [ -n "${MKTEMP_STUB_DIR:-}" ] || exec /usr/bin/mktemp "$@"
-d="$MKTEMP_STUB_DIR"; mkdir -p "$d"
+d="${TMPDIR:-$MKTEMP_STUB_DIR}"; mkdir -p "$d"
 f="$d/stubtmp.$$.$RANDOM$RANDOM"
 if [ "${1:-}" = "-d" ]; then mkdir "$f"; else : >"$f"; fi
 printf '%s\n' "$f"
