@@ -458,11 +458,11 @@ eq "no staged leftovers" "0" "$(ls -A "$T/upd" | grep -c 'pr-agent.new' || true)
 echo "== S34: a stale staged file doesn't block a repeat update =="
 new_repo u34 0.1.0
 seed_update 0.1.0 9.9.9
-echo 'partial from a killed update' >"$T/upd/.pr-agent.new.9999"
+echo 'partial from a killed update' >"$T/upd/.pr-agent.new.stale"   # non-numeric suffix can't collide with .$$.new
 try_update o "$T/upd/pr-agent"
 eq "update rc" "$RC" 0
 eq "installed VERSION" "$(uver "$T/upd/pr-agent")" "9.9.9"
-yes "foreign staged file left alone" "$T/upd/.pr-agent.new.9999"   # a live second update could own it
+yes "foreign staged file left alone" "$T/upd/.pr-agent.new.stale"   # a live second update could own it
 
 echo "== S35: a rolled-back binary still runs =="
 new_repo u35 0.1.0
