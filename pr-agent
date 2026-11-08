@@ -3074,7 +3074,7 @@ status_watch() { # every -> the interactive two-axis status viewport (TTYs and
   trap 'WATCH_SIG=1' INT TERM HUP
   trap 'WATCH_RESIZE=1' WINCH
   tput smcup 2>/dev/null || printf '\033[?1049h' # alt screen: repaints stay out of scrollback
-  tput civis 2>/dev/null
+  tput civis 2>/dev/null || true                # TERM=dumb has no civis — degrade, don't die under set -e
   stty -icanon -echo 2>/dev/null      # VMIN=1 VTIME=0; ISIG kept — ^C stays a signal
   printf '\033[2J'
   # private TMPDIR for the watch's lifetime: every mktemp downstream (the snap,

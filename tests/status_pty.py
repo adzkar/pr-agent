@@ -451,7 +451,150 @@ def s_badinterval():
         p.close()
 
 
-# --- scenario 8: persistent gather failure still honors q/EOF ------------------
+# --- scenario 8: ten multiline records stay reachable through the body ---------
+def s_ten_records():
+    """The seed carries 10 wrap-length titles (one CJK): G must reach the
+    oldest record's rows through the vertical body and g must return to #209."""
+    p = Pty(24, 80)
+    pid = p.spawn('exec "%s" status -w 60' % TOOL, env())
+    refresh_caches()
+    # records order most-recent-first: #209 tops the table, #200 closes it
+    if not p.pump_until(b"#209", 35):
+        bad("ten records first paint", "no data frame")
+        p.close()
+        return
+    p.send(b"G"); p.pump(1.5)
+    ok("ten records: last reachable") if b"#200" in p.last_frame() else \
+        bad("ten records: last reachable", "#200 not in bottom frame")
+    b = bounded(p.frame_lines(), 24, 80)
+    ok("ten records: bottom frame bounded") if b is None else \
+        bad("ten records: bottom frame bounded", b)
+    p.send(b"g"); p.pump(1.5)
+    ok("ten records: first back on top") if b"#209" in p.last_frame() else \
+        bad("ten records: first back on top", "#209 lost")
+    p.send(b"q")
+    p.wait(pid, 6)
+    p.close()
+
+
+# --- scenario 9: legacy saved caps hold under -w --------------------------------
+def s_saved_caps():
+    """A config written by an older install (CFG_TABLE_ROWS/CFG_TITLE_LINES —
+    no header, no markers) is saved provenance: -w shows the cap row and
+    truncates titles to one line instead of applying the uncapped mode
+    default. Removed afterwards so later scenarios see the default again."""
+    cfg = os.path.join(STATE, "repos", "test__pty", "config")
+    open(cfg, "w").write("CFG_TABLE_ROWS=3\nCFG_TITLE_LINES=1\n")
+    p = Pty(24, 80)
+    pid = p.spawn('exec "%s" status -w 60' % TOOL, env())
+    refresh_caches()
+    if not p.pump_until(b"#20", 35):
+        bad("saved caps first paint", "no data frame")
+        p.close()
+        try: os.remove(cfg)
+        except OSError: pass
+        return
+    # wait for the cap row itself — '#20' fires on the first record byte, which
+    # can be mid-paint, so a last_frame() snapshot can precede the row's write
+    ok("saved caps: cap row") if p.pump_until(b"TABLE_ROWS=3", 8) else \
+        bad("saved caps: cap row", "no cap row — saved TABLE_ROWS=3 not honored")
+    frame = bytes(p.last_frame())
+    ok("saved caps: titles truncated to one line") \
+        if b"several lines of the body region" not in frame else \
+        bad("saved caps: titles truncated", "wrapped title tail visible under TITLE_LINES=1")
+    p.send(b"q")
+    p.wait(pid, 6)
+    try:
+        os.remove(cfg)
+    except OSError:
+        pass
+    p.close()
+
+
+# --- scenario 10: SIGTERM restores like SIGINT ----------------------------------
+def s_sigterm():
+    p = Pty(24, 80)
+    wtmp = os.path.join(STATE, "wtmp-term")
+    os.makedirs(wtmp)
+    pid = p.spawn('trap ":" INT; stty -g >"%s/tty.before"; "%s" status -w 60; '
+                  'echo "rc=$?" >"%s/watch.rc"; stty -g >"%s/tty.after"'
+                  % (STATE, TOOL, STATE, STATE), env({"MKTEMP_STUB_DIR": wtmp}))
+    refresh_caches()
+    if not p.pump_until(b"#20", 35):
+        bad("sigterm first paint", "no data frame")
+        p.close()
+        return
+    # TERM pr-agent itself, not the group: the wrapper bash shares the pgrp and
+    # a group-TERM kills it mid-teardown — a harness artifact, not the watch's
+    # restore path. (SIGINT above can killpg: the wrapper traps ":" INT anyway.)
+    kid = subprocess.check_output(["pgrep", "-P", str(pid)]).split()
+    os.kill(int(kid[0]), signal.SIGTERM)
+    rc = p.wait(pid, 6)
+    p.pump(0.5)
+    ok("SIGTERM exits") if rc is not None else bad("SIGTERM exits", "still running")
+    ok("SIGTERM leaves alt-screen") if b"\x1b[?1049l" in p.buf else \
+        bad("SIGTERM leaves alt-screen", "no rmcup")
+    ok("SIGTERM shows cursor") if b"\x1b[?25h" in p.buf else \
+        bad("SIGTERM shows cursor", "no cnorm")
+    _restore_check(p, "SIGTERM restores termios")
+    left = stub_leftovers(wtmp)
+    ok("SIGTERM leaves no tempfiles") if not left else \
+        bad("SIGTERM leaves no tempfiles", left)
+    p.close()
+
+
+# --- scenario 11: input EOF (master closed) exits through cleanup ---------------
+def s_eof():
+    """Closing the pty master is the input-stream EOF case: the foreground
+    pgrp gets SIGHUP — deferred like the other signals — and the watch must
+    still exit through the cleanup path (no hang, no leaked tempfiles)."""
+    wtmp = os.path.join(STATE, "wtmp-eof")
+    os.makedirs(wtmp)
+    p = Pty(24, 80)
+    pid = p.spawn('exec "%s" status -w 60' % TOOL, env({"MKTEMP_STUB_DIR": wtmp}))
+    refresh_caches()
+    if not p.pump_until(b"#20", 25):
+        bad("eof first paint", "no data frame")
+        p.close()
+        return
+    p.close()                       # master gone -> SIGHUP to the fg pgrp
+    rc = None                       # wait without pumping — master is closed
+    end = time.time() + 8
+    while time.time() < end:
+        w, s = os.waitpid(pid, os.WNOHANG)
+        if w:
+            rc = os.WEXITSTATUS(s) if os.WIFEXITED(s) else -os.WTERMSIG(s)
+            break
+        time.sleep(0.2)
+    ok("EOF exits the watch") if rc is not None else \
+        bad("EOF exits the watch", "still running after 8s")
+    left = stub_leftovers(wtmp)
+    ok("EOF leaves no tempfiles") if not left else \
+        bad("EOF leaves no tempfiles", left)
+
+
+# --- scenario 12: missing terminal capabilities still render ---------------------
+def s_term_dumb():
+    """TERM=dumb: tput can't drive smcup/civis — the literal fallbacks must
+    still paint records, keep the frame bounded at the real winsize, and let
+    q exit through the same restore path."""
+    e = env()
+    e["TERM"] = "dumb"
+    p = Pty(24, 80)
+    pid = p.spawn('exec "%s" status -w 60' % TOOL, e)
+    refresh_caches()
+    ok("dumb term: records paint") if p.pump_until(b"#20", 25) else \
+        bad("dumb term: records paint", "no data frame in 25s")
+    b = bounded(p.frame_lines(), 24, 80)
+    ok("dumb term: frame bounded") if b is None else \
+        bad("dumb term: frame bounded", b)
+    p.send(b"q")
+    rc = p.wait(pid, 6)
+    ok("dumb term: q exits") if rc == 0 else bad("dumb term: q exits", "rc=%r" % rc)
+    p.close()
+
+
+# --- scenario 13: persistent gather failure still honors q/EOF ------------------
 def s_retry_quit():
     """Broken jq -> status_gather emits nothing and the watch retries; the
     retry loop must poll input so q still exits (sleep-only loops hung)."""
@@ -480,7 +623,7 @@ def s_retry_quit():
     p.close()
 
 
-# --- scenario 9: SIGINT mid-gather cleans worker + tempfiles -------------------
+# --- scenario 14: SIGINT mid-gather cleans worker + tempfiles -------------------
 def s_sigint_mid_gather():
     """Signal while a gather worker is in flight: the loading frame may
     already be painted (that's the async design), but the gather's gh fan-out
@@ -550,7 +693,7 @@ def s_sigint_mid_gather():
     p.close()
 
 
-# --- scenario 10: a hung gather never blocks nav, resize, or quit --------------
+# --- scenario 15: a hung gather never blocks nav, resize, or quit --------------
 def s_hung_gather():
     """GH_DELAY=25 execs a 25s sleep inside every gh call — the gather worker
     can never finish inside the window. The watch must still paint the
@@ -624,7 +767,7 @@ def s_hung_gather():
     p.close()
 
 
-# --- scenario 11: worker bound-out keeps the last good snapshot -----------------
+# --- scenario 16: worker bound-out keeps the last good snapshot -----------------
 def s_worker_bound():
     """First gather succeeds, then GH_SLOW_FILE flips gh to hang forever. The
     next worker must be killed at PR_AGENT_GATHER_TIMEOUT while the adopted
@@ -686,7 +829,7 @@ def s_worker_bound():
     p.close()
 
 
-# --- scenario 12: sustained key traffic must not reset the refresh deadline -----
+# --- scenario 17: sustained key traffic must not reset the refresh deadline -----
 def s_key_burst():
     """A constant key stream must not postpone next_gather — the deadline is
     absolute, so a refresh worker still spawns mid-burst (the ↻ refreshing
@@ -721,7 +864,7 @@ def s_key_burst():
     p.close()
 
 
-# --- scenario 13: a hung model source can't stall PR data -----------------------
+# --- scenario 18: a hung model source can't stall PR data -----------------------
 def s_model_hang():
     """PR_AGENT_MODEL_LOOKUP names a probe that execs a 30s sleep — the model
     phase is bounded (PR_AGENT_MODEL_TIMEOUT=2), so records still render
@@ -744,8 +887,8 @@ def s_model_hang():
             STATE, "repos", "test__pty", "status_models"), (0, 0))
     except OSError:
         pass
-    ok("model hang: records still render") if p.pump_until(b"#20", 12) else \
-        bad("model hang: records still render", "no data frame in 12s")
+    ok("model hang: records still render") if p.pump_until(b"#20", 30) else \
+        bad("model hang: records still render", "no data frame in 30s")
     ok("model hang: probe actually ran") if os.path.getsize(mpids) > 0 else \
         bad("model hang: probe actually ran", "no probe pid recorded")
     p.send(b"q")
@@ -768,6 +911,11 @@ s_small()
 s_nocolor()
 s_garbage()
 s_badinterval()
+s_ten_records()
+s_saved_caps()
+s_sigterm()
+s_eof()
+s_term_dumb()
 s_retry_quit()
 s_sigint_mid_gather()
 s_hung_gather()

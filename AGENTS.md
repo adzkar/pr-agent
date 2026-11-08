@@ -14,7 +14,7 @@
 | `docs/ARCHITECTURE.md` | Code structure map, state files, execution flows |
 | `docs/RELEASING.md` | Step-by-step release guide for maintainers |
 | `release` | Maintainer script — cuts versioned GitHub releases (`./release [patch|minor|major|X.Y.Z]`) |
-| `tests/` | `release.sh` — scratch-repo + stubbed-`gh` harness for `release` and `update`; `update-check.sh` — extracted-function harness for `maybe_update_check`/`pending_update_version` |
+| `tests/` | `release.sh` — scratch-repo + stubbed-`gh` harness for `release` and `update` (incl. failed/truncated downloads, failed stage cleanup, stale staged files, and rollback); `update-check.sh` — extracted-function harness for `maybe_update_check`/`pending_update_version` |
 | `tests/smoke.sh` | Scratch-repo smoke for the worktree-blocked lifecycle (local git only) |
 | `tests/review_verdict.sh` | Fixture checks for the `PR_JQ` `.review` verdict derivation (jq only) |
 | `tests/author_match.sh` | Extracted-function fixtures for case-insensitive author/login matching (jq only) |
@@ -24,7 +24,8 @@
 | `tests/status_grid.sh` | Handcrafted-snapshot fixtures driving `_layout` — logical-grid geometry (measured columns, TITLE allocation, optional LAST RUN/SESSION, pinned `TITLE_W`), bounded projection + `hoff`, blank-cell continuations, unicode/ANSI cells, compact tiny-terminal state |
 | `tests/status_nav.sh` | Extracted-function fixtures for the `-w` machinery — the `status_key` byte→key decoder (CSI/SS3, partial sequences, unknown-final requeue), `key_nav` clamps, `status_anchor` re-anchoring across rebuilds/evictions/resizes, `status_meta` geometry + record anchors |
 | `tests/status_model.sh` | Scratch-state + real-sqlite fixtures for the session-model adapter — exact sid+worktree match, selected-model/router truthfulness (`adaptive` stays `adaptive`), switch/reset refresh, canonicalized dirs, repo-dir fallback, cross-repo isolation, missing/corrupt/old-schema/`sqlite3`-less sources degrade to `unknown`, read-only acquisition |
-| `tests/status_pty.sh` + `tests/status_pty.py` | Real-PTY end-to-end for `status -w` — seeded scratch state + stubbed `gh`/`mktemp`; two-axis navigation and bounds, frame physically bounded at every size, compact safe state, alt-screen/cursor/termios restoration on `q` and SIGINT, `NO_COLOR`, garbage input, garbage `-w` intervals, quit during persistent gather failure, mid-gather-SIGINT tempfile cleanup, worker bound-out keeps the stale snapshot, sustained key bursts can't postpone the refresh deadline, a hung model probe can't stall records, tempfile-leak asserts, and the "navigation never gathers" bound |
+| `tests/status_pty.sh` + `tests/status_pty.py` | Real-PTY end-to-end for `status -w` — seeded scratch state (ten wrap-length records, one CJK) + stubbed `gh`/`mktemp`; two-axis navigation and bounds, frame physically bounded at every size, compact safe state, alt-screen/cursor/termios restoration on `q`, SIGINT, SIGTERM, and input EOF, `NO_COLOR`, garbage input, garbage `-w` intervals, `TERM=dumb` capability loss, legacy saved caps honored under `-w`, redirected-stdio single-snapshot checks, quit during persistent gather failure, mid-gather-SIGINT tempfile cleanup, worker bound-out keeps the stale snapshot, sustained key bursts can't postpone the refresh deadline, a hung model probe can't stall records, tempfile-leak asserts, and the "navigation never gathers" bound |
+| `tests/upgrade.sh` | Upgrade-survival fixtures — a headerless pre-v2 config resolves saved/inert-marked values and stays byte-identical through `config`/`status`, old map/seen/log/session state survives gather + layout, a simulated older watcher's writes coexist (only the allowed blocked-flag maintenance differs), and a real `v0.3.0` binary rolled back onto post-upgrade state keeps working |
 | `AGENTS.md` | This file |
 
 ## Deploy model
@@ -51,7 +52,7 @@ was never released.
 
 ## Verify before committing
 
-Seven scratch-repo harnesses cover what CI doesn't: `tests/smoke.sh`
+The scratch-repo harnesses cover what CI doesn't: `tests/smoke.sh`
 exercises the worktree-blocked lifecycle on local git alone;
 `tests/review_verdict.sh` runs the `PR_JQ` verdict derivation over fixture
 payloads; `tests/author_match.sh` lifts the author-matching jq out of
@@ -64,8 +65,9 @@ extracts the settings resolver and checks precedence/provenance/invalid inputs;
 and checks the snapshot contract + layout purity; `tests/status_grid.sh` drives
 `_layout` over handcrafted snapshots and checks grid geometry + projection;
 `tests/status_model.sh` drives `_gather` over a real sqlite sessions index and
-checks the model adapter's matching, truthfulness, and failure fallbacks.
-Minimum checks:
+checks the model adapter's matching, truthfulness, and failure fallbacks;
+`tests/upgrade.sh` runs a pre-milestone install's config + state + a rolled-back
+release through the new status. Minimum checks:
 
 ```sh
 bash -n pr-agent                       # syntax
@@ -81,6 +83,7 @@ tests/status_grid.sh                   # grid geometry + projection fixtures (ha
 tests/status_nav.sh                    # -w decoder/nav-clamp/anchor fixtures (extracted functions)
 tests/status_model.sh                  # sessions-index model adapter fixtures (real sqlite3)
 tests/status_pty.sh                    # real-PTY interactive run: nav, bounds, lifecycle, NO_COLOR
+tests/upgrade.sh                       # legacy config/state/watcher/rollback survival (stubbed gh)
 ./tests/release.sh                     # release + update scenarios (run when `release` or `cmd_update` changes)
 ./tests/update-check.sh                # update-check edge cases (run when the check changes)
 cd /path/to/a/watched/repo             # then run READ-ONLY commands only:
@@ -248,6 +251,10 @@ the intent.
   swallowed). And `tput cols`/`lines` honor
   exported `$COLUMNS`/`$LINES` — stale values poison resized terminals —
   so `term_cols`/`term_lines` read `stty size` (live TIOCGWINSZ) first.
+  Every capability probe in the watch path is optional by contract:
+  `TERM=dumb tput civis` exits nonzero, so each `tput`/`stty` call needs a
+  `|| true`/fallback guard — an unguarded one kills the whole watch under
+  `set -e` before the first paint.
   The `mktemp` snapshot lives in `WATCH_SNAP` and a private `mktemp -d`
   dir is exported as `TMPDIR` in `WATCH_TMPD` — globals, because the
   EXIT trap can't see `status_watch`'s locals — so signal exits `rm -rf`
