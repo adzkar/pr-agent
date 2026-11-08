@@ -99,6 +99,8 @@
 #   PR_AGENT_REPO         owner/name to act on when not inside the repo
 #   PR_AGENT_STATE_DIR    State root (default ~/.local/state/pr-agent)
 #   DEVIN_BIN             Devin CLI binary (default devin)
+#   PR_AGENT_SESSIONS_DB  Devin sessions index the status MODEL column reads
+#                         (default $XDG_DATA_HOME/devin/cli/sessions.db)
 #
 # Examples:
 #   # one-off:
@@ -1700,6 +1702,7 @@ fmt_ago() { # seconds -> 45s / 3m12s / 1h05m
 STATUS_PENDING="$STATE_DIR/status_pending"
 STATUS_PENDING_TS="$STATE_DIR/status_pending.ts"   # epoch of the last fully-recounted rebuild
 STATUS_MODELS="$STATE_DIR/status_models"
+SESSIONS_DB_OK=''   # sessions-index probe verdict, cached per process: '' unprobed, 0 usable, 1 not
 COL_W=() COLS='' NEXT_POLL='' CELL_T='' CELL_C=''
 WRAP_LINES=() WRAP_FULL=0 WRAP_W=()
 SNOW=''   # snapshot epoch — status_layout freezes the relative-time helpers to it; empty = live clock
@@ -2097,15 +2100,47 @@ refresh_status_pending() { # ttl -> recount unprocessed feedback per open PR unl
   if [ "$full" -eq 1 ]; then date +%s >"$STATUS_PENDING_TS" 2>/dev/null || true; fi
 }
 
-status_model_lookup() { # pr session_id -> observed model label ('' = unknown). Seam
-                        # for the session-model reporting issue (#42): today it surfaces
-                        # the map-recorded model only. PR_AGENT_MODEL_LOOKUP names an
-                        # external probe command (test seam) — refresh_status_models
-                        # wraps the whole phase in run_bounded, so a hung or slow
-                        # source keeps prior evidence and can never stall records.
+sessions_db_path() { # -> the Devin CLI sessions index the MODEL column reads
+  echo "${PR_AGENT_SESSIONS_DB:-${XDG_DATA_HOME:-$HOME/.local/share}/devin/cli/sessions.db}"
+}
+
+sessions_db_ok() { # -> 0 when the sessions index is usable: sqlite3 present, the
+                   # file opens read-only, and sessions.model exists (the column
+                   # ships in the CLI's initial schema — the SELECT is the schema
+                   # check). Probed once per process; the verdict can't change
+                   # mid-collect.
+  case "$SESSIONS_DB_OK" in 0) return 0;; 1) return 1;; esac
+  SESSIONS_DB_OK=1
+  [ -f "$(sessions_db_path)" ] || return 1
+  command -v sqlite3 >/dev/null 2>&1 || return 1
+  sqlite3 -readonly "$(sessions_db_path)" 'SELECT model FROM sessions LIMIT 0' \
+    >/dev/null 2>&1 && SESSIONS_DB_OK=0
+  [ "$SESSIONS_DB_OK" = 0 ]
+}
+
+status_model_lookup() { # pr session_id -> observed model label ('' = unknown).
+                        # PR_AGENT_MODEL_LOOKUP names an external probe command
+                        # (test seam). The default source is the Devin CLI's own
+                        # sessions index: sessions.model is the session's
+                        # *selected* model or router ('adaptive' stays 'adaptive' —
+                        # never a guessed concrete LLM), matched on the exact
+                        # mapped session id AND its worktree (repo dir when none
+                        # is recorded) so a foreign session can't cross-associate.
+                        # refresh_status_models bounds the whole phase, so a hung
+                        # or failed source keeps prior evidence and can't stall
+                        # records.
   local probe="${PR_AGENT_MODEL_LOOKUP:-}"
   if [ -n "$probe" ]; then "$probe" "$1" "${2:-}" 2>/dev/null || true; return 0; fi
-  map_get "$1" model
+  local mdl='' ctx ctx_real
+  if [ -n "${2:-}" ] && sessions_db_ok; then
+    ctx="$(map_get "$1" worktree)"; [ -n "$ctx" ] || ctx="$(repo_dir)"
+    ctx_real="$(cd "$ctx" 2>/dev/null && pwd -P || true)"; ctx_real="${ctx_real:-$ctx}"
+    mdl="$(sqlite3 -readonly "$(sessions_db_path)" \
+      "SELECT model FROM sessions WHERE id='${2//\'/''}' AND working_directory IN ('${ctx//\'/''}','${ctx_real//\'/''}') LIMIT 1" \
+      2>/dev/null | head -1 | tr -d '[:cntrl:]' || true)"
+  fi
+  [ -n "$mdl" ] || mdl="$(map_get "$1" model)"   # db miss → map evidence
+  printf '%s\n' "$mdl"
 }
 
 status_models_collect() { # -> "pr model" lines for every record carrying a session_id
@@ -2580,8 +2615,11 @@ status_table() { # snapshot-file cols [term-rows [watch-every [live]]] -> builds
       order+=( "$num" ); ostate+=( "$state" ); obase+=( "$base" )
       ort+=( "$rt" ); orc+=( "$rc" ); ost+=( "$CELL_T" ); osc+=( "$CELL_C" )
       otit+=( "$(title_disp "$title")" )   # conventional-commit prefix dropped
-      ornd+=( "$rounds" ); omdl+=( "${model:-—}" )   # no model adapter yet — the
-      olrd+=( "$(fmt_rel "$lrun")" ); osidd+=( "${sid:-—}" )   # empty/unknown display value is —
+      ornd+=( "$rounds" )
+      if [ -n "$model" ]; then omdl+=( "$model" )
+      elif [ -n "$sid" ]; then omdl+=( unknown )   # session mapped, no verified evidence
+      else omdl+=( '—' ); fi                       # no session — the em-dash case
+      olrd+=( "$(fmt_rel "$lrun")" ); osidd+=( "${sid:-—}" )   # empty session display value is —
     done
   done
   fi
