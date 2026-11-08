@@ -22,6 +22,8 @@
 | `tests/display-settings.sh` | Extracted-function fixtures for the settings resolver — precedence, `SRC_*` provenance, invalid-input notes (bash only) |
 | `tests/status_snapshot.sh` | Scratch-state + stubbed-`gh` fixtures for the status gather/snapshot/layout split — record data, ordering, pending counts without `seen` writes, layout purity, incomplete-snapshot rejection, concurrent gathers |
 | `tests/status_grid.sh` | Handcrafted-snapshot fixtures driving `_layout` — logical-grid geometry (measured columns, TITLE allocation, optional LAST RUN/SESSION, pinned `TITLE_W`), bounded projection + `hoff`, blank-cell continuations, unicode/ANSI cells, compact tiny-terminal state |
+| `tests/status_nav.sh` | Extracted-function fixtures for the `-w` machinery — the `status_key` byte→key decoder (CSI/SS3, partial sequences), `key_nav` clamps, `status_anchor` re-anchoring across rebuilds/evictions/resizes, `status_meta` geometry + record anchors |
+| `tests/status_pty.sh` + `tests/status_pty.py` | Real-PTY end-to-end for `status -w` — seeded scratch state + stubbed `gh`; two-axis navigation and bounds, frame physically bounded at every size, compact safe state, alt-screen/cursor/termios restoration on `q` and SIGINT, `NO_COLOR`, garbage input, and the "navigation never gathers" bound |
 | `AGENTS.md` | This file |
 
 ## Deploy model
@@ -73,6 +75,8 @@ tests/title_wrap.sh                    # TITLE-cell wrap fixtures (no gh)
 tests/display-settings.sh              # settings precedence/provenance fixtures (no gh)
 tests/status_snapshot.sh               # gather/snapshot/layout fixtures (stubbed gh)
 tests/status_grid.sh                   # grid geometry + projection fixtures (handcrafted snapshots)
+tests/status_nav.sh                    # -w decoder/nav-clamp/anchor fixtures (extracted functions)
+tests/status_pty.sh                    # real-PTY interactive run: nav, bounds, lifecycle, NO_COLOR
 ./tests/release.sh                     # release + update scenarios (run when `release` or `cmd_update` changes)
 ./tests/update-check.sh                # update-check edge cases (run when the check changes)
 cd /path/to/a/watched/repo             # then run READ-ONLY commands only:
@@ -166,7 +170,9 @@ the intent.
   otherwise (floored at the heading's 5 cells) — then `-w` projects each line
   into `cols` cells behind a frozen
   `[0,gutter)` PR prefix at horizontal offset `hoff` (`cell_ops proj`;
-  `_layout`'s 6th arg) while plain `status` prints it whole. `LAST RUN` and
+  `_layout`'s 6th arg) while plain `status` prints it whole. Vertically the
+  `-w` body scrolls a `[voff, voff+ST_VREG)` window of the full logical table
+  between pinned top/bottom rules — every body line is reachable. `LAST RUN` and
   `SESSION` join only when they fully fit leftover viewport width; cells are
   `␣content␣│` — one space both sides, so rule/row/span formulas move
   together (`Σ COL_W + 3n + 1`). TITLE wraps at *one* logical width via
@@ -197,6 +203,21 @@ the intent.
   unreachable for every watched repo. Keep the `case` guard on provenance,
   never on the key name: it also keeps generated fallbacks (e.g. `RETRY_MSG`'s
   template) from being frozen as `saved`.
+- **`status -w` owns the terminal until it hands it back.** `status_watch`
+  saves `stty -g`, enters the alternate screen + hides the cursor, sets
+  `-icanon -echo` (ISIG kept — ^C stays a signal), and installs
+  `EXIT`/`INT`/`TERM`/`HUP`/`WINCH` traps that restore everything on *every*
+  exit path — never return from the loop without going through them. Input is
+  `read -rsn1 -t 1` (the 1s poll tick): **bash 3.2 returns rc 1 for both
+  timeout and EOF**, so a dead stdin is detected by several instant failures
+  inside one wall second, and `read -n` under `stty min 0` retries forever —
+  don't reintroduce VMIN=0 polling. `status_view` runs inside `$()`, so its
+  `ST_HOFF`/`ST_VOFF` clamps die in the subshell — `status_watch` re-clamps
+  its locals and republishes them (anchor math reads `ST_VOFF`). Offsets live
+  in the watch locals, never in `status_key`'s decoder (`status_key` only
+  maps bytes → `KEY`; `key_nav` mutates). And `tput cols`/`lines` honor
+  exported `$COLUMNS`/`$LINES` — stale values poison resized terminals —
+  so `term_cols`/`term_lines` read `stty size` (live TIOCGWINSZ) first.
 - **`running/<pr>` marker = "stopped by user".** `run_agent` treats a deleted
   marker as an intentional stop (rc 3), not a crash — remove the marker before
   killing a pid, never after.
