@@ -230,7 +230,10 @@ the intent.
   (`status -w abc` is an unbound crash, `008` a bad-octal one, `''`/`.5`
   a hot re-gather); and the pre-first-snapshot gather retry polls
   `status_key` instead of `sleep` — q/EOF must work before the first
-  paint exists.
+  paint exists. `status_tty_restore` emits its sequences to `/dev/tty`,
+  never stdout: a signal caught mid `status_gather >"$snap.new"` makes
+  the EXIT trap inherit the interrupted redirect, and stdout-bound
+  cnorm/rmcup would land in the snapshot file instead of the terminal.
 - **`running/<pr>` marker = "stopped by user".** `run_agent` treats a deleted
   marker as an intentional stop (rc 3), not a crash — remove the marker before
   killing a pid, never after.
