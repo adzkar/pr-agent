@@ -2431,7 +2431,7 @@ render_hint() { # running -> one contextual "what now" line
   printf '%s\n' "$hint"
 }
 
-status_table() { # snapshot-file cols [term-rows [watch-every]] -> builds the frame's
+status_table() { # snapshot-file cols [term-rows [watch-every [live]]] -> builds the frame's
                   # fixed and scrollable parts into ST_* globals. Pure — renders only
                   # from the snapshot: no gh/Devin calls, no worktree probes, no
                   # config/map/seen writes, so repaints and resizes may rebuild it
