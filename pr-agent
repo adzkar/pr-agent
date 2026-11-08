@@ -2493,7 +2493,7 @@ status_table() { # snapshot-file cols [term-rows [watch-every]] -> builds the fr
     # a stale or refreshing frame must not look freshly fetched. `live` comes
     # from the watch: refreshing while a worker is out, stale when the last
     # attempt failed or hit its bound, loading/retry before the first data.
-    local ftime data_age p_age m_age
+    local ftime data_age p_age m_age fresh
     ftime="$(date -r "$SNOW" +%H:%M:%S 2>/dev/null || date +%H:%M:%S)"
     data_age=$(( $(date +%s) - SNOW )); [ "$data_age" -lt 0 ] && data_age=0
     case "$live" in
@@ -2512,16 +2512,21 @@ status_table() { # snapshot-file cols [term-rows [watch-every]] -> builds the fr
       refreshing) foot_line+="${C_DIM} · ${C_CYAN}↻ refreshing${C_RESET}" ;;
       stale)      foot_line+="${C_DIM} · data $(fmt_ago "$data_age") old${C_RESET}" ;;
     esac
-    # freshness notes for the shared caches: past ~2 gather cycles old means
-    # the bounded refresh couldn't replace them and prior data is being shown
+    # freshness notes for the shared caches: past ~2 refresh cycles old means
+    # the bounded refresh couldn't replace them and prior data is being shown.
+    # A cycle is the slower of the watch interval and the caches' own 30s ttl —
+    # under -w N the caches legitimately age to N between gathers, so a flat
+    # 60s would flag a healthy -w 300 for most of every cycle.
+    fresh=60
+    [[ "$every" =~ ^[0-9]+$ ]] && [ "$every" -gt 30 ] 2>/dev/null && fresh=$(( 2 * every ))
     p_age=0; m_age=0
     [ "${p_ts:-0}" -gt 0 ] 2>/dev/null && p_age=$(( $(date +%s) - p_ts ))
     [ "${m_ts:-0}" -gt 0 ] 2>/dev/null && m_age=$(( $(date +%s) - m_ts ))
     case "$live" in
       loading|retry) ;;
-      *) [ "$p_age" -gt 60 ] 2>/dev/null && \
+      *) [ "$p_age" -gt "$fresh" ] 2>/dev/null && \
            foot_line+="${C_DIM} · counts $(fmt_ago "$p_age") old${C_RESET}"
-         [ "$m_age" -gt 60 ] 2>/dev/null && \
+         [ "$m_age" -gt "$fresh" ] 2>/dev/null && \
            foot_line+="${C_DIM} · model $(fmt_ago "$m_age") old${C_RESET}" ;;
     esac
   fi                           # line — kept short so it stays one physical line

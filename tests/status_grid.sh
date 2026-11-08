@@ -243,6 +243,17 @@ contains "$T/foot-stale.out"      "old"              "stale footer carries the d
 contains "$T/foot-loading.out"    "gathering status" "loading footer"
 contains "$T/foot-retry.out"      "retrying"         "retry footer"
 
+echo "== cache-freshness notes: the cycle is max(30s ttl, watch interval) =="
+jq --argjson t $(( $(date +%s) - 250 )) '.pending_ts = $t | .models_ts = $t' \
+  "$SNAP" >"$T/aged.json"
+# cols=120 so the trailing notes fit — at 80 they're the first thing trunc drops
+lay "$T/aged.json" 120 24 5   "" 0 0 live >"$T/foot-age5.out"
+lay "$T/aged.json" 120 24 300 "" 0 0 live >"$T/foot-age300.out"
+contains "$T/foot-age5.out"   "counts" "4m-old counts flag under -w 5 (cycle=ttl)"
+contains "$T/foot-age5.out"   "model " "4m-old model flag under -w 5"
+lacks    "$T/foot-age300.out" "counts" "4m-old counts quiet under -w 300 (cycle=300)"
+lacks    "$T/foot-age300.out" "model " "4m-old model quiet under -w 300"
+
 echo
 echo "$pass passed, $fail failed"
 [ "$fail" -eq 0 ]
