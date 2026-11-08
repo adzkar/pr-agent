@@ -3,8 +3,9 @@
 # horizontal projection. Drives `pr-agent _layout` on handcrafted snapshots —
 # layout is pure, so no scratch state, no gh stub.
 #   logical table:  PR | TITLE | REVIEW | AGENT STATE | ROUNDS | MODEL (+opt)
-#   projected mode: _layout SNAP COLS ROWS EVERY [META_OUT [HOFF]] clips the
-#                   table to COLS cells behind a frozen PR gutter at HOFF
+#   projected mode: _layout SNAP COLS ROWS EVERY [META_OUT [HOFF [VOFF [LIVE]]]]
+#                   clips the table to COLS cells behind a frozen PR gutter at
+#                   HOFF/VOFF; LIVE names the watch's refresh state for the footer
 set -euo pipefail
 T="$(mktemp -d)"
 trap 'rm -rf "$T"' EXIT
@@ -227,6 +228,20 @@ for r in 21 22 23 24 25 26; do   # saturation range: act_n clamps inside 1..ACTI
   [ "$ph" -le $(( r - 1 )) ] && ok "budgeted frame fits rows=$r (phys $ph)" \
                              || bad "budgeted frame fits rows=$r" "phys $ph > $((r-1))"
 done
+
+echo "== -w footer: the controls are the fixed half; state/cache notes trail =="
+# base + controls fits at 80 in every live state, so trunc drops a trailing
+# note, never the help (annotated bases stay short on purpose)
+for st in live refreshing stale loading retry; do
+  lay "$SNAP" 80 24 5 "" 0 0 "$st" >"$T/foot-$st.out"
+  contains "$T/foot-$st.out" "q quit" "footer controls survive at 80 (live=$st)"
+done
+contains "$T/foot-live.out"       "updated"          "live footer carries the data clock"
+contains "$T/foot-refreshing.out" "↻ refreshing"     "refreshing note still shows at 80"
+contains "$T/foot-stale.out"      "⚠ refresh failed" "stale footer names the state"
+contains "$T/foot-stale.out"      "old"              "stale footer carries the data age"
+contains "$T/foot-loading.out"    "gathering status" "loading footer"
+contains "$T/foot-retry.out"      "retrying"         "retry footer"
 
 echo
 echo "$pass passed, $fail failed"

@@ -2498,12 +2498,19 @@ status_table() { # snapshot-file cols [term-rows [watch-every]] -> builds the fr
     data_age=$(( $(date +%s) - SNOW )); [ "$data_age" -lt 0 ] && data_age=0
     case "$live" in
       loading)    foot_line="${C_DIM}… gathering status${C_RESET}${C_DIM} · refresh ${every}s${C_RESET}" ;;
-      retry)      foot_line="${C_YELLOW}⚠ gather failed — retrying${C_RESET}${C_DIM} · refresh ${every}s${C_RESET}" ;;
-      *)          foot_line="${C_DIM}live · refresh ${every}s · updated ${ftime}${C_RESET}"
-                  [ "$live" = refreshing ] && \
-                    foot_line+="${C_DIM} · ${C_CYAN}↻ refreshing${C_RESET}"
-                  [ "$live" = stale ] && \
-                    foot_line+="${C_DIM} · ${C_YELLOW}⚠ refresh failed — data $(fmt_ago "$data_age") old${C_RESET}" ;;
+      retry)      foot_line="${C_YELLOW}⚠ gather failed — retrying${C_RESET}" ;;
+      refreshing) foot_line="${C_DIM}live · refresh ${every}s${C_RESET}" ;;
+      stale)      foot_line="${C_YELLOW}⚠ refresh failed${C_RESET}" ;;
+      *)          foot_line="${C_DIM}live · refresh ${every}s · updated ${ftime}${C_RESET}" ;;
+    esac
+    # the controls are the footer's fixed half — they land before the variable
+    # state/cache notes so trunc drops a note, never the help, in exactly the
+    # annotated states where the help matters most (annotated bases stay short
+    # so base + controls + the state note still fit at 80 cols)
+    foot_line+="${C_DIM} · ${C_BOLD}↑↓/jk ←→/hl PgUp/PgDn g/G 0/\$${C_RESET}${C_DIM} · ${C_BOLD}q${C_RESET}${C_DIM} quit${C_RESET}"
+    case "$live" in
+      refreshing) foot_line+="${C_DIM} · ${C_CYAN}↻ refreshing${C_RESET}" ;;
+      stale)      foot_line+="${C_DIM} · data $(fmt_ago "$data_age") old${C_RESET}" ;;
     esac
     # freshness notes for the shared caches: past ~2 gather cycles old means
     # the bounded refresh couldn't replace them and prior data is being shown
@@ -2517,7 +2524,6 @@ status_table() { # snapshot-file cols [term-rows [watch-every]] -> builds the fr
          [ "$m_age" -gt 60 ] 2>/dev/null && \
            foot_line+="${C_DIM} · model $(fmt_ago "$m_age") old${C_RESET}" ;;
     esac
-    foot_line+="${C_DIM} · ${C_BOLD}↑↓/jk ←→/hl PgUp/PgDn g/G 0/\$${C_RESET}${C_DIM} · ${C_BOLD}q${C_RESET}${C_DIM} quit${C_RESET}"
   fi                           # line — kept short so it stays one physical line
   if [ "$ACTIVITY_LINES" -gt 0 ]; then
     act_hdr="${C_BOLD}recent activity${C_RESET}${C_DIM}  (full log: pr-agent logs · agent transcript: pr-agent logs N)${C_RESET}"
