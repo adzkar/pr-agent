@@ -3051,7 +3051,7 @@ status_watch() { # every -> the interactive two-axis status viewport (TTYs and
     # adopt a completed snapshot, or bound out a worker that overran its deadline
     if [ -n "$w_pid" ] && [ -f "$w_done" ]; then
       w_rc="$(cat "$w_done" 2>/dev/null || echo 1)"; rm -f "$w_done"
-      wait "$w_pid" 2>/dev/null; w_pid=''; WATCH_WORKER=''
+      wait "$w_pid" 2>/dev/null || true; w_pid=''; WATCH_WORKER=''
       old_order="${ST_REC_N[*]-}"            # the order the user last saw — the
       if [ "$w_rc" = "0" ] && [ -s "$w_new" ] && snapshot_valid "$w_new"; then
         mv -f "$w_new" "$snap"               # eviction fallback walks it on refresh
