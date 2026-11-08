@@ -79,7 +79,7 @@ watching open PRs by @me · every 2m · mode dangerous · conflicts · 2 paralle
 │ PR   │ TITLE                                     │ REVIEW         │ AGENT STATE           │ ROUNDS │ MODEL     │ LAST RUN │ SESSION     │
 ├──────┼───────────────────────────────────────────┼────────────────┼───────────────────────┼────────┼───────────┼──────────┼─────────────┤
 │ #266 │ payment changes for the currency refactor │ ✗ changes req. │ ↻ agent working 2m30s │ 9      │ swe-2-max │ 2m ago   │ pumped-leaf │
-│ #252 │ activate the watcher when a repo is added │ ✓ approved     │ merged — done         │ 2      │ —         │ 6d ago   │ calm-river  │
+│ #252 │ activate the watcher when a repo is added │ ✓ approved     │ merged — done         │ 2      │ adaptive  │ 6d ago   │ calm-river  │
 │      │ … 2 more — TABLE_ROWS=2                                                                                                          │
 └──────┴───────────────────────────────────────────┴────────────────┴───────────────────────┴────────┴───────────┴──────────┴─────────────┘
 
@@ -119,9 +119,12 @@ recent activity  (full log: pr-agent logs · agent transcript: pr-agent logs N)
   `PR_AGENT_ACTIVITY_LINES`.
 - **recent activity** tails the deduplicated event log; the last line is a
   contextual "what now" hint with the command to run.
-- `MODEL` is the agent's model id per PR (`—` until per-session model data
-  lands). `LAST RUN` and `SESSION` are optional: they join the grid only
-  when they fully fit in the spare width after the core columns.
+- `MODEL` is the model selected for each PR's agent session, read from the
+  Devin CLI's sessions index — a router choice like `adaptive` is shown as
+  `adaptive`, `unknown` means a session is mapped but has no readable
+  evidence, and `—` means no session exists. `LAST RUN` and `SESSION` are
+  optional: they join the grid only when they fully fit in the spare width
+  after the core columns.
 - On a very small terminal (under ~30 columns or 8 rows) the dashboard
   degrades to a compact safe state instead of a clipped grid.
 
@@ -181,6 +184,7 @@ invocation only:
 | `PR_AGENT_GATHER_TIMEOUT` | `60` | Seconds a `status -w` background refresh may run before it's killed and the dashboard keeps the last snapshot (marked stale) |
 | `PR_AGENT_PENDING_TIMEOUT` | `15` | Seconds each PR's pending-feedback fetch may take inside a status gather |
 | `PR_AGENT_MODEL_TIMEOUT` | `10` | Seconds the whole session-model refresh may take inside a status gather |
+| `PR_AGENT_SESSIONS_DB` | `$XDG_DATA_HOME/devin/cli/sessions.db` | Devin sessions index the status `MODEL` column reads (read-only) |
 | `PR_AGENT_UPDATE_CHECK` | `1` | Check for newer releases in the background; notice appears on a later run (`0` disables the check and any pending notice) |
 | `PR_AGENT_UPDATE_CHECK_EVERY` | `86400` | Seconds between release checks |
 | `PR_AGENT_REPO` | — | `owner/name` to act on when not inside the repo |

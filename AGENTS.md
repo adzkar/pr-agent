@@ -23,6 +23,7 @@
 | `tests/status_snapshot.sh` | Scratch-state + stubbed-`gh` fixtures for the status gather/snapshot/layout split — record data, ordering, pending counts without `seen` writes, layout purity, incomplete-snapshot rejection, concurrent gathers |
 | `tests/status_grid.sh` | Handcrafted-snapshot fixtures driving `_layout` — logical-grid geometry (measured columns, TITLE allocation, optional LAST RUN/SESSION, pinned `TITLE_W`), bounded projection + `hoff`, blank-cell continuations, unicode/ANSI cells, compact tiny-terminal state |
 | `tests/status_nav.sh` | Extracted-function fixtures for the `-w` machinery — the `status_key` byte→key decoder (CSI/SS3, partial sequences, unknown-final requeue), `key_nav` clamps, `status_anchor` re-anchoring across rebuilds/evictions/resizes, `status_meta` geometry + record anchors |
+| `tests/status_model.sh` | Scratch-state + real-sqlite fixtures for the session-model adapter — exact sid+worktree match, selected-model/router truthfulness (`adaptive` stays `adaptive`), switch/reset refresh, canonicalized dirs, repo-dir fallback, cross-repo isolation, missing/corrupt/old-schema/`sqlite3`-less sources degrade to `unknown`, read-only acquisition |
 | `tests/status_pty.sh` + `tests/status_pty.py` | Real-PTY end-to-end for `status -w` — seeded scratch state + stubbed `gh`/`mktemp`; two-axis navigation and bounds, frame physically bounded at every size, compact safe state, alt-screen/cursor/termios restoration on `q` and SIGINT, `NO_COLOR`, garbage input, garbage `-w` intervals, quit during persistent gather failure, mid-gather-SIGINT tempfile cleanup, worker bound-out keeps the stale snapshot, sustained key bursts can't postpone the refresh deadline, a hung model probe can't stall records, tempfile-leak asserts, and the "navigation never gathers" bound |
 | `AGENTS.md` | This file |
 
@@ -61,7 +62,9 @@ from `pr-agent` and exercises the stamp/throttle edge cases; `display-settings.s
 extracts the settings resolver and checks precedence/provenance/invalid inputs;
 `tests/status_snapshot.sh` drives `_gather`/`_layout` over a scratch state dir
 and checks the snapshot contract + layout purity; `tests/status_grid.sh` drives
-`_layout` over handcrafted snapshots and checks grid geometry + projection.
+`_layout` over handcrafted snapshots and checks grid geometry + projection;
+`tests/status_model.sh` drives `_gather` over a real sqlite sessions index and
+checks the model adapter's matching, truthfulness, and failure fallbacks.
 Minimum checks:
 
 ```sh
@@ -76,6 +79,7 @@ tests/display-settings.sh              # settings precedence/provenance fixtures
 tests/status_snapshot.sh               # gather/snapshot/layout fixtures (stubbed gh)
 tests/status_grid.sh                   # grid geometry + projection fixtures (handcrafted snapshots)
 tests/status_nav.sh                    # -w decoder/nav-clamp/anchor fixtures (extracted functions)
+tests/status_model.sh                  # sessions-index model adapter fixtures (real sqlite3)
 tests/status_pty.sh                    # real-PTY interactive run: nav, bounds, lifecycle, NO_COLOR
 ./tests/release.sh                     # release + update scenarios (run when `release` or `cmd_update` changes)
 ./tests/update-check.sh                # update-check edge cases (run when the check changes)
