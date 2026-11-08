@@ -72,6 +72,7 @@ contains "$T/plain80.out" "MODEL"  "MODEL header present at 80 (plain)"
 contains "$T/plain80.out" "#266"   "record #266 in plain table"
 contains "$T/plain80.out" "swe-2-max" "real model value renders"
 contains "$T/plain80.out" "—"      "empty model falls back to —"
+contains "$T/plain80.out" "unknown" "session without evidence shows unknown"
 contains "$T/plain80.out" "9"      "existing round count renders"
 
 echo "== core metadata measured, not truncated =="

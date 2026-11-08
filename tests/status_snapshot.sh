@@ -60,6 +60,7 @@ exec sleep 60
 STUB
 chmod +x "$G/model-probe" "$G/model-probe-hang"
 export PATH="$G:$PATH"
+export PR_AGENT_SESSIONS_DB="$G/no-sessions.db"   # keep the real sessions index out of the fixtures
 
 D="$PR_AGENT_STATE_DIR/repos/test__snap"
 mkdir -p "$D"
@@ -152,6 +153,7 @@ check_in "#2 cell paused"     "$FRAME" "⏸ paused"
 check_in "#1 cell pending"    "$FRAME" "● 1 new item"
 check_in "#1 review cell"     "$FRAME" "✗ changes req."
 check_in "#3 cell merged"     "$FRAME" "merged — done"
+check_in "#2 model unknown"   "$FRAME" "unknown"   # session mapped, index absent
 check_in "#4 cell blocked"    "$FRAME" "⚠ worktree blocked"
 check_in "#4 review draft"    "$FRAME" "draft"
 check_in "hint sees pending PRs"    "$FRAME" "watcher is off — new feedback on #1 won't be handled"
