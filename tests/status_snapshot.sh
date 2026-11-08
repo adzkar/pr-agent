@@ -32,6 +32,7 @@ cat >"$G/gh" <<'STUB'
 #!/usr/bin/env bash
 case "$1" in
   api) url="$3"; [ -n "${GH_LOG:-}" ] && echo "$url" >>"$GH_LOG"
+       case "$url" in *"$GH_SLOW_URL") sleep "${GH_SLOW_SECS:-0}" ;; esac
        case "$url" in
          */pulls/*/reviews)   v="GH_REV_${url##*/pulls/}";  v="${v%%/*}" ;;
          */pulls/*/comments)  v="GH_COM_${url##*/pulls/}";  v="${v%%/*}" ;;
@@ -46,6 +47,18 @@ esac
 exit 0
 STUB
 chmod +x "$G/gh"
+
+# model-probe stubs for the PR_AGENT_MODEL_LOOKUP seam: one answers instantly,
+# one hangs past any bound so refresh_status_models must reuse prior evidence
+cat >"$G/model-probe" <<'STUB'
+#!/usr/bin/env bash
+printf 'probe-model\n'
+STUB
+cat >"$G/model-probe-hang" <<'STUB'
+#!/usr/bin/env bash
+exec sleep 60
+STUB
+chmod +x "$G/model-probe" "$G/model-probe-hang"
 export PATH="$G:$PATH"
 
 D="$PR_AGENT_STATE_DIR/repos/test__snap"
@@ -65,7 +78,7 @@ echo "$R" >"$D/repo_dir"
 
 cat >"$D/map.json" <<'EOF'
 {"prs":{"1":{"rounds":"2","last_seen_ts":"2026-01-02T00:00:00Z"},
-        "2":{"paused":"1","last_seen_ts":"2026-01-02T00:00:00Z"},
+        "2":{"paused":"1","last_seen_ts":"2026-01-02T00:00:00Z","session_id":"sess-2"},
         "3":{"gave_up":"1","rounds":"4"},
         "4":{"worktree_blocked":"1","branch":"pr-branch","rounds":"1"}}}
 EOF
@@ -115,6 +128,8 @@ check "gh_error clear"                 "false" "$(jq -r '.gh_error' "$SNAP")"
 check "cfg.table_rows"                 "0" "$(jq -r '.cfg.table_rows' "$SNAP")"
 check "cfg.title_lines"                "3" "$(jq -r '.cfg.title_lines' "$SNAP")"
 check "model evidence slot"            "" "$(jq -r '.prs[] | select(.n==1) | .model' "$SNAP")"
+check "pending_ts numeric"             "true" "$(jq -r '.pending_ts | type == "number" and . >= 0' "$SNAP")"
+check "models_ts numeric"              "true" "$(jq -r '.models_ts | type == "number" and . >= 0' "$SNAP")"
 
 echo "status_snapshot: gather side effects stay inside the allowed inventory"
 
@@ -202,6 +217,42 @@ META="$(mktemp)"
 check "meta geometry"                  "1" "$(jq -se 'map(select(.type == "geometry" and .cols == 100)) | length == 1' "$META" >/dev/null && echo 1 || echo 0)"
 check "meta records"                   "4" "$(grep -c '"n":' "$META" || true)"
 check "meta line numbers grow"         "7 10" "$(jq -r 'select(.n) | "\(.line)"' "$META" | tr '\n' ' ' | sed 's/ $//' | awk '{print $1, $4}')"
+
+echo "status_snapshot: the bounded model phase caches what it can, keeps prior evidence when it can't"
+
+touch -t 202001010000 "$D/status_models"      # stale -> the probe phase must run
+SNAP_M="$(mktemp)"
+PR_AGENT_MODEL_LOOKUP="$G/model-probe" ./pr-agent _gather 0 >"$SNAP_M"
+check "probe model lands in record"    "probe-model" "$(jq -r '.prs[] | select(.n==2) | .model' "$SNAP_M")"
+check "status_models cache line"       "1" "$(grep -c '^2 probe-model$' "$D/status_models" 2>/dev/null || true)"
+
+# hung probe: bound at 1s keeps the prior cache line — an unbounded phase
+# would sit on the probe's 60s sleep, so the split is unambiguous
+touch -t 202001010000 "$D/status_models"
+SECONDS=0
+SNAP_M2="$(mktemp)"
+PR_AGENT_MODEL_LOOKUP="$G/model-probe-hang" PR_AGENT_MODEL_TIMEOUT=1 ./pr-agent _gather 0 >"$SNAP_M2"
+el=$SECONDS
+check "hung model phase bounded"       "1" "$([ "$el" -lt 30 ] && echo 1 || echo 0)"
+check "prior model evidence kept"      "probe-model" "$(jq -r '.prs[] | select(.n==2) | .model' "$SNAP_M2")"
+check "prior models file kept"         "1" "$(grep -c '^2 probe-model$' "$D/status_models" 2>/dev/null || true)"
+
+echo "status_snapshot: a bound-out PR keeps its prior pending count"
+
+# #2's issue-comments endpoint hangs 60s past PR_AGENT_PENDING_TIMEOUT=1 — the
+# per-PR bound keeps the prior count line instead of stalling the whole phase
+printf '1 5\n2 7\n4 2\n' >"$D/status_pending"
+touch -t 202001010000 "$D/status_pending"     # stale -> refresh must run
+SECONDS=0
+SNAP_B="$(mktemp)"
+GH_SLOW_URL='/issues/2/comments' GH_SLOW_SECS=60 PR_AGENT_PENDING_TIMEOUT=1 \
+  ./pr-agent _gather 0 >"$SNAP_B"
+el=$SECONDS
+check "bound-out pending keeps prior"  "7" "$(jq -r '.prs[] | select(.n==2) | .pending' "$SNAP_B")"
+check "prior count in refreshed file"  "2 7" "$(awk '$1 == 2' "$D/status_pending")"
+check "bounded pending phase prompt"   "1" "$([ "$el" -lt 30 ] && echo 1 || echo 0)"
+check "other PRs still recounted"      "1" "$(jq -r '.prs[] | select(.n==1) | .pending' "$SNAP_B")"
+unset GH_SLOW_URL GH_SLOW_SECS PR_AGENT_PENDING_TIMEOUT
 
 echo
 if [ "$fail" -eq 0 ]; then echo "status_snapshot: all checks passed"; else echo "status_snapshot: FAILURES"; exit 1; fi

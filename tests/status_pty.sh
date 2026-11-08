@@ -18,7 +18,7 @@ mkdir -p "$D/seen" "$T/bin"
 echo 'test/pty' >"$D/repo"
 echo 'alice'   >"$D/me"
 echo 'all'     >"$D/targets"
-echo '{"prs":{}}' >"$D/map.json"
+echo '{"prs":{"200":{"session_id":"sess-200"}}}' >"$D/map.json"
 : >"$D/status_pending"
 : >"$STATE/gh.log"
 
@@ -36,13 +36,29 @@ with open(sys.argv[1], "w") as f:
 PY
 
 # instrumented stub: every gh invocation lands in gh.log; list never runs
-# (cache stays fresh), anything else is a silent success
+# (cache stays fresh), anything else is a silent success. Optional hooks the
+# async-refresh scenarios drive: GH_PIDFILE records every stub pid (orphan
+# asserts), GH_DELAY execs a hanging sleep per call (never-completing gh),
+# GH_SLOW_FILE/GH_SLOW_SECS flip to hang mid-run (worker-bound asserts).
 cat >"$T/bin/gh" <<EOF
 #!/usr/bin/env bash
+[ -n "\${GH_PIDFILE:-}" ] && echo "\$\$" >>"\$GH_PIDFILE"
 printf '%s\n' "\$*" >>"$STATE/gh.log"
+if [ -n "\${GH_SLOW_FILE:-}" ] && [ -f "\$GH_SLOW_FILE" ]; then exec sleep "\${GH_SLOW_SECS:-20}"; fi
+[ -n "\${GH_DELAY:-}" ] && exec sleep "\$GH_DELAY"
 exit 0
 EOF
 chmod +x "$T/bin/gh"
+
+# model-source probe stub: the PR_AGENT_MODEL_LOOKUP seam — hangs when
+# MODEL_PROBE_SLEEP is set so scenario 13 can pin a stalled model source
+cat >"$T/bin/model-probe" <<'EOF'
+#!/usr/bin/env bash
+[ -n "${MODEL_PIDFILE:-}" ] && echo "$$" >>"$MODEL_PIDFILE"
+[ -n "${MODEL_PROBE_SLEEP:-}" ] && exec sleep "$MODEL_PROBE_SLEEP"
+printf 'probe-model\n'
+EOF
+chmod +x "$T/bin/model-probe"
 
 # mktemp stub: bare calls land in ${TMPDIR:-$MKTEMP_STUB_DIR} so scenarios can
 # assert no tempfile leaks — including inside the watch's exported TMPDIR;
