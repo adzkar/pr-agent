@@ -2807,7 +2807,9 @@ status_watch() { # every -> the interactive two-axis status viewport (TTYs and
   stty -icanon -echo 2>/dev/null      # VMIN=1 VTIME=0; ISIG kept — ^C stays a signal
   printf '\033[2J'
   snap="$(mktemp)"; WATCH_SNAP="$snap"; KEYBUF=''
-  [ "$every_i" -lt 1 ] 2>/dev/null && every_i=1
+  [[ "$every_i" =~ ^[0-9]+$ ]] || every_i=5   # garbage interval -> the -w default
+  every_i=$((10#$every_i))                    # digits only, or 008 trips octal math
+  [ "$every_i" -lt 1 ] && every_i=1
   while true; do
     if [ "$gather" -eq 1 ]; then
       old_order="${ST_REC_N[*]-}"          # the order the user last saw — the
@@ -2828,7 +2830,7 @@ status_watch() { # every -> the interactive two-axis status viewport (TTYs and
     fi
     last_cols="$cols"; last_rows="$rows"
     if [ "$rebuild" -eq 1 ]; then
-      status_table "$snap" "$cols" "$rows" "$every"
+      status_table "$snap" "$cols" "$rows" "$every_i"
       voff="$(status_anchor "$ANCHOR_N" "$ANCHOR_D" "$([ "$aremode" = resize ] && echo "$ANCHOR_C" || echo 0)" "$old_order" "$voff")"
       rebuild=0
     fi
@@ -2839,7 +2841,7 @@ status_watch() { # every -> the interactive two-axis status viewport (TTYs and
     [ "$hoff" -gt "${ST_MAXHOFF:-0}" ] 2>/dev/null && hoff=${ST_MAXHOFF:-0}
     [ "$voff" -lt 0 ] 2>/dev/null && voff=0
     [ "$voff" -gt "${ST_MAXVOFF:-0}" ] 2>/dev/null && voff=${ST_MAXVOFF:-0}
-    frame="$(status_view "$cols" "$every" "$hoff" "$voff")"
+    frame="$(status_view "$cols" "$every_i" "$hoff" "$voff")"
     ST_HOFF="$hoff"; ST_VOFF="$voff"; anchor_update
     clipped="$(printf '%s\n' "$frame" | cell_ops clip -v cols="$cols" -v rows="$rows")"
     if [[ "$clipped" == *$'\x02'* ]]; then
