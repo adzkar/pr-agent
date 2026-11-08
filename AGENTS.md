@@ -251,10 +251,11 @@ the intent.
   swallowed). And `tput cols`/`lines` honor
   exported `$COLUMNS`/`$LINES` — stale values poison resized terminals —
   so `term_cols`/`term_lines` read `stty size` (live TIOCGWINSZ) first.
-  Every capability probe in the watch path is optional by contract:
-  `TERM=dumb tput civis` exits nonzero, so each `tput`/`stty` call needs a
+  Every `tput` capability probe in the watch path is optional by contract:
+  `TERM=dumb tput civis` exits nonzero, so each `tput` call needs a
   `|| true`/fallback guard — an unguarded one kills the whole watch under
-  `set -e` before the first paint.
+  `set -e` before the first paint. `stty` mode-sets aren't probes — they
+  mutate the fd `stty -g` already verified — `2>/dev/null` is all they get.
   The `mktemp` snapshot lives in `WATCH_SNAP` and a private `mktemp -d`
   dir is exported as `TMPDIR` in `WATCH_TMPD` — globals, because the
   EXIT trap can't see `status_watch`'s locals — so signal exits `rm -rf`
