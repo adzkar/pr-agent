@@ -78,6 +78,18 @@ OUT="$(/bin/bash -c 'set -uo pipefail
   status_key < /dev/null; printf "%s" "$KEY"')"
 eq 'ESC then q still quits' "$OUT" 'none,quit'
 
+# an unrecognized CSI/SS3 final is requeued — it returns none, then dispatches
+# as its own key on the next call (ESC[q still quits, ESC[j scrolls)
+for spec in '\e[q|none,quit' '\eOq|none,quit' '\e[j|none,down'; do
+  bytes="${spec%%|*}"; want="${spec##*|}"
+  OUT="$(/bin/bash -c 'set -uo pipefail
+    KEYBUF=""; KEY=none; KEY_EOF_S=""; KEY_EOF_N=0; WATCH_RESIZE=0
+    . "'"$T"'/funcs.sh"
+    status_key < <(printf "'"$bytes"'"); printf "%s," "$KEY"
+    status_key < /dev/null; printf "%s" "$KEY"')"
+  eq "unknown final $bytes requeues" "$OUT" "$want"
+done
+
 # EOF: instantaneous failures burst → eof once the threshold is hit
 OUT="$(/bin/bash -c 'set -uo pipefail
   KEYBUF=""; KEY=none; KEY_EOF_S=""; KEY_EOF_N=0; WATCH_RESIZE=0

@@ -44,6 +44,18 @@ exit 0
 EOF
 chmod +x "$T/bin/gh"
 
+# mktemp stub: bare calls land in MKTEMP_STUB_DIR so scenarios can assert no
+# tempfile leaks; unset -> delegate (handles the bare `mktemp` the tool calls)
+cat >"$T/bin/mktemp" <<'EOF'
+#!/usr/bin/env bash
+[ -n "${MKTEMP_STUB_DIR:-}" ] || exec /usr/bin/mktemp "$@"
+d="$MKTEMP_STUB_DIR"; mkdir -p "$d"
+f="$d/stubtmp.$$.$RANDOM$RANDOM"
+if [ "${1:-}" = "-d" ]; then mkdir "$f"; else : >"$f"; fi
+printf '%s\n' "$f"
+EOF
+chmod +x "$T/bin/mktemp"
+
 export PR_AGENT_STATE_DIR="$STATE" PR_AGENT_REPO='test/pty' PR_AGENT_UPDATE_CHECK=0
 export PATH="$T/bin:$PATH"
 

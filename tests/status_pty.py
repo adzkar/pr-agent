@@ -138,6 +138,14 @@ def gh_calls():
         return 0
 
 
+def stub_leftovers(d):
+    """Files the mktemp stub left behind in dir d (leaks); [] = clean."""
+    try:
+        return os.listdir(d)
+    except OSError:
+        return []
+
+
 def refresh_caches():
     """Keep the seeded ttl caches fresh so status_gather stays cheap."""
     d = os.path.join(STATE, "repos", "test__pty")
@@ -180,9 +188,10 @@ def norm_lflag(s):
 # --- scenario 1: interactive lifecycle + navigation ---------------------------
 def s_nav():
     p = Pty(24, 80)
+    wtmp = os.path.join(STATE, "wtmp-nav")
     pid = p.spawn('trap ":" INT; stty -g >"%s/tty.before"; "%s" status -w 60; '
                   'echo "rc=$?" >"%s/watch.rc"; stty -g >"%s/tty.after"'
-                  % (STATE, TOOL, STATE, STATE), env())
+                  % (STATE, TOOL, STATE, STATE), env({"MKTEMP_STUB_DIR": wtmp}))
     refresh_caches()
     if not p.pump_until(b"\x1b[H", 25):
         bad("first paint", "no frame in 12s, %d bytes" % len(p.buf))
@@ -235,6 +244,8 @@ def s_nav():
             else bad("termios restored", "lflag %s vs %s" % (norm_lflag(before), norm_lflag(after)))
     except OSError as e:
         bad("termios restored", str(e))
+    left = stub_leftovers(wtmp)
+    ok("q leaves no tempfiles") if not left else bad("q leaves no tempfiles", left)
     p.close()
 
 
@@ -251,9 +262,10 @@ def _restore_check(p, name):
 # --- scenario 2: SIGINT restores ----------------------------------------------
 def s_sigint():
     p = Pty(24, 80)
+    wtmp = os.path.join(STATE, "wtmp-sigint")
     pid = p.spawn('trap ":" INT; stty -g >"%s/tty.before"; "%s" status -w 60; '
                   'echo "rc=$?" >"%s/watch.rc"; stty -g >"%s/tty.after"'
-                  % (STATE, TOOL, STATE, STATE), env())
+                  % (STATE, TOOL, STATE, STATE), env({"MKTEMP_STUB_DIR": wtmp}))
     refresh_caches()
     if not p.pump_until(b"\x1b[H", 25):
         bad("sigint first paint", "no frame")
@@ -266,6 +278,9 @@ def s_sigint():
     ok("SIGINT leaves alt-screen") if b"\x1b[?1049l" in p.buf else bad("SIGINT leaves alt-screen", "no rmcup")
     ok("SIGINT shows cursor") if b"\x1b[?25h" in p.buf else bad("SIGINT shows cursor", "no cnorm")
     _restore_check(p, "SIGINT restores termios")
+    left = stub_leftovers(wtmp)
+    ok("SIGINT leaves no tempfiles") if not left else \
+        bad("SIGINT leaves no tempfiles", left)
     p.close()
 
 
@@ -363,11 +378,74 @@ def s_garbage():
     p.close()
 
 
+# --- scenario 7: garbage -w intervals normalize instead of dying/hot-looping ---
+def s_badinterval():
+    """status -w abc/.5/008: non-numeric input must not die under set -u inside
+    the alt screen, and empty must not hot re-gather on every input tick."""
+    for arg, want in (("abc", b"refresh 5s"), (".5", b"refresh 5s"), ("008", b"refresh 8s")):
+        wtmp = os.path.join(STATE, "wtmp-i" + arg.replace(".", "d"))
+        p = Pty(24, 80)
+        pid = p.spawn('exec "%s" status -w %s' % (TOOL, arg),
+                      env({"MKTEMP_STUB_DIR": wtmp}))
+        refresh_caches()
+        if not p.pump_until(b"\x1b[H", 25):
+            bad("interval %s first paint" % arg, "no frame — died in alt screen")
+            p.close()
+            continue
+        f0 = bytes(p.last_frame())
+        ok("interval %s footer %s" % (arg, want.decode())) if want in f0 else \
+            bad("interval %s footer" % arg, "%r not in frame" % want)
+        n0 = p.paints()
+        p.pump(3.0)
+        ok("interval %s no hot re-gather" % arg) if p.paints() == n0 else \
+            bad("interval %s no hot re-gather" % arg,
+                "+%d paints in 3s" % (p.paints() - n0))
+        p.send(b"q")
+        rc = p.wait(pid, 6)
+        ok("interval %s q exits 0" % arg) if rc == 0 else \
+            bad("interval %s q exits 0" % arg, "rc=%r" % rc)
+        p.pump(0.5)
+        left = stub_leftovers(wtmp)
+        ok("interval %s no tempfile leak" % arg) if not left else \
+            bad("interval %s no tempfile leak" % arg, left)
+        p.close()
+
+
+# --- scenario 8: persistent gather failure still honors q/EOF ------------------
+def s_retry_quit():
+    """Broken jq -> status_gather emits nothing and the watch retries; the
+    retry loop must poll input so q still exits (sleep-only loops hung)."""
+    wtmp = os.path.join(STATE, "wtmp-retry")
+    badbin = os.path.join(STATE, "badbin")
+    os.makedirs(badbin, exist_ok=True)
+    jqpath = os.path.join(badbin, "jq")
+    open(jqpath, "w").write("#!/usr/bin/env bash\nexit 1\n")
+    os.chmod(jqpath, 0o755)
+    e = env({"MKTEMP_STUB_DIR": wtmp})
+    e["PATH"] = badbin + ":" + e["PATH"]
+    p = Pty(24, 80)
+    pid = p.spawn('exec "%s" status -w 60' % TOOL, e)
+    p.pump(3.0)                 # a few gather retries; no snapshot ever lands
+    p.send(b"q")
+    rc = p.wait(pid, 6)
+    ok("q exits while gather fails") if rc == 0 else \
+        bad("q exits while gather fails", "rc=%r" % rc)
+    p.pump(0.5)
+    ok("retry exit leaves alt-screen") if b"\x1b[?1049l" in p.buf else \
+        bad("retry exit leaves alt-screen", "no rmcup")
+    left = stub_leftovers(wtmp)
+    ok("retry exit leaves no tempfile") if not left else \
+        bad("retry exit leaves no tempfile", left)
+    p.close()
+
+
 s_nav()
 s_sigint()
 s_resize()
 s_small()
 s_nocolor()
 s_garbage()
+s_badinterval()
+s_retry_quit()
 print("--- status_pty: %d passed, %d failed" % (OKC, FAILC))
 sys.exit(1 if FAILC else 0)
