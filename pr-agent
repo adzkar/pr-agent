@@ -2054,10 +2054,11 @@ last_run_epoch() { # pr -> epoch of the last finished agent run (map, falling ba
 #       map_init                   → creates map.json when absent
 #     Everything else is a read: map.json, targets, seen/, running/, locks/, watch.log,
 #     pid/cycle files. Layout and painting perform none of these.
-#   status_layout snap cols [rows [every [meta-out]]] — pure: renders the ANSI frame from
-#     the snapshot alone (no gh/Devin calls, no worktree probes, no config/map/seen writes),
-#     so repaints and resizes may repeat it freely. meta-out optionally receives per-record
-#     line anchors for later scroll/resize work.
+#   status_layout snap cols [rows [every [meta-out [hoff [voff]]]]] — pure: renders the
+#     ANSI frame from the snapshot alone — status_table builds the logical grid into
+#     ST_* parts, status_view paints one frame at hoff/voff (empty every = the whole
+#     table), status_meta writes the anchor jsonl — no gh/Devin calls, no worktree
+#     probes, no config/map/seen writes, so repaints and resizes may repeat it freely.
 #   render_status — thin orchestrator: gather to a temp file, then lay it out.
 
 status_gather() { # ttl -> status snapshot (JSON v1) on stdout — see the inventory above

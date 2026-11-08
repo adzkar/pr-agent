@@ -172,7 +172,7 @@ command-substitution globals:
   review/draft, raw title, pending, rounds/fail counts, skip, blocked/sync
   flags, agent marker, session id, last-run epoch, model evidence), and the
   collapsed `activity` groups.
-- **`status_layout <snap> <cols> [term-rows] [watch-every] [meta-out] [hoff]`** —
+- **`status_layout <snap> <cols> [term-rows] [watch-every] [meta-out] [hoff] [voff]`** —
   pure paint: validates the snapshot is complete (`v` + required blocks —
   incomplete input is rejected), freezes the clock to `snapshot.now` so
   repeated paints are byte-identical, and touches no `gh`/Devin calls, no
@@ -228,13 +228,17 @@ gutter+hoff+cols−gutter)` — wrap points and record heights never change unde
 horizontal movement, lines never soft-wrap, and each line is `C_RESET`-
 terminated so clipped styles can't bleed. `term-rows` shrinks optional chrome
 first — the activity section emits at most the count that leaves the body
-intact (header + hint + footer are the last to go) — and `cmd_status` then
+intact (header + hint + footer are the last to go) — and `status_watch` then
 clips the composed frame: `cell_ops clip` counts physical height (ANSI-stripped,
 soft-wrap at `cols`), keeps the prefix that fits `rows − 1`, and returns a
-sentinel so `cmd_status` can append `… N more lines` (naming `TABLE_ROWS`
-when a cap is set). Very small terminals (`cols < 30` or `rows < 8`) get a
-compact safe state instead of a clipped grid. Keyboard scrolling is future
-work — `hoff` is the seam it plugs into.
+sentinel so the watch can append a `cols`-truncated `… N more lines` line
+(naming `TABLE_ROWS` when a cap is set). Very small terminals (`cols < 30` or
+`rows < 8`) get a compact safe state instead of a clipped grid. In `-w` the
+keyboard scrolls both axes through that window: `status_key` decodes CSI/SS3
+input into keys (an unrecognized sequence byte is requeued so it dispatches as
+its own key), `key_nav` moves `hoff`/`voff` inside the `ST_MAX*` bounds, and
+`status_anchor`/`anchor_update` re-anchor the same record line across refresh
+rebuilds, evictions, and resizes.
 
 ### Concurrency & locking
 

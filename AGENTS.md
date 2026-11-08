@@ -22,8 +22,8 @@
 | `tests/display-settings.sh` | Extracted-function fixtures for the settings resolver — precedence, `SRC_*` provenance, invalid-input notes (bash only) |
 | `tests/status_snapshot.sh` | Scratch-state + stubbed-`gh` fixtures for the status gather/snapshot/layout split — record data, ordering, pending counts without `seen` writes, layout purity, incomplete-snapshot rejection, concurrent gathers |
 | `tests/status_grid.sh` | Handcrafted-snapshot fixtures driving `_layout` — logical-grid geometry (measured columns, TITLE allocation, optional LAST RUN/SESSION, pinned `TITLE_W`), bounded projection + `hoff`, blank-cell continuations, unicode/ANSI cells, compact tiny-terminal state |
-| `tests/status_nav.sh` | Extracted-function fixtures for the `-w` machinery — the `status_key` byte→key decoder (CSI/SS3, partial sequences), `key_nav` clamps, `status_anchor` re-anchoring across rebuilds/evictions/resizes, `status_meta` geometry + record anchors |
-| `tests/status_pty.sh` + `tests/status_pty.py` | Real-PTY end-to-end for `status -w` — seeded scratch state + stubbed `gh`; two-axis navigation and bounds, frame physically bounded at every size, compact safe state, alt-screen/cursor/termios restoration on `q` and SIGINT, `NO_COLOR`, garbage input, and the "navigation never gathers" bound |
+| `tests/status_nav.sh` | Extracted-function fixtures for the `-w` machinery — the `status_key` byte→key decoder (CSI/SS3, partial sequences, unknown-final requeue), `key_nav` clamps, `status_anchor` re-anchoring across rebuilds/evictions/resizes, `status_meta` geometry + record anchors |
+| `tests/status_pty.sh` + `tests/status_pty.py` | Real-PTY end-to-end for `status -w` — seeded scratch state + stubbed `gh`/`mktemp`; two-axis navigation and bounds, frame physically bounded at every size, compact safe state, alt-screen/cursor/termios restoration on `q` and SIGINT, `NO_COLOR`, garbage input, garbage `-w` intervals, quit during persistent gather failure, tempfile-leak asserts, and the "navigation never gathers" bound |
 | `AGENTS.md` | This file |
 
 ## Deploy model
@@ -215,9 +215,18 @@ the intent.
   `ST_HOFF`/`ST_VOFF` clamps die in the subshell — `status_watch` re-clamps
   its locals and republishes them (anchor math reads `ST_VOFF`). Offsets live
   in the watch locals, never in `status_key`'s decoder (`status_key` only
-  maps bytes → `KEY`; `key_nav` mutates). And `tput cols`/`lines` honor
+  maps bytes → `KEY`; `key_nav` mutates — an unrecognized CSI/SS3 final is
+  requeued into KEYBUF so it dispatches as its own key next call, not
+  swallowed). And `tput cols`/`lines` honor
   exported `$COLUMNS`/`$LINES` — stale values poison resized terminals —
   so `term_cols`/`term_lines` read `stty size` (live TIOCGWINSZ) first.
+  The `mktemp` snapshot lives in `WATCH_SNAP` (a global — the EXIT trap
+  can't see `status_watch`'s locals) so signal exits unlink it too; the
+  `-w` interval is digit-validated and `10#`-normalized before arithmetic
+  (`status -w abc` is an unbound crash, `008` a bad-octal one, `''`/`.5`
+  a hot re-gather); and the pre-first-snapshot gather retry polls
+  `status_key` instead of `sleep` — q/EOF must work before the first
+  paint exists.
 - **`running/<pr>` marker = "stopped by user".** `run_agent` treats a deleted
   marker as an intentional stop (rc 3), not a crash — remove the marker before
   killing a pid, never after.
