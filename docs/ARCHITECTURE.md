@@ -30,8 +30,8 @@ Sections are delimited by `# --- name ---` banners, in file order:
 | watcher | 1189–1351 | `watch_loop` (re-cd's to `repo_dir` each cycle; re-probes `worktree_blocked` PRs via `still_blocked`), `pid_is_watcher`/`is_running`, `pr_sig`, `install_launchd` (launchd plist), `cmd_on`, `kill_agents`, `cmd_off` |
 | manual commands | 1352–1568 | `need_pr`/`need_real_pr`/`gh_err_not_pr` (every command acting on a user-supplied N — `on`/`add` targets included — resolves it through `need_real_pr`'s `gh pr view` first, `sync --apply` excepted (own resolution); `gh_err_not_pr` reads the stderr — only "Could not resolve to a PullRequest" marks a non-PR), `run`, `tell`/`_tell`, `attach`, `retry`, `peek`, `mark-seen`, `forget_pr`, `gc`, `sync`, `config`, `logs` (`version` is a dispatch one-liner) |
 | self-update | 1569–1690 | `ver_gt`, `latest_release_tag`, `cmd_update` — downloads release assets from `UPDATE_REPO`, verifies sha256, atomic-installs over the (symlink-resolved) install; `maybe_update_check`/`pending_update_version` — throttled background release check (OMZ-style), both gated on `UPDATE_CHECK` |
-| status rendering | 1693–2553 | `fmt_*`, `cell_ops` — one `LC_ALL=C` awk engine for display-cell ops (UTF-8 decode → wcwidth-style classes; ANSI escapes transparent): `len`/`max`/`ws`/`cut`/`trunc`/`proj`/`clip`/`pos` — backing `trunc`/`pad`/`vis_len`/`phys_lines`/`wrap` so `${#var}` is never used as a display width — `draw_*`, `status_prs`, `status_pending_count`/`refresh_status_pending` (pending counts without `seed_seen` — an absent marker gets `last_seen_ts` applied in memory), `refresh_blocked_flags` (lazy `still_blocked` re-probe — clears a freed flag even with the watcher off), `recent_event_groups`/`recent_events`, `status_gather` — emits the versioned JSON snapshot and is the *only* side-effecting stage (cache refresh + lock-protected blocked-flag maintenance); `review_cell`/`state_cell` (pure: read the record's snapshot fields; only side effect is the `H_*` hint buckets), `render_hint`, `status_layout` — pure paint: builds the logical grid, then prints it whole (plain) or horizontally projects it into the viewport behind a frozen PR gutter (`watch-every`/`hoff`) + optional per-record `meta-out` anchors, `render_status` (gather → temp file → layout), `cmd_status` (alt-screen watch loop + `cell_ops clip` frame clip), `usage` |
-| dispatch | 2554–end | `case "$1"` router (`usage` sits just above the banner) — inline cases: `add`/`rm`, `pause`/`resume`, `reset`, `reset-rounds`, `map`, `version`, `help`; `_loop`/`_check`/`_tell`/`_ensure`/`_blocked`/`_gather`/`_layout` are internal entries (`_gather` prints the status snapshot, `_layout` renders one — `tests/status_snapshot.sh` and `tests/status_grid.sh` drive both). `maybe_update_check` runs just before dispatch; the notice is skipped for internal/machine-readable commands (`_loop` logs it) |
+| status rendering | 1693–2913 | `fmt_*`, `cell_ops` — one `LC_ALL=C` awk engine for display-cell ops (UTF-8 decode → wcwidth-style classes; ANSI escapes transparent): `len`/`max`/`ws`/`cut`/`trunc`/`proj`/`clip`/`pos` — backing `trunc`/`pad`/`vis_len`/`phys_lines`/`wrap` so `${#var}` is never used as a display width — `draw_*`, `status_prs`, `status_pending_count`/`refresh_status_pending` (pending counts without `seed_seen` — an absent marker gets `last_seen_ts` applied in memory), `refresh_blocked_flags` (lazy `still_blocked` re-probe — clears a freed flag even with the watcher off), `recent_event_groups`/`recent_events`, `status_gather` — emits the versioned JSON snapshot and is the *only* side-effecting stage (cache refresh + lock-protected blocked-flag maintenance); `review_cell`/`state_cell` (pure: read the record's snapshot fields; only side effect is the `H_*` hint buckets), `render_hint`, `status_layout` — pure paint: `status_table` builds the logical grid + scroll geometry (frozen `[0,gutter)` PR gutter, `ST_VREG`/`ST_MAXVOFF`/`ST_MAXHOFF`, per-record line anchors), `status_view` composes one frame — whole table (plain) or a two-axis `[hoff,voff)` window behind pinned rules (watch) — `status_meta` reports the geometry + anchors; `render_status` (gather → temp file → layout), `status_watch` — the interactive `-w` loop: alt-screen + cursor-hidden + `-icanon -echo` lifecycle with `EXIT`/`INT`/`TERM`/`HUP`/`WINCH` restore traps plus a private `TMPDIR` (`WATCH_TMPD`) the trap `rm -rf`s — the snapshot, `.new`, and every gather-internal tempfile can't leak on signal exits — `status_key`/`key_nav` (CSI/SS3 key decoder → `hoff`/`voff` mutation), `status_anchor`/`anchor_update` (re-anchor the same record line across rebuilds/resizes), `cell_ops clip` frame clip; `cmd_status` (interactive gate + non-interactive fallback), `usage` |
+| dispatch | 2914–end | `case "$1"` router (`usage` sits just above the banner) — inline cases: `add`/`rm`, `pause`/`resume`, `reset`, `reset-rounds`, `map`, `version`, `help`; `_loop`/`_check`/`_tell`/`_ensure`/`_blocked`/`_gather`/`_layout` are internal entries (`_gather` prints the status snapshot, `_layout` renders one — `tests/status_snapshot.sh` and `tests/status_grid.sh` drive both). `maybe_update_check` runs just before dispatch; the notice is skipped for internal/machine-readable commands (`_loop` logs it) |
 
 ## On-disk state
 
@@ -172,7 +172,7 @@ command-substitution globals:
   review/draft, raw title, pending, rounds/fail counts, skip, blocked/sync
   flags, agent marker, session id, last-run epoch, model evidence), and the
   collapsed `activity` groups.
-- **`status_layout <snap> <cols> [term-rows] [watch-every] [meta-out] [hoff]`** —
+- **`status_layout <snap> <cols> [term-rows] [watch-every] [meta-out] [hoff] [voff]`** —
   pure paint: validates the snapshot is complete (`v` + required blocks —
   incomplete input is rejected), freezes the clock to `snapshot.now` so
   repeated paints are byte-identical, and touches no `gh`/Devin calls, no
@@ -228,13 +228,17 @@ gutter+hoff+cols−gutter)` — wrap points and record heights never change unde
 horizontal movement, lines never soft-wrap, and each line is `C_RESET`-
 terminated so clipped styles can't bleed. `term-rows` shrinks optional chrome
 first — the activity section emits at most the count that leaves the body
-intact (header + hint + footer are the last to go) — and `cmd_status` then
+intact (header + hint + footer are the last to go) — and `status_watch` then
 clips the composed frame: `cell_ops clip` counts physical height (ANSI-stripped,
 soft-wrap at `cols`), keeps the prefix that fits `rows − 1`, and returns a
-sentinel so `cmd_status` can append `… N more lines` (naming `TABLE_ROWS`
-when a cap is set). Very small terminals (`cols < 30` or `rows < 8`) get a
-compact safe state instead of a clipped grid. Keyboard scrolling is future
-work — `hoff` is the seam it plugs into.
+sentinel so the watch can append a `cols`-truncated `… N more lines` line
+(naming `TABLE_ROWS` when a cap is set). Very small terminals (`cols < 30` or
+`rows < 8`) get a compact safe state instead of a clipped grid. In `-w` the
+keyboard scrolls both axes through that window: `status_key` decodes CSI/SS3
+input into keys (an unrecognized sequence byte is requeued so it dispatches as
+its own key), `key_nav` moves `hoff`/`voff` inside the `ST_MAX*` bounds, and
+`status_anchor`/`anchor_update` re-anchor the same record line across refresh
+rebuilds, evictions, and resizes.
 
 ### Concurrency & locking
 

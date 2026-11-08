@@ -31,7 +31,7 @@ repo's editable file, unless `--force`.
 ```sh
 cd your-repo
 pr-agent on            # watch your open non-draft PRs, poll every 2m
-pr-agent status -w     # live dashboard, Ctrl-C to exit
+pr-agent status -w     # live dashboard — arrow keys / jkhl scroll both axes, q or Ctrl-C to exit
 ```
 
 New feedback on a watched PR — a review, a line comment, or a comment starting
@@ -100,18 +100,20 @@ recent activity  (full log: pr-agent logs · agent transcript: pr-agent logs N)
   metadata columns are measured at their real content width rather than
   squeezed or dropped to make the row fit. `status -w` shows a bounded
   window of that grid — the PR column stays pinned on the left and the rest
-  clips off the right edge (reach it with plain `pr-agent status`, which
-  prints the complete table; horizontal scrolling lands separately).
+  is reachable by scrolling right (`←`/`→` or `h`/`l`, `0`/`$` for the
+  edges); plain `pr-agent status` still prints the complete table.
 - Titles wrap over up to `PR_AGENT_TITLE_LINES` lines (`1` = truncate, `0` =
   no cap; default `3` for plain `status`, `0` for `status -w`) at one logical
   width, and the cap is never shrunk to fit the screen — only env or saved
   values change it. The other cells render on the first line; continuation
   lines keep the title text with blank metadata cells.
 - `PR_AGENT_TABLE_ROWS` counts PR records, not screen lines: `0` (default)
-  renders every record and lets the frame clip reveal what fits; a positive
-  `N` keeps the first `N` records and summarizes the rest in a `… N more`
-  row. To see more of an overflowing frame, shrink or hide the activity
-  block via `PR_AGENT_ACTIVITY_LINES`.
+  renders every record — in `-w` the record region scrolls vertically
+  (`↑`/`↓` or `k`/`j`, `PgUp`/`PgDn`, `g`/`G` for top/bottom) so every body
+  line stays reachable; a positive `N` keeps the first `N` records and
+  summarizes the rest in a `… N more` row (also scrollable into view). To
+  leave more room for records, shrink or hide the activity block via
+  `PR_AGENT_ACTIVITY_LINES`.
 - **recent activity** tails the deduplicated event log; the last line is a
   contextual "what now" hint with the command to run.
 - `MODEL` is the agent's model id per PR (`—` until per-session model data

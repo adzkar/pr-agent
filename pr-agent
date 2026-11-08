@@ -1702,6 +1702,15 @@ COL_W=() COLS='' NEXT_POLL='' CELL_T='' CELL_C=''
 WRAP_LINES=() WRAP_FULL=0 WRAP_W=()
 SNOW=''   # snapshot epoch — status_layout freezes the relative-time helpers to it; empty = live clock
 H_PENDING='' H_FAILED='' H_GAVEUP='' H_DIED='' H_WORKING='' H_PAUSED='' H_LIMIT='' H_BOTFAIL='' H_SYNCFAIL='' H_BLOCKED=''
+# status_table build parts / scroll geometry (see its contract comment)
+ST_MODE=table ST_GUTTER=0 ST_LOGIW=0 ST_TITLE_W=0 ST_SPAN_W=0 ST_PROJECTED=0
+ST_COLS=0 ST_TABLE_ROWS=0 ST_TITLE_LINES=0 ST_NRECS=0
+ST_BODYLINES=0 ST_VREG=0 ST_MAXVOFF=0 ST_MAXHOFF=0 ST_VOFF=0 ST_HOFF=0
+ST_MORE='' ST_MORE_F=0 ST_MORE_B=0 ST_FOOT=''
+ST_HEAD=() ST_TAIL=() ST_TBL=() ST_REC_N=() ST_REC_B=() ST_REC_C=() ST_REC_F=()
+# -w keyboard viewport state — EXIT-trap cleanup reads these, so globals only
+STTY_SAVE='' WATCH_TTY=0 WATCH_RESIZE=0 WATCH_SNAP='' WATCH_TMPD=''
+KEY=none KEYBUF='' KEY_EOF_S='' KEY_EOF_N=0 ANCHOR_N='' ANCHOR_D=0 ANCHOR_C=0
 
 setup_colors() { # enable ANSI styling only when stdout is a terminal and NO_COLOR is unset
   if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
@@ -1712,7 +1721,12 @@ setup_colors() { # enable ANSI styling only when stdout is a terminal and NO_COL
   fi
 }
 
-term_cols() { tput cols 2>/dev/null || echo 100; }
+# stty size reads the live winsize (TIOCGWINSZ); tput honors $COLUMNS/$LINES
+# first, which stale exported values poison on resized or mismatched terminals
+term_cols() { local s; s="$(stty size 2>/dev/null)" && { echo "${s##* }"; return; }
+              tput cols 2>/dev/null || echo 100; }
+term_lines() { local s; s="$(stty size 2>/dev/null)" && { echo "${s%% *}"; return; }
+               tput lines 2>/dev/null || echo 24; }
 
 cell_ops() { # mode [-v k=v]… — one LC_ALL=C awk engine for display-cell ops on stdin lines.
              # Bytes are decoded as UTF-8 → codepoints, classified wcwidth-style
@@ -1724,7 +1738,9 @@ cell_ops() { # mode [-v k=v]… — one LC_ALL=C awk engine for display-cell ops
              #   clipped to w cells (a straddling wide char emits as a space) ·
              #   trunc → whole line if ≤w cells else w-1 cells + '…' · proj → frozen
              #   [0,gutter) prefix + horizontal window [gutter+off, gutter+off+cols-
-             #   gutter), C_RESET-terminated · clip → emit lines while cumulative
+             #   gutter): content emits into cols-1 and a clipped line's own last
+             #   glyph (its border char) is pinned at the last cell, C_RESET-
+             #   terminated · clip → emit lines while cumulative
              #   soft-wrap phys ≤ rows-1, then a \x02<remaining> sentinel line
   local mode="$1"; shift
   LC_ALL=C awk -v mode="$mode" -v w=0 -v gutter=0 -v cols=0 -v off=0 -v rows=0 -v needle='' "$@" '
@@ -1786,7 +1802,7 @@ cell_ops() { # mode [-v k=v]… — one LC_ALL=C awk engine for display-cell ops
         if (total <= w) { print $0; next }
         w = w - 1                                # fall into cut at w-1, then add …
       }
-      n = length($0); i = 1; total = 0; out = ""; wlist = ""; emitted = 0; p = 0
+      n = length($0); i = 1; total = 0; out = ""; wlist = ""; emitted = 0; p = 0; projfull = 0; tailg = ""
       while (i <= n) {
         b = B[substr($0, i, 1)]
         if (b == 27) { j = esc($0, i); if (mode != "len" && mode != "clip" && mode != "ws") out = out substr($0, i, j - i); i = j; continue }
@@ -1799,10 +1815,16 @@ cell_ops() { # mode [-v k=v]… — one LC_ALL=C awk engine for display-cell ops
           if (total >= w) break
           continue
         }
-        # proj: frozen prefix [0,gutter) always emits; window cells [gutter+off,…)
-        if (mode == "proj" && (p < gutter || p >= gutter + off)) {
-          if (emitted + cw <= cols) { out = out ch; emitted += cw }
-          else { if (emitted < cols) out = out " "; break }   # straddle -> pad, else stop
+        # proj: frozen prefix [0,gutter) always emits; window cells [gutter+off,…).
+        # Content emits into cols-1 — when the window cuts the line off, the last
+        # cell carries its own trailing border glyph (│/┐/┤/┘) so the
+        # projected box keeps its physical right edge
+        if (mode == "proj") {
+          if (p < gutter || p >= gutter + off) {
+            if (!projfull && emitted + cw <= cols - 1) { out = out ch; emitted += cw }
+            else if (!projfull) { if (emitted < cols - 1) { out = out " "; emitted += 1 } projfull = 1 }
+          }
+          if (cw > 0) tailg = ch      # last display glyph — the physical border char
         }
         if (mode == "pos" && ch == needle) plist = plist (plist == "" ? "" : " ") p
         p += cw
@@ -1815,7 +1837,8 @@ cell_ops() { # mode [-v k=v]… — one LC_ALL=C awk engine for display-cell ops
       else if (mode == "clip") { cum += (total > 0 ? int((total + cols - 1) / cols) : 1)
                                  if (!full && cum <= rows - 1) { print $0; kept = cum }
                                  else full = 1 }
-      else if (mode == "proj") print out sprintf("%c", 27) "[0m"
+      else if (mode == "proj") { if (projfull && tailg != "") out = out tailg
+                                 print out sprintf("%c", 27) "[0m" }
     }
     END { if (mode == "max") for (t in mx) print t "\t" mx[t]
           if (mode == "len" && NR == 0) print 0
@@ -2031,10 +2054,11 @@ last_run_epoch() { # pr -> epoch of the last finished agent run (map, falling ba
 #       map_init                   → creates map.json when absent
 #     Everything else is a read: map.json, targets, seen/, running/, locks/, watch.log,
 #     pid/cycle files. Layout and painting perform none of these.
-#   status_layout snap cols [rows [every [meta-out]]] — pure: renders the ANSI frame from
-#     the snapshot alone (no gh/Devin calls, no worktree probes, no config/map/seen writes),
-#     so repaints and resizes may repeat it freely. meta-out optionally receives per-record
-#     line anchors for later scroll/resize work.
+#   status_layout snap cols [rows [every [meta-out [hoff [voff]]]]] — pure: renders the
+#     ANSI frame from the snapshot alone — status_table builds the logical grid into
+#     ST_* parts, status_view paints one frame at hoff/voff (empty every = the whole
+#     table), status_meta writes the anchor jsonl — no gh/Devin calls, no worktree
+#     probes, no config/map/seen writes, so repaints and resizes may repeat it freely.
 #   render_status — thin orchestrator: gather to a temp file, then lay it out.
 
 status_gather() { # ttl -> status snapshot (JSON v1) on stdout — see the inventory above
@@ -2243,18 +2267,24 @@ render_hint() { # running -> one contextual "what now" line
   printf '%s\n' "$hint"
 }
 
-status_layout() { # snapshot-file cols [term-rows [watch-every [meta-out [hoff]]]] ->
-                  # the status frame, rendered purely from the snapshot: no gh/Devin calls,
-                  # no worktree probes, no config/map/seen writes — repaints and resizes
-                  # repeat it freely. The table is a *logical* grid composed at its own
-                  # width: watch-every non-empty means a bounded viewport — the table is
-                  # projected into cols cells behind a frozen PR gutter starting at
-                  # horizontal offset hoff (cells), while plain status prints the full
-                  # logical table (a narrow terminal may soft-wrap it — every record and
-                  # column stays reachable there). term-rows shrinks optional chrome
-                  # (activity) before the frame clip may starve the body; meta-out gets
-                  # geometry + per-record line anchors (jsonl) for scroll/resize consumers.
-  local snap="$1" cols="$2" term_rows="${3:-}" every="${4:-}" meta_out="${5:-}" hoff="${6:-0}"
+status_table() { # snapshot-file cols [term-rows [watch-every]] -> builds the frame's
+                  # fixed and scrollable parts into ST_* globals. Pure — renders only
+                  # from the snapshot: no gh/Devin calls, no worktree probes, no
+                  # config/map/seen writes, so repaints and resizes may rebuild it
+                  # freely. ST_HEAD/ST_TAIL = the fixed frame lines (chrome above and
+                  # below the table — header, activity, hint); ST_FOOT = the
+                  # unterminated -w footer; ST_TBL = the full logical table (top rule
+                  # block + every body row + bottom rule) composed at its own width:
+                  # core columns at measured cell widths (never squeezed or dropped),
+                  # TITLE at min(widest title, cols − gutter) when TITLE_W=0, the pin
+                  # verbatim otherwise. The scroll geometry lands in ST_GUTTER,
+                  # ST_LOGIW, ST_BODYLINES, ST_VREG (the record-region height — the
+                  # rows left for body lines once fixed chrome is paid, activity
+                  # shrinking first), ST_MAXVOFF/ST_MAXHOFF; the record anchors come
+                  # back as ST_REC_N/ST_REC_B/ST_REC_C/ST_REC_F (+ ST_MORE* cap row).
+                  # ST_MODE: table | empty | compact. All settings read the snapshot's
+                  # cfg block, never the process env; the clock freezes to .now.
+  local snap="$1" cols="$2" term_rows="${3:-}" every="${4:-}"
   jq -e '(.v == 1) and (.now | type == "number") and (.repo | type == "string")
          and (.watcher | type == "object") and (.cfg | type == "object")
          and (.prs | type == "array") and (.activity | type == "array")' \
@@ -2302,9 +2332,9 @@ status_layout() { # snapshot-file cols [term-rows [watch-every [meta-out [hoff]]
   line2="${C_DIM}watching ${watch_lbl} · every $(fmt_dur "$INTERVAL") · mode ${PERM_MODE}${extras} · ${CONCURRENCY} parallel · max ${MAX_ROUNDS} rounds · reacts to ${reacts} · ${C_RESET}${poll}"
   [ "$gh_err" = "true" ] && gherr_line="${C_YELLOW}⚠ couldn't reach GitHub — showing cached data (check: gh auth status)${C_RESET}"
 
-  if [ -n "$every" ]; then   # -w: the live footer is part of the frame
-    foot_line="${C_DIM}live · refresh ${every}s (GitHub data every 30s) · updated $(date +%H:%M:%S) · Ctrl-C to exit${C_RESET}"
-  fi
+  if [ -n "$every" ]; then   # -w: the live footer doubles as the fixed controls
+    foot_line="${C_DIM}live · refresh ${every}s · updated $(date +%H:%M:%S) · ${C_BOLD}↑↓/jk ←→/hl PgUp/PgDn g/G 0/\$${C_RESET}${C_DIM} · ${C_BOLD}q${C_RESET}${C_DIM} quit${C_RESET}"
+  fi                           # line — kept short so it stays one physical line
   if [ "$ACTIVITY_LINES" -gt 0 ]; then
     act_hdr="${C_BOLD}recent activity${C_RESET}${C_DIM}  (full log: pr-agent logs · agent transcript: pr-agent logs N)${C_RESET}"
   fi
@@ -2314,7 +2344,7 @@ status_layout() { # snapshot-file cols [term-rows [watch-every [meta-out [hoff]]
   local -a lines=()
   local l
   while IFS= read -r l; do lines+=( "$l" ); done \
-    < <(jq -r '.prs[] | [(.n // 0), (.state // ""), (.title // "" | gsub("[\t\u001f]"; " ")),
+    < <(jq -r '.prs[] | [(.n // 0), (.state // ""), (.title // "" | gsub("[\u0000-\u001f\u007f-\u009f]"; " ")),
                         (.review // ""), ((.draft // false) | tostring),
                         ((.pending // 0) | tostring), ((.rounds // 0) | tostring),
                         ((.fail_count // 0) | tostring),
@@ -2351,21 +2381,42 @@ status_layout() { # snapshot-file cols [term-rows [watch-every [meta-out [hoff]]
   fi
   local hint_line; hint_line="$(render_hint "$running" || true)"
 
-  local -a meta_rec=()
-  local title_w=0 gutter=0 logi_w=0 projected=0 compact=0 act_n="$ACTIVITY_LINES"
+  if [ -n "$term_rows" ]; then
+    # bounded output never leans on terminal soft-wrap — every chrome line is
+    # hard-clipped to the viewport (activity events already size to cols)
+    line1="$(trunc "$line1" "$cols")"; line2="$(trunc "$line2" "$cols")"
+    hint_line="$(trunc "$hint_line" "$cols")"
+    [ -n "$gherr_line" ] && gherr_line="$(trunc "$gherr_line" "$cols")"
+    [ -n "$foot_line" ] && foot_line="$(trunc "$foot_line" "$cols")"
+  fi
+
+  # the frame is assembled from parts: ST_HEAD fixed chrome, ST_TBL the full
+  # logical table (top rule block + every body line + bottom rule), ST_TAIL the
+  # blank/activity/hint block; ST_FOOT carries the unterminated -w footer
+  ST_MODE=table; ST_HEAD=() ST_TAIL=() ST_TBL=() ST_FOOT="$foot_line"
+  ST_REC_N=() ST_REC_B=() ST_REC_C=() ST_REC_F=(); ST_MORE='' ST_MORE_F=0 ST_MORE_B=0
+  ST_GUTTER=0 ST_LOGIW=0 ST_TITLE_W=0 ST_SPAN_W=0 ST_PROJECTED=0
+  ST_COLS="$cols" ST_TABLE_ROWS="$TABLE_ROWS" ST_TITLE_LINES="$TITLE_LINES" ST_NRECS="${#order[@]}"
+  ST_BODYLINES=0 ST_VREG=0 ST_MAXVOFF=0 ST_MAXHOFF=0
+  local act_n="$ACTIVITY_LINES"
 
   if [ "$cols" -lt 30 ] || { [ -n "$term_rows" ] && [ "$term_rows" -lt 8 ]; }; then
     # compact safe state — a full grid can't stay bounded below ~30×8; chrome is
     # suppressed too (a wrapped hint alone would eat the budget)
-    compact=1
-    printf '%s%s\n' "$(trunc "$line1" "$cols")" "$C_RESET"
-    printf '%s\n' "${C_YELLOW}terminal too small${C_RESET}${C_DIM} — need ≥30 cols × ≥8 rows${C_RESET}"
-    printf '%s\n' "${C_DIM}${#order[@]} PR records tracked${C_RESET}"
-  elif [ "${#lines[@]}" -eq 0 ]; then
-    printf '%s\n' "$line1" "$line2"
-    [ -n "$gherr_line" ] && printf '%s\n' "$gherr_line"
-    echo
-    printf '%s\n' "${C_DIM}no PRs to show — no open non-draft PRs and no agent history yet${C_RESET}"
+    ST_MODE=compact; ST_FOOT=''
+    ST_HEAD=( "$(trunc "$line1" "$cols")$C_RESET"
+              "$(trunc "${C_YELLOW}terminal too small${C_RESET}${C_DIM} — need ≥30 cols × ≥8 rows${C_RESET}" "$cols")"
+              "${C_DIM}${#order[@]} PR records tracked${C_RESET}" )
+    return 0
+  fi
+
+  ST_HEAD=( "$line1" "$line2" )
+  [ -n "$gherr_line" ] && ST_HEAD+=( "$gherr_line" )
+  ST_HEAD+=( '' )
+
+  if [ "${#lines[@]}" -eq 0 ]; then
+    ST_MODE=empty   # defined no-anchor state: no records, no scroll geometry
+    ST_HEAD+=( "${C_DIM}no PRs to show — no open non-draft PRs and no agent history yet${C_RESET}" )
   else
     # measure every cell once (headings included) — metadata columns get their true
     # content width so long agent states and model ids stay reachable off-screen
@@ -2400,14 +2451,15 @@ status_layout() { # snapshot-file cols [term-rows [watch-every [meta-out [hoff]]
     # TITLE gets the largest useful width beside the frozen PR gutter: bounded by
     # real content and the viewport, never squeezed to fit the metadata columns —
     # those overflow into logical space (the projection clips them) instead
-    gutter=$(( pr_w + 4 ))                       # │␣PR␣│
+    local gutter=$(( pr_w + 4 ))                 # │␣PR␣│
     local usable_vp=$(( cols - gutter ))
+    local title_w
     if [ "$TITLE_W" -gt 0 ]; then title_w=$TITLE_W; [ "$title_w" -lt 5 ] && title_w=5   # pin = logical width, floored at the TITLE heading
     else title_w=$title_max; [ "$title_w" -gt "$usable_vp" ] && title_w=$usable_vp; [ "$title_w" -lt 1 ] && title_w=1; fi
 
     COL_W=( "$pr_w" "$title_w" "$rev_w" "$st_w" "$rnd_w" "$mdl_w" )
     local -a hdr_args=( PR "$C_BOLD" 2 TITLE "$C_BOLD" 5 REVIEW "$C_BOLD" 6 "AGENT STATE" "$C_BOLD" 11 ROUNDS "$C_BOLD" 6 MODEL "$C_BOLD" 5 )
-    local show_lastrun=0 show_session=0 i
+    local show_lastrun=0 show_session=0 i logi_w=0
     for i in "${COL_W[@]}"; do logi_w=$(( logi_w + i + 3 )); done; logi_w=$(( logi_w + 1 ))
     if [ $(( logi_w + lrun_w + 3 )) -le "$cols" ]; then   # optional columns only into
       show_lastrun=1; COL_W+=( "$lrun_w" ); logi_w=$(( logi_w + lrun_w + 3 ))   # genuine slack
@@ -2419,19 +2471,20 @@ status_layout() { # snapshot-file cols [term-rows [watch-every [meta-out [hoff]]
     fi
     local span_w=$(( logi_w - gutter - 3 ))   # merged TITLE..last content width (cap row)
 
-    local shown hidden=0 hidden_open=0 cost k gherr_n=0 lnext drawn=0 title_lines="$TITLE_LINES"
+    local shown hidden=0 hidden_open=0 cost k gherr_n=0 lnext bnext=0 drawn=0
+    local title_lines="$TITLE_LINES"
     shown="${#order[@]}"
     # TABLE_ROWS counts records, not screen lines: 0 = every record renders
-    # (the -w frame clip reveals what fits); a positive cap keeps the first N.
+    # (scrolling reaches them all); a positive cap keeps the first N.
     # TITLE_LINES is a user/resolved cap — never shrunk to fit the screen.
     [ "$TABLE_ROWS" -gt 0 ] && [ "$TABLE_ROWS" -lt "$shown" ] && shown="$TABLE_ROWS"
     [ "$gh_err" = "true" ] && gherr_n=1
     lnext=$(( 2 + gherr_n + 1 + 3 + 1 ))   # first record's 1-based frame line: header(2) + gherr + blank + rules/header(3)
 
-    local -a tbl=() row=() crow=()
-    tbl+=( "$(draw_rule ┌ ┬ ┐)" )
-    tbl+=( "$(draw_row "${hdr_args[@]}")" )
-    tbl+=( "$(draw_rule ├ ┼ ┤)" )
+    local -a row=() crow=()
+    ST_TBL+=( "$(draw_rule ┌ ┬ ┐)" )
+    ST_TBL+=( "$(draw_row "${hdr_args[@]}")" )
+    ST_TBL+=( "$(draw_rule ├ ┼ ┤)" )
     for (( i = 0; i < ${#order[@]}; i++ )); do
       num="${order[$i]}"
       if [ "$drawn" -lt "$shown" ]; then
@@ -2444,14 +2497,15 @@ status_layout() { # snapshot-file cols [term-rows [watch-every [meta-out [hoff]]
               "${omdl[$i]}" "${obase[$i]}" "${cw_m[$i]}" )
         [ "$show_lastrun" -eq 1 ] && row+=( "${olrd[$i]}" "${obase[$i]}" "${cw_l[$i]}" )
         [ "$show_session" -eq 1 ] && row+=( "${osidd[$i]}" "$C_DIM" "${cw_x[$i]}" )
-        tbl+=( "$(draw_row "${row[@]}")" )
+        ST_TBL+=( "$(draw_row "${row[@]}")" )
         for (( k = 1; k < cost; k++ )); do   # continuations: title text only, regular blank cells
           crow=( '' '' 0 "${WRAP_LINES[$k]}" "${obase[$i]}" "${WRAP_W[$k]}" '' '' 0 '' '' 0 '' '' 0 '' '' 0 )
           [ "$show_lastrun" -eq 1 ] && crow+=( '' '' 0 )
           [ "$show_session" -eq 1 ] && crow+=( '' '' 0 )
-          tbl+=( "$(draw_row "${crow[@]}")" )
+          ST_TBL+=( "$(draw_row "${crow[@]}")" )
         done
-        meta_rec+=( "{\"n\":$num,\"line\":$lnext,\"title_lines\":$cost}" ); lnext=$(( lnext + cost ))
+        ST_REC_N+=( "$num" ); ST_REC_B+=( "$bnext" ); ST_REC_C+=( "$cost" ); ST_REC_F+=( "$lnext" )
+        lnext=$(( lnext + cost )); bnext=$(( bnext + cost ))
         drawn=$(( drawn + 1 ))
         continue
       fi
@@ -2461,48 +2515,367 @@ status_layout() { # snapshot-file cols [term-rows [watch-every [meta-out [hoff]]
     if [ "$hidden" -gt 0 ]; then   # only reachable via an explicit TABLE_ROWS cap
       local more="… ${hidden} more"
       [ "$hidden_open" -gt 0 ] && more="$more ($hidden_open open)"
-      tbl+=( "$(draw_span "$more — TABLE_ROWS=$TABLE_ROWS" "$C_DIM" "$span_w" "$(cell_len "$more — TABLE_ROWS=$TABLE_ROWS")")" )
-      meta_rec+=( "{\"more\":$hidden,\"line\":$lnext}" )
+      ST_TBL+=( "$(draw_span "$more — TABLE_ROWS=$TABLE_ROWS" "$C_DIM" "$span_w" "$(cell_len "$more — TABLE_ROWS=$TABLE_ROWS")")" )
+      ST_MORE="$hidden" ST_MORE_F="$lnext" ST_MORE_B="$bnext"
     fi
-    tbl+=( "$(draw_rule └ ┴ ┘)" )
-
-    # optional chrome shrinks before it could starve the body: with a row budget,
-    # the activity section (header + N events + trailing blank) emits at most
-    # what truly remains
-    if [ -n "$term_rows" ] && [ "$ACTIVITY_LINES" -gt 0 ]; then
-      local fixed=$(( $(phys_lines "$line1" "$cols") + $(phys_lines "$line2" "$cols") + 1 + ${#tbl[@]} + 1 + $(phys_lines "$hint_line" "$cols") ))
-      [ -n "$gherr_line" ] && fixed=$(( fixed + $(phys_lines "$gherr_line" "$cols") ))
-      [ -n "$foot_line" ] && fixed=$(( fixed + 1 + $(phys_lines "$foot_line" "$cols") ))
-      local budget=$(( term_rows - 1 - fixed - $(phys_lines "$act_hdr" "$cols") - 1 ))
-      [ "$budget" -lt 0 ] && budget=0
-      [ "$act_n" -gt "$budget" ] && act_n=$budget
-    fi
-
-    printf '%s\n' "$line1" "$line2"
-    [ -n "$gherr_line" ] && printf '%s\n' "$gherr_line"
-    echo
-    if [ -n "$every" ]; then   # bounded viewport: project horizontally — frozen PR
-      projected=1            # gutter, window at hoff, lines never soft-wrap
-      printf '%s\n' "${tbl[@]}" | cell_ops proj -v gutter="$gutter" -v cols="$cols" -v off="$hoff"
-    else
-      printf '%s\n' "${tbl[@]}"
-    fi
-  fi
-  if [ -n "$meta_out" ]; then   # anchors for scroll/resize: geometry + one entry per drawn record
-    { printf '%s\n' "{\"type\":\"geometry\",\"cols\":$cols,\"title_w\":$title_w,\"gutter\":$gutter,\"logical_w\":$logi_w,\"hoff\":$hoff,\"projected\":$projected,\"span_w\":${span_w:-0},\"title_lines\":${title_lines:-0},\"table_rows\":$TABLE_ROWS,\"records\":${#order[@]}}"
-      if [ "${#meta_rec[@]}" -gt 0 ]; then printf '%s\n' "${meta_rec[@]}"; fi
-    } >"$meta_out" 2>/dev/null || true
+    ST_TBL+=( "$(draw_rule └ ┴ ┘)" )
+    ST_BODYLINES=$(( ${#ST_TBL[@]} - 4 ))
+    ST_GUTTER="$gutter" ST_LOGIW="$logi_w" ST_TITLE_W="$title_w" ST_SPAN_W="$span_w"
+    [ -n "$every" ] && ST_PROJECTED=1
+    ST_MAXHOFF=$(( logi_w - cols )); [ "$ST_MAXHOFF" -lt 0 ] && ST_MAXHOFF=0
   fi
 
-  [ "$compact" -eq 1 ] && return 0
-  echo
+  # vertical budget: the record region gets what remains once fixed chrome is
+  # paid for — activity (header + events + its trailing blank) shrinks into the
+  # leftovers before it could starve the body; no row budget keeps everything
+  if [ -n "$term_rows" ]; then
+    local fixed avail act_room
+    fixed=$(( $(phys_lines "$line1" "$cols") + $(phys_lines "$line2" "$cols") + 2 + $(phys_lines "$hint_line" "$cols") ))   # +2: blank before table + blank before hint
+    [ -n "$gherr_line" ] && fixed=$(( fixed + $(phys_lines "$gherr_line" "$cols") ))
+    [ -n "$foot_line" ] && fixed=$(( fixed + 1 + $(phys_lines "$foot_line" "$cols") ))
+    [ "$ST_MODE" = table ] && fixed=$(( fixed + 4 ))   # top rule block + bottom rule
+    avail=$(( term_rows - 1 - fixed ))
+    if [ "$ST_MODE" = table ]; then
+      ST_VREG="$avail"; [ "$ST_VREG" -gt "$ST_BODYLINES" ] && ST_VREG="$ST_BODYLINES"; [ "$ST_VREG" -lt 1 ] && ST_VREG=1
+      ST_MAXVOFF=$(( ST_BODYLINES - ST_VREG )); [ "$ST_MAXVOFF" -lt 0 ] && ST_MAXVOFF=0
+      act_room=$(( avail - ST_VREG ))
+    else act_room="$avail"; fi
+    [ "$act_room" -lt 0 ] && act_room=0
+    if [ "$ACTIVITY_LINES" -gt 0 ]; then
+      act_n=$(( act_room - 2 )); [ "$act_n" -gt "$ACTIVITY_LINES" ] && act_n="$ACTIVITY_LINES"; [ "$act_n" -lt 0 ] && act_n=0
+    fi
+  else
+    [ "$ST_MODE" = table ] && ST_VREG="$ST_BODYLINES"
+  fi
+
+  ST_TAIL+=( '' )
   if [ "$act_n" -gt 0 ]; then
-    printf '%s\n' "$act_hdr"
-    jq -r '.activity[]?' "$snap" | recent_events "$act_n" "$cols"
-    echo
+    ST_TAIL+=( "$act_hdr" )
+    local ev
+    while IFS= read -r ev; do ST_TAIL+=( "$ev" ); done \
+      < <(jq -r '.activity[]?' "$snap" | recent_events "$act_n" "$cols")
+    ST_TAIL+=( '' )
   fi
-  printf '%s\n' "$hint_line"
-  if [ -n "$foot_line" ]; then printf '\n%s' "$foot_line"; fi
+  ST_TAIL+=( "$hint_line" )
+}
+
+status_view() { # cols every hoff voff -> one frame (stdout) composed from the ST_*
+                # parts status_table left: fixed chrome verbatim; the table
+                # projected through body window [voff, voff+ST_VREG) at cell
+                # offset hoff between pinned top/bottom rules — plain mode
+                # (empty every) prints the whole logical table. Both offsets
+                # clamp into [0, ST_MAX*]; applied values land in ST_VOFF/ST_HOFF.
+  local cols="$1" every="${2:-}" hoff="${3:-0}" voff="${4:-0}"
+  ST_HOFF="${hoff:-0}"; ST_VOFF="${voff:-0}"
+  [ "$ST_HOFF" -lt 0 ] 2>/dev/null && ST_HOFF=0
+  [ "$ST_HOFF" -gt "$ST_MAXHOFF" ] && ST_HOFF="$ST_MAXHOFF"
+  [ "$ST_VOFF" -lt 0 ] 2>/dev/null && ST_VOFF=0
+  [ "$ST_VOFF" -gt "$ST_MAXVOFF" ] && ST_VOFF="$ST_MAXVOFF"
+  [ "${#ST_HEAD[@]}" -gt 0 ] && printf '%s\n' "${ST_HEAD[@]}"
+  if [ "$ST_MODE" = table ]; then
+    if [ -n "$every" ]; then   # bounded viewport: rules stay pinned, the record
+      local nb               # window slides between them, gutter frozen at hoff
+      nb=$(( ${#ST_TBL[@]} - 1 ))
+      { printf '%s\n' "${ST_TBL[@]:0:3}"
+        printf '%s\n' "${ST_TBL[@]:$(( 3 + ST_VOFF )):$ST_VREG}"
+        printf '%s\n' "${ST_TBL[$nb]}"
+      } | cell_ops proj -v gutter="$ST_GUTTER" -v cols="$cols" -v off="$ST_HOFF"
+    else
+      printf '%s\n' "${ST_TBL[@]}"
+    fi
+  fi
+  [ "${#ST_TAIL[@]}" -gt 0 ] && printf '%s\n' "${ST_TAIL[@]}"
+  [ -n "$ST_FOOT" ] && printf '\n%s' "$ST_FOOT"
+  return 0
+}
+
+status_meta() { # meta-out -> geometry + per-record anchors (jsonl) from the ST_*
+                # state status_table/status_view left behind
+  local out="$1" i
+  { printf '%s\n' "{\"type\":\"geometry\",\"cols\":$ST_COLS,\"title_w\":$ST_TITLE_W,\"gutter\":$ST_GUTTER,\"logical_w\":$ST_LOGIW,\"hoff\":$ST_HOFF,\"voff\":$ST_VOFF,\"projected\":$ST_PROJECTED,\"span_w\":$ST_SPAN_W,\"title_lines\":$ST_TITLE_LINES,\"table_rows\":$ST_TABLE_ROWS,\"records\":$ST_NRECS,\"vreg\":$ST_VREG,\"body_lines\":$ST_BODYLINES,\"max_voff\":$ST_MAXVOFF,\"max_hoff\":$ST_MAXHOFF}"
+    for (( i = 0; i < ${#ST_REC_N[@]}; i++ )); do
+      printf '%s\n' "{\"n\":${ST_REC_N[$i]},\"line\":${ST_REC_F[$i]},\"bline\":${ST_REC_B[$i]},\"title_lines\":${ST_REC_C[$i]}}"
+    done
+    [ -n "$ST_MORE" ] && printf '%s\n' "{\"more\":$ST_MORE,\"line\":$ST_MORE_F,\"bline\":$ST_MORE_B}"
+    return 0
+  } >"$out" 2>/dev/null || true
+}
+
+status_layout() { # snapshot-file cols [term-rows [watch-every [meta-out [hoff [voff]]]]] ->
+                  # the status frame, rendered purely from the snapshot: build
+                  # (status_table) then paint (status_view). watch-every non-empty
+                  # bounds the viewport — pinned rules, frozen PR gutter, body
+                  # window [voff, voff+vreg) at hoff — while plain status prints
+                  # the whole logical table; meta-out gets the scroll anchors.
+  status_table "$1" "$2" "${3:-}" "${4:-}"
+  status_view "$2" "${4:-}" "${6:-0}" "${7:-0}"
+  [ -z "${5:-}" ] || status_meta "$5"
+  return 0
+}
+
+status_interactive() { # -> 0 when -w can drive the keyboard viewport: usable
+                       # input + output TTYs and the terminal controls it needs
+  [ -t 0 ] && [ -t 1 ] || return 1
+  stty -g >/dev/null 2>&1 || return 1
+  term_cols >/dev/null 2>&1 && term_lines >/dev/null 2>&1 || return 1
+}
+
+status_tty_restore() { # EXIT-trap terminal restore — reads globals only (function
+                       # locals are already unwound when EXIT fires): saved
+                       # termios, cursor visibility, the alt screen, the watch
+                       # snapshot + its private TMPDIR. Idempotent. Emit to
+                       # /dev/tty, never stdout: a signal caught mid
+                       # `status_gather >"$snap.new"` makes the trap inherit
+                       # the interrupted redirect, and plain-stdout sequences
+                       # would land in the snapshot instead of the terminal.
+  [ "${WATCH_TTY:-0}" = "1" ] || return 0
+  WATCH_TTY=0
+  [ -n "${WATCH_SNAP:-}" ] && rm -f "$WATCH_SNAP" "$WATCH_SNAP.new"; WATCH_SNAP=''
+  [ -n "${WATCH_TMPD:-}" ] && rm -rf "$WATCH_TMPD"; WATCH_TMPD=''
+  [ -n "${STTY_SAVE:-}" ] && stty "$STTY_SAVE" </dev/tty 2>/dev/null
+  { tput cnorm 2>/dev/null; tput rmcup 2>/dev/null || printf '\033[?1049l'; } >/dev/tty 2>/dev/null || true
+  return 0
+}
+
+keybuf_drain() { # -> appends one byte of pending input to KEYBUF, bounded at the
+                 # 1s read -t deadline. bash 3.2's `read -n` retries VMIN=0's
+                 # zero-byte returns forever, so read -t 1 is the only bounded
+                 # read: pending bytes come back instantly, only a genuinely
+                 # stalled stream (lone ESC, abandoned partial sequence) pays
+                 # the second — never an actual hang.
+  local more=''
+  IFS= read -rsn1 -t 1 more 2>/dev/null || true
+  KEYBUF+="$more"
+}
+
+status_key() { # -> KEY: up/down/left/right/pgup/pgdn/top/bot/hmin/hmax/quit/eof/
+               # none. One keypress from KEYBUF or stdin (-icanon -echo, ISIG
+               # kept): read -t 1 is the 1s poll tick — bash 3.2 gives rc 1 for
+               # BOTH timeout and EOF, so a dead/closed stdin is detected by its
+               # instant failures: several empty reads inside one wall second
+               # mean EOF (real ticks take ~1s each; a WINCH interruption resets
+               # the count). ESC opens a small CSI/SS3 decoder — a byte that
+               # can't extend a known sequence is left in (or pushed back
+               # into) KEYBUF and dispatched as its own key next call, so
+               # ESC-then-q still quits.
+  KEY=none
+  local ch c p='' final=''
+  if [ -n "$KEYBUF" ]; then ch="${KEYBUF:0:1}"; KEYBUF="${KEYBUF:1}"
+  else
+    local rc=0
+    IFS= read -rsn1 -t 1 ch 2>/dev/null || rc=$?
+    if [ "$rc" -ne 0 ]; then
+      if [ "${WATCH_RESIZE:-0}" = "1" ]; then KEY_EOF_N=0
+      elif [ "$SECONDS" = "${KEY_EOF_S:-x}" ]; then KEY_EOF_N=$(( ${KEY_EOF_N:-0} + 1 ))
+      else KEY_EOF_S=$SECONDS; KEY_EOF_N=1; fi
+      [ "${KEY_EOF_N:-0}" -gt 5 ] && KEY=eof
+      return 0
+    fi
+  fi
+  case "$ch" in
+    k) KEY=up ;;    j) KEY=down ;;
+    h) KEY=left ;;  l) KEY=right ;;
+    g) KEY=top ;;   G) KEY=bot ;;
+    0) KEY=hmin ;;  '$') KEY=hmax ;;
+    q) KEY=quit ;;
+    $'\e')
+      keybuf_drain
+      case "${KEYBUF:0:1}" in
+        '[') KEYBUF="${KEYBUF:1}"
+             while [ -z "$final" ]; do
+               if [ -z "$KEYBUF" ]; then keybuf_drain; [ -z "$KEYBUF" ] && break; fi
+               c="${KEYBUF:0:1}"; KEYBUF="${KEYBUF:1}"
+               if [[ "$c" =~ ^[0-9\;?]$ ]]; then p="$p$c"; else final="$c"; fi
+             done
+             case "$final" in
+               A) KEY=up ;;   B) KEY=down ;;
+               C) KEY=right ;; D) KEY=left ;;
+               H) KEY=top ;;  F) KEY=bot ;;
+               '~') case "${p%%;*}" in
+                      5) KEY=pgup ;; 6) KEY=pgdn ;;
+                      1|7) KEY=top ;; 4|8) KEY=bot ;;
+                    esac ;;
+               ?) KEYBUF="$final$KEYBUF" ;;   # unknown final — requeue it to
+             esac ;;                          # dispatch as its own key next call
+        O) KEYBUF="${KEYBUF:1}"
+           [ -z "$KEYBUF" ] && keybuf_drain
+           c="${KEYBUF:0:1}"; [ -n "$c" ] && KEYBUF="${KEYBUF:1}"
+           case "$c" in
+             A) KEY=up ;;   B) KEY=down ;;
+             C) KEY=right ;; D) KEY=left ;;
+             H) KEY=top ;;  F) KEY=bot ;;
+             ?) KEYBUF="$c$KEYBUF" ;;
+           esac ;;
+      esac ;;
+  esac
+  return 0
+}
+
+status_anchor() { # anchor-pr anchor-delta [old-height old-order prev-voff] ->
+                  # resolved voff: re-anchors the viewport against the freshly
+                  # built ST_REC_* table. Same PR — its new body line plus the
+                  # intra-title delta: old-height > 0 scales the delta by
+                  # new/old record height (the resize best-effort), 0 keeps it
+                  # verbatim (the refresh rule). Evicted — the nearest surviving
+                  # successor in the OLD order, then predecessor, then the first
+                  # record that order didn't have. prev-voff 0 stays top-
+                  # following; an empty build is the defined 0 state.
+  local an="$1" ad="${2:-0}" aoc="${3:-0}" oldorder="${4:-}" pvoff="${5:-0}"
+  local i n
+  [ "$pvoff" -eq 0 ] 2>/dev/null && { echo 0; return; }
+  [ "${#ST_REC_N[@]}" -eq 0 ] && { echo 0; return; }
+  local all=" ${ST_REC_N[*]} "
+  if [ -n "$an" ]; then
+    for (( i = 0; i < ${#ST_REC_N[@]}; i++ )); do
+      if [ "${ST_REC_N[$i]}" = "$an" ]; then
+        n="$ad"
+        [ "$aoc" -gt 0 ] 2>/dev/null && [ "$aoc" != "${ST_REC_C[$i]}" ] && \
+          n=$(( ad * ${ST_REC_C[$i]} / aoc ))
+        [ "$n" -lt 0 ] 2>/dev/null && n=0
+        [ "$n" -ge "${ST_REC_C[$i]}" ] && n=$(( ${ST_REC_C[$i]} - 1 ))
+        echo $(( ${ST_REC_B[$i]} + n )); return
+      fi
+    done
+    # evicted — nearest surviving successor, then predecessor, in the old order
+    local seen=0 nxt='' prv=''
+    for n in $oldorder; do
+      [ "$n" = "$an" ] && { seen=1; continue; }
+      case "$all" in *" $n "*) ;; *) continue ;; esac
+      if [ "$seen" -eq 1 ]; then nxt="$n"; break; else prv="$n"; fi
+    done
+    for n in "$nxt" "$prv"; do
+      [ -z "$n" ] && continue
+      for (( i = 0; i < ${#ST_REC_N[@]}; i++ )); do
+        [ "${ST_REC_N[$i]}" = "$n" ] && { echo "${ST_REC_B[$i]}"; return; }
+      done
+    done
+  fi
+  # nothing else survived — the first record the old order didn't have
+  for (( i = 0; i < ${#ST_REC_N[@]}; i++ )); do
+    n="${ST_REC_N[$i]}"
+    case " $oldorder " in *" $n "*) ;; *) echo "${ST_REC_B[$i]}"; return ;; esac
+  done
+  echo 0
+}
+
+anchor_update() { # -> ANCHOR_N/ANCHOR_D/ANCHOR_C covering ST_VOFF in the current
+                  # build — the re-anchor identity for the next refresh/resize.
+                  # ST_VOFF 0 keeps the top-following no-anchor state; a voff on
+                  # the cap row anchors the last record's final line.
+  ANCHOR_N=''; ANCHOR_D=0; ANCHOR_C=0
+  [ "$ST_VOFF" -le 0 ] && return 0
+  local i ai=-1
+  for (( i = 0; i < ${#ST_REC_N[@]}; i++ )); do
+    if [ "${ST_REC_B[$i]}" -le "$ST_VOFF" ]; then ai=$i; else break; fi
+  done
+  [ "$ai" -ge 0 ] || return 0
+  ANCHOR_N="${ST_REC_N[$ai]}"
+  ANCHOR_D=$(( ST_VOFF - ${ST_REC_B[$ai]} ))
+  [ "$ANCHOR_D" -ge "${ST_REC_C[$ai]}" ] && ANCHOR_D=$(( ${ST_REC_C[$ai]} - 1 ))
+  ANCHOR_C="${ST_REC_C[$ai]}"
+}
+
+key_nav() { # KEY -> applies one navigation key to the caller's voff/hoff (bash
+            # dynamic scope); rc 0 = a navigation key, 1 = anything else.
+            # Bounds come from ST_VREG/ST_MAXVOFF/ST_MAXHOFF — status_view
+            # re-clamps at paint time, so out-of-range stops are harmless
+  case "$1" in
+    up)    voff=$(( voff - 1 )) ;;
+    down)  voff=$(( voff + 1 )) ;;
+    left)  hoff=$(( hoff - 1 )) ;;
+    right) hoff=$(( hoff + 1 )) ;;
+    pgup)  voff=$(( voff - (ST_VREG > 1 ? ST_VREG - 1 : 1) )) ;;
+    pgdn)  voff=$(( voff + (ST_VREG > 1 ? ST_VREG - 1 : 1) )) ;;
+    top)   voff=0 ;;
+    bot)   voff=$ST_MAXVOFF ;;
+    hmin)  hoff=0 ;;
+    hmax)  hoff=$ST_MAXHOFF ;;
+    *) return 1 ;;
+  esac
+}
+
+status_watch() { # every -> the interactive two-axis status viewport (TTYs and
+                 # terminal controls already verified). The loop owns the
+                 # snapshot, voff/hoff and the anchor: status_gather runs only on
+                 # the refresh deadline; status_table rebuilds on gather or
+                 # resize; status_view repaints the cached build per keypress —
+                 # navigation never fetches, probes, or writes state. Returns on
+                 # q, EOF, or a signal; the EXIT trap restores the terminal.
+  local every="$1"
+  local snap cols rows frame clipped clip_hint next_gather=0 watch_tmpd
+  local voff=0 hoff=0 gather=1 rebuild=1 old_order='' aremode=refresh
+  local last_cols='' last_rows='' every_i="${every%.*}"
+  STTY_SAVE="$(stty -g 2>/dev/null)" || return 1
+  WATCH_TTY=1
+  trap status_tty_restore EXIT
+  trap 'exit 0' INT TERM HUP
+  trap 'WATCH_RESIZE=1' WINCH
+  tput smcup 2>/dev/null || printf '\033[?1049h' # alt screen: repaints stay out of scrollback
+  tput civis 2>/dev/null
+  stty -icanon -echo 2>/dev/null      # VMIN=1 VTIME=0; ISIG kept — ^C stays a signal
+  printf '\033[2J'
+  # private TMPDIR for the watch's lifetime: every mktemp downstream (the snap
+  # plus gather-internal recs/act/refresh tmps) lands inside, so the EXIT trap
+  # removes them all even when a signal lands mid-status_gather
+  watch_tmpd="$(mktemp -d)"; WATCH_TMPD="$watch_tmpd"; TMPDIR="$watch_tmpd"; export TMPDIR
+  snap="$(mktemp)"; WATCH_SNAP="$snap"; KEYBUF=''
+  [[ "$every_i" =~ ^[0-9]+$ ]] || every_i=5   # garbage interval -> the -w default
+  every_i=$((10#$every_i))                    # digits only, or 008 trips octal math
+  [ "$every_i" -lt 1 ] && every_i=1
+  while true; do
+    if [ "$gather" -eq 1 ]; then
+      old_order="${ST_REC_N[*]-}"          # the order the user last saw — the
+      if status_gather 30 >"$snap.new" 2>/dev/null && [ -s "$snap.new" ]; then
+        mv -f "$snap.new" "$snap"          # eviction fallback walks it on refresh
+        gather=0; rebuild=1; aremode=refresh
+        next_gather=$(( $(date +%s) + every_i ))
+      else
+        rm -f "$snap.new"
+        if [ -s "$snap" ]; then gather=0; next_gather=$(( $(date +%s) + every_i ))
+        else status_key                  # no snapshot yet — retry on the input
+          case "$KEY" in eof|quit) rm -f "$snap"; return 0 ;; esac
+          continue; fi                   # tick so q/EOF still get through
+      fi
+    fi
+    cols="$(term_cols)"; rows="$(term_lines)"
+    if [ "$WATCH_RESIZE" = "1" ]; then WATCH_RESIZE=0; rebuild=1; aremode=resize
+    elif [ "$cols" != "$last_cols" ] || [ "$rows" != "$last_rows" ]; then
+      [ -n "$last_cols" ] && { rebuild=1; aremode=resize; }   # WINCH missed — geometry moved
+    fi
+    last_cols="$cols"; last_rows="$rows"
+    if [ "$rebuild" -eq 1 ]; then
+      status_table "$snap" "$cols" "$rows" "$every_i"
+      voff="$(status_anchor "$ANCHOR_N" "$ANCHOR_D" "$([ "$aremode" = resize ] && echo "$ANCHOR_C" || echo 0)" "$old_order" "$voff")"
+      rebuild=0
+    fi
+    # status_view runs in $() — its ST_HOFF/ST_VOFF clamps die in the subshell,
+    # so the watch clamps the locals itself and republishes the applied values
+    # (anchor_update and any later meta read ST_VOFF for the visible window)
+    [ "$hoff" -lt 0 ] 2>/dev/null && hoff=0
+    [ "$hoff" -gt "${ST_MAXHOFF:-0}" ] 2>/dev/null && hoff=${ST_MAXHOFF:-0}
+    [ "$voff" -lt 0 ] 2>/dev/null && voff=0
+    [ "$voff" -gt "${ST_MAXVOFF:-0}" ] 2>/dev/null && voff=${ST_MAXVOFF:-0}
+    frame="$(status_view "$cols" "$every_i" "$hoff" "$voff")"
+    ST_HOFF="$hoff"; ST_VOFF="$voff"; anchor_update
+    clipped="$(printf '%s\n' "$frame" | cell_ops clip -v cols="$cols" -v rows="$rows")"
+    if [[ "$clipped" == *$'\x02'* ]]; then
+      clip_hint="make the terminal taller"
+      [ "$TABLE_ROWS" -gt 0 ] && clip_hint="lower TABLE_ROWS or make the terminal taller"
+      frame="${clipped%%$'\x02'*}"
+      frame+="$(trunc "${C_DIM}… ${clipped##*$'\x02'} more lines — ${clip_hint}${C_RESET}" "$cols")"
+    else frame="$clipped"; fi
+    printf '\033[H%s\033[0m\033[J' "${frame//$'\n'/$'\033[K\n'}"
+    while true; do                        # input phase: keys until the repaint,
+      status_key                          # resize or refresh deadline breaks it
+      case "$KEY" in eof|quit) rm -f "$snap"; return 0 ;; esac
+      # nav key → repaint; queued repeats surface on the next iterations —
+      # a pending byte makes read -n1 return instantly, so bursts process
+      # at full speed without a poll primitive (bash 3.2 has none)
+      key_nav "$KEY" && break
+      [ "${WATCH_RESIZE:-0}" = "1" ] && break
+      [ "$(date +%s)" -ge "$next_gather" ] && { gather=1; break; }
+    done
+  done
 }
 
 render_status() { # ttl [term-rows [watch-every]] -> status screen: gather (side effects) → snapshot → pure layout
@@ -2524,31 +2897,14 @@ cmd_status() {
   case "${1:-}" in
     -w|--watch)
       apply_status_defaults watch
-      local every="${2:-5}" frame rows clipped clip_hint
-      if [ -t 1 ]; then
-        tput smcup 2>/dev/null || printf '\033[?1049h' # alt screen: repaints stay out of scrollback
-        tput civis 2>/dev/null
-        trap 'tput cnorm 2>/dev/null; tput rmcup 2>/dev/null || printf "\033[?1049l"' EXIT
-      fi
-      trap 'exit 0' INT TERM
-      printf '\033[2J'
-      while true; do
-        COLS="$(term_cols)"
-        rows="$(tput lines 2>/dev/null || true)"; rows="${rows:-24}"
-        frame="$(render_status 30 "$rows" "$every")"
-        # physical height counts soft wraps too — a frame taller than the screen
-        # gets bottom-clipped (printing it would scroll): one cell_ops pass emits
-        # the kept prefix + a \x02<dropped-phys> sentinel line when it clipped
-        clipped="$(printf '%s\n' "$frame" | cell_ops clip -v cols="$COLS" -v rows="$rows")"
-        if [[ "$clipped" == *$'\x02'* ]]; then
-          clip_hint="make the terminal taller"
-          [ "$TABLE_ROWS" -gt 0 ] && clip_hint="lower TABLE_ROWS or make the terminal taller"
-          frame="${clipped%%$'\x02'*}"   # kept prefix (ends in \n) — empty when nothing fit
-          frame="${frame}${C_DIM}… ${clipped##*$'\x02'} more lines — ${clip_hint}${C_RESET}"
-        else frame="$clipped"; fi
-        printf '\033[H%s\033[0m\033[J' "${frame//$'\n'/$'\033[K\n'}"
-        sleep "$every"
-      done ;;
+      local every="${2:-5}"
+      if status_interactive && need_repo 2>/dev/null; then
+        status_watch "$every"
+      else
+        # one readable noninteractive snapshot — no cursor-control bytes, no key
+        # waits. Covers redirected streams, missing controls, unwatched repos
+        COLS="$(term_cols)"; render_status 30
+      fi ;;
     *) COLS="$(term_cols)"; apply_status_defaults plain; render_status 0 ;;
   esac
 }
@@ -2595,8 +2951,8 @@ case "${1:-}" in
   _ensure)   shift; need_repo; map_init; ensure_worktree "$@" ;;   # internal — test/smoke.sh drives these
   _blocked)  shift; need_repo; still_blocked "$@" ;;               # internal — rc 0 blocked / 1 free / 2 indeterminate
   _gather)   shift; need_repo; status_gather "${1:-0}" ;;          # internal — prints the status snapshot (JSON)
-  _layout)   shift; [ -f "${1:-}" ] || die "usage: pr-agent _layout SNAPSHOT [COLS [ROWS [EVERY [META_OUT [HOFF]]]]]"
-             setup_colors; status_layout "$1" "${2:-$(term_cols)}" "${3:-}" "${4:-}" "${5:-}" "${6:-0}" ;;
+  _layout)   shift; [ -f "${1:-}" ] || die "usage: pr-agent _layout SNAPSHOT [COLS [ROWS [EVERY [META_OUT [HOFF [VOFF]]]]]]"
+             setup_colors; status_layout "$1" "${2:-$(term_cols)}" "${3:-}" "${4:-}" "${5:-}" "${6:-0}" "${7:-0}" ;;
   attach)    shift; need_repo; cmd_attach "$@" ;;
   peek)      shift; cmd_peek "$@" ;;
   mark-seen) shift; cmd_mark_seen "$@" ;;
