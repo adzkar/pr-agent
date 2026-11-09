@@ -308,9 +308,9 @@ of the `pr-agent` + `pr-agent.sha256` assets into `UPDATE_TMP` (`mktemp -d`)
 (a symlinked install keeps its link and replaces the target; a copy inside a
 git worktree refuses unless `--force`). `UPDATE_TMP`/`UPDATE_STAGED` are
 globals so an `EXIT` trap removes both: a dead download, a checksum
-mismatch, or a failed stage leaves the previous executable. Nothing under
-the state root is read or written — configs, `map.json`, `seen/`, and logs
-carry forward verbatim, and the downgrade path is the supported rollback.
+mismatch, or a failed stage leaves the previous executable. No per-repo
+state is mutated — configs, `map.json`, `seen/`, and logs carry forward
+verbatim, and the downgrade path is the supported rollback.
 A still-running watcher keeps the code it launched with (no hot-swap): the
 update prints a restart note when a `pid` file exists, and restart guidance
 preserves the original `on` arguments (explicit targets, `--launchd`) rather
