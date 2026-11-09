@@ -29,7 +29,15 @@ case "$1/$2" in
   release/download)
     tag="$3"; dir=""; prev=""
     for a in "$@"; do [ "$prev" = "--dir" ] && dir="$a"; prev="$a"; done
-    [ -n "$dir" ] && [ -d "$state/$tag.files" ] && cp "$state/$tag.files"/* "$dir/"
+    [ "${GH_STUB_DL_FAIL:-0}" = "1" ] && exit 1   # simulate a dead download
+    if [ -n "$dir" ] && [ -d "$state/$tag.files" ]; then
+      if [ "${GH_STUB_TRUNC_DL:-0}" = "1" ]; then
+        head -c 50 "$state/$tag.files/pr-agent" >"$dir/pr-agent" 2>/dev/null
+        cp "$state/$tag.files/pr-agent.sha256" "$dir/" 2>/dev/null
+      else
+        cp "$state/$tag.files"/* "$dir/"
+      fi
+    fi
     exit ;;
   pr/list) cat "$state/prs" 2>/dev/null || true; exit 0 ;;
   release/create)
@@ -414,6 +422,56 @@ ucsum="$(shasum "$T/upstate/repos/a__b/config" | cut -d' ' -f1)"
 try_update o "$T/upd/pr-agent"
 eq "update rc" "$RC" 0
 eq "config untouched by update" "$(shasum "$T/upstate/repos/a__b/config" | cut -d' ' -f1)" "$ucsum"
+
+echo "== S31: a failed download leaves the install untouched =="
+new_repo u31 0.1.0
+seed_update 0.1.0 9.9.9
+GH_STUB_DL_FAIL=1 try_update o "$T/upd/pr-agent"
+eq "rc!=0" "$([ $RC -ne 0 ] && echo y)" y
+has "download msg" "$o" "couldn't download"
+eq "untouched VERSION" "$(uver "$T/upd/pr-agent")" "0.1.0"
+eq "no staged leftovers" "0" "$(ls -A "$T/upd" | grep -c 'pr-agent.new' || true)"
+
+echo "== S32: a truncated asset fails checksum, never installs, then recovers =="
+new_repo u32 0.1.0
+seed_update 0.1.0 9.9.9
+GH_STUB_TRUNC_DL=1 try_update o "$T/upd/pr-agent"
+eq "rc!=0" "$([ $RC -ne 0 ] && echo y)" y
+has "checksum msg" "$o" 'checksum verification failed'
+eq "untouched VERSION" "$(uver "$T/upd/pr-agent")" "0.1.0"
+eq "no staged leftovers" "0" "$(ls -A "$T/upd" | grep -c 'pr-agent.new' || true)"
+try_update o "$T/upd/pr-agent"         # repeat after the interruption
+eq "recover rc" "$RC" 0
+eq "installed after recover" "$(uver "$T/upd/pr-agent")" "9.9.9"
+
+echo "== S33: a failed stage leaves no .new file behind =="
+new_repo u33 0.1.0
+seed_update 0.1.0 9.9.9
+mkdir -p "$T/badbin"
+printf '#!/usr/bin/env bash\nexit 1\n' >"$T/badbin/install"; chmod +x "$T/badbin/install"
+PATH="$T/badbin:$PATH" try_update o "$T/upd/pr-agent"
+eq "rc!=0" "$([ $RC -ne 0 ] && echo y)" y
+has "stage msg" "$o" "couldn't stage"
+eq "untouched VERSION" "$(uver "$T/upd/pr-agent")" "0.1.0"
+eq "no staged leftovers" "0" "$(ls -A "$T/upd" | grep -c 'pr-agent.new' || true)"
+
+echo "== S34: a stale staged file doesn't block a repeat update =="
+new_repo u34 0.1.0
+seed_update 0.1.0 9.9.9
+echo 'partial from a killed update' >"$T/upd/.pr-agent.new.stale"   # non-numeric suffix can't collide with .$$.new
+try_update o "$T/upd/pr-agent"
+eq "update rc" "$RC" 0
+eq "installed VERSION" "$(uver "$T/upd/pr-agent")" "9.9.9"
+yes "foreign staged file left alone" "$T/upd/.pr-agent.new.stale"   # a live second update could own it
+
+echo "== S35: a rolled-back binary still runs =="
+new_repo u35 0.1.0
+seed_update 9.9.9 0.1.0               # installed 9.9.9, release 0.1.0 — downgrade = rollback
+try_update o "$T/upd/pr-agent"
+eq "rollback rc" "$RC" 0
+eq "old VERSION installed" "$(uver "$T/upd/pr-agent")" "0.1.0"
+v="$(PR_AGENT_STATE_DIR="$T/upstate" "$T/upd/pr-agent" version 2>/dev/null || true)"
+eq "rolled-back binary runs" "pr-agent 0.1.0" "$v"
 
 echo
 echo "$pass passed, $fail failed"
