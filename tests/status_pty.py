@@ -638,6 +638,10 @@ def s_sigint_mid_gather():
     # numeric targets make status_prs fan fetch_feedback out per PR
     seed = os.path.join(STATE, "prs_seed.jsonl")
     old_seed = open(seed).read()
+    # the gather's `pr list` rewrites the prs.jsonl cache from this seed too,
+    # long before the signal lands — it must come back as well
+    prs_cache = os.path.join(d, "prs.jsonl")
+    old_prs = open(prs_cache).read()
     with open(seed, "w") as f:
         for i in range(6):
             f.write(json.dumps({
@@ -690,10 +694,11 @@ def s_sigint_mid_gather():
     live = [x for x in open(pids_file).read().split() if alive_pid(x)]
     ok("mid-gather SIGINT reaps worker subtree") if not live else \
         bad("mid-gather SIGINT reaps worker subtree", "orphans %r" % live)
-    # the seed is scenario-local too — the gh stub replays it on `pr list`,
-    # so leaving the 6-record version would poison later forced refreshes
+    # scenario-local state goes back — the gh stub replays the seed on
+    # `pr list`, and the killed gather already rewrote the cache from it
     open(os.path.join(d, "targets"), "w").write(old_targets)
     open(seed, "w").write(old_seed)
+    open(prs_cache, "w").write(old_prs)
     p.close()
 
 
