@@ -202,8 +202,10 @@ echo "upgrade: a rolled-back release finds its state intact"
 
 OLD="$G/old-pr-agent"
 # rollback coverage needs the v0.3.0 tag — a shallow/CI checkout may not
-# have it, so fetch before degrading to a (loud) skip, not an invisible one
+# have it, so fetch (prompt-bound — never stalls on interactive auth)
+# before degrading to a (loud) skip, not an invisible one
 git rev-parse -q --verify refs/tags/v0.3.0 >/dev/null 2>&1 || \
+  GIT_TERMINAL_PROMPT=0 GIT_SSH_COMMAND='ssh -oBatchMode=yes' \
   git fetch --tags -q >/dev/null 2>&1 || true
 git show v0.3.0:pr-agent >"$OLD" 2>/dev/null || true
 if [ -s "$OLD" ]; then
