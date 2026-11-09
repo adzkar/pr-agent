@@ -1,6 +1,6 @@
 # Architecture
 
-`pr-agent` is a single bash script (~3250 lines). It polls GitHub for new PR
+`pr-agent` is a single bash script (~3300 lines). It polls GitHub for new PR
 feedback and hands each round to a **persistent Devin CLI session per PR**
 running inside that PR's dedicated git worktree — so the agent keeps context
 across review rounds and never touches your checkout.
@@ -297,6 +297,24 @@ terminal loop; `status_gather` runs in exactly one bounded background worker:
 - **Loading skeleton.** Before the first snapshot lands, `status_skeleton`
   paints the same layout the real data will fill (`loading: true` in the
   snapshot shape), so navigation is interactive immediately.
+
+### Self-update (`cmd_update`)
+
+`latest_release_tag` picks the target (latest release, or the `X.Y.Z` arg —
+`ver_gt` decides upgrade vs reinstall vs downgrade) → `gh release download`
+of the `pr-agent` + `pr-agent.sha256` assets into `UPDATE_TMP` (`mktemp -d`)
+→ sha256 verified **before** anything is staged → `install`ed to
+`<dir>/.pr-agent.new.$$` → `mv` over the invoked copy's resolved real path
+(a symlinked install keeps its link and replaces the target; a copy inside a
+git worktree refuses unless `--force`). `UPDATE_TMP`/`UPDATE_STAGED` are
+globals so an `EXIT` trap removes both: a dead download, a checksum
+mismatch, or a failed stage leaves the previous executable. No per-repo
+state is mutated — configs, `map.json`, `seen/`, and logs carry forward
+verbatim, and the downgrade path is the supported rollback.
+A still-running watcher keeps the code it launched with (no hot-swap): the
+update prints a restart note when a `pid` file exists, and restart guidance
+preserves the original `on` arguments (explicit targets, `--launchd`) rather
+than re-deriving them — a bare `on` would reset targets to "all".
 
 ### Concurrency & locking
 

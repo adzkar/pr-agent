@@ -10,7 +10,11 @@
 #   pr-agent on [--launchd] [all | N...]  Start watching (default: your open non-draft PRs —
 #                                         @all = everyone; --launchd survives reboot/crash)
 #   pr-agent off [--now]            Stop the watcher (--now also kills running agents)
-#   pr-agent status [-w [SECS]]     Dashboard (-w: live refresh, default 5s)
+#   pr-agent status [-w [SECS]]     Dashboard (-w: live refresh, default 5s).
+#                                   -w keys: ↑↓/jk and ←→/hl scroll, PgUp/PgDn,
+#                                   g/G top/bottom, 0/$ left/right edges; q, ^C,
+#                                   or end-of-input exits. Without a tty it
+#                                   prints one plain snapshot — no controls.
 #   pr-agent logs [N] [-f]          Event log, or PR N's latest agent transcript (-f follow)
 #   pr-agent add | rm N...          Add/remove PR numbers from an explicit watch list
 #   pr-agent run N [--force]        Process PR N now in the foreground (--force: redo last round)
@@ -100,7 +104,10 @@
 #   PR_AGENT_STATE_DIR    State root (default ~/.local/state/pr-agent)
 #   DEVIN_BIN             Devin CLI binary (default devin)
 #   PR_AGENT_SESSIONS_DB  Devin sessions index the status MODEL column reads
-#                         (default $XDG_DATA_HOME/devin/cli/sessions.db)
+#                         (default $XDG_DATA_HOME/devin/cli/sessions.db) —
+#                         `adaptive` stays `adaptive`, `unknown` = mapped session
+#                         with no readable evidence, `—` = no session mapped;
+#                         evidence is a bounded refresh, last-observed on lapse
 #
 # Examples:
 #   # one-off:
@@ -1661,7 +1668,7 @@ cmd_update() { # [--check] [--force] [X.Y.Z] -> download a release and install i
     [ -f "$pf" ] || continue
     pid="$(cat "$pf" 2>/dev/null || true)"
     if [ -n "$pid" ] && pid_is_watcher "$pid"; then
-      echo "note: a watcher still runs $VERSION — restart it: pr-agent off && pr-agent on"
+      echo "note: a watcher still runs $VERSION — restart it: pr-agent off, then your original 'pr-agent on' args (a bare 'on' resets the watch list to all and drops --launchd)"
       break
     fi
   done

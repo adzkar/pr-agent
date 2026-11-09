@@ -26,6 +26,21 @@ Once installed, `pr-agent update` replaces it with the latest GitHub release
 whichever copy you invoke — it refuses one inside a git worktree, like this
 repo's editable file, unless `--force`.
 
+The install is atomic — the new script is downloaded, its sha256 verified,
+staged next to the target, then `mv`ed over the resolved real file (a symlinked
+install keeps its link) — so a dead download, bad checksum, or failed stage
+leaves the previous executable in place. Per-repo state is never touched:
+config, session/worktree map, seen markers, and logs all carry forward.
+`update X.Y.Z` pins a version, and that path doubles as rollback — downgrading
+reinstalls an older release, which keeps working on newer state files.
+
+A running watcher keeps the old executable until you restart it (the update
+prints a restart note when one is detected) — restart it the way it was
+started, not with a bare `pr-agent on`, which would reset an explicit `on N…`
+watch list to "all your PRs" and drop `--launchd` supervision. An open
+`status -w` likewise keeps rendering with the code it launched on; close and
+reopen it for the new renderer.
+
 ## Quick start
 
 ```sh
@@ -122,11 +137,21 @@ recent activity  (full log: pr-agent logs · agent transcript: pr-agent logs N)
 - `MODEL` is the model selected for each PR's agent session, read from the
   Devin CLI's sessions index — a router choice like `adaptive` is shown as
   `adaptive`, `unknown` means a session is mapped but has no readable
-  evidence, and `—` means no session exists. `LAST RUN` and `SESSION` are
-  optional: they join the grid only when they fully fit in the spare width
-  after the core columns.
+  evidence, and `—` means no session exists. Evidence refreshes on a bounded
+  background pass (`PR_AGENT_MODEL_TIMEOUT`, default 10s); when it lapses the
+  last observed value stays — the column never guesses. `LAST RUN` and
+  `SESSION` are optional: they join the grid only when they fully fit in the
+  spare width after the core columns.
 - On a very small terminal (under ~30 columns or 8 rows) the dashboard
   degrades to a compact safe state instead of a clipped grid.
+- In `-w`, `↑`/`↓` or `k`/`j` and `←`/`→` or `h`/`l` scroll each axis,
+  `PgUp`/`PgDn` page the body, `g`/`G` (or `Home`/`End`) and `0`/`$` jump to
+  the vertical and horizontal edges, and `q`, `Ctrl-C`, or end-of-input
+  exits — the terminal (modes, cursor, alt screen) is always handed back on
+  the way out, including on `SIGINT`/`SIGTERM`.
+- Piped or without a terminal, `status` and `status -w` print one plain
+  snapshot and exit — no cursor controls, no waiting on keys. `NO_COLOR=1`
+  strips colors; terminals without capabilities get literal fallbacks.
 
 ## What counts as feedback
 
@@ -149,7 +174,9 @@ then the per-repo config saved by `pr-agent on`, then the built-in default
 `saved`, or `default` — plus any rejected invalid values). `on` only pins
 values that came from env or an earlier save — a setting still at its
 built-in default stays unpinned, so defaults like `TITLE_LINES` can vary
-by mode. A one-off env never touches the file; e.g.
+by mode. Across the display keys `0` is consistently the permissive/off
+choice — `TABLE_ROWS` and `TITLE_LINES` uncapped, `TITLE_W` auto,
+`ACTIVITY_LINES` hidden. A one-off env never touches the file; e.g.
 `PR_AGENT_TITLE_LINES=0 pr-agent status` shows full titles for that
 invocation only:
 
@@ -206,6 +233,11 @@ PR_AGENT_TABLE_ROWS=10 pr-agent on
 - State lives under `~/.local/state/pr-agent/repos/<owner>__<repo>`: the
   PR → session/worktree map (`map.json`), event log (`watch.log`), PID,
   feedback caches, agent transcripts.
+- The dashboard keeps its own read-friendly caches alongside — `prs.jsonl`
+  (the PR list), `prs_extra.jsonl` (aged-out PRs), `status_pending`
+  (unprocessed-feedback counts), `status_models` (last observed session
+  models) — rebuilt per refresh and published atomically. Gathering status
+  never creates or rewrites `seen/` markers.
 - Each agent round runs in a dedicated worktree for the PR's branch, so your
   own checkout is never touched.
 - Commands run inside a repo act on that repo; elsewhere they act on the repo

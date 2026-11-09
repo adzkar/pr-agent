@@ -1,7 +1,7 @@
 # pr-agent — agent rules
 
 > Read this before editing. The whole tool is **one file**: `pr-agent`
-> (~3250 lines of bash). The canonical docs are `README.md` (usage) and
+> (~3300 lines of bash). The canonical docs are `README.md` (usage) and
 > `docs/ARCHITECTURE.md` (code map + flows) — read the architecture doc
 > before touching anything past line 100.
 

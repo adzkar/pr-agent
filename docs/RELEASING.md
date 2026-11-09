@@ -59,6 +59,25 @@ gh release view vX.Y.Z   # both assets listed, notes grouped
 pr-agent update          # or: install -m 755 pr-agent /usr/local/bin/pr-agent
 ```
 
+## What users should know about `pr-agent update`
+
+Worth repeating in release notes for any UI/state-affecting release:
+
+- The install is atomic — download, sha256 verify, stage, `mv` over the
+  resolved executable — so interrupted or failed updates leave the previous
+  executable in place.
+- Per-repo state and config are never touched: upgrades preserve targets,
+  session/worktree maps, seen markers, saved settings, and logs. No
+  reinstall/`gc`/`reset` is needed for new UI.
+- Replacing the binary does not hot-upgrade a running watcher — `update`
+  prints a restart note when one is live; restart it with the same `on`
+  arguments it was started with (`on N…`, `--launchd`), not a bare `on`
+  (that resets an explicit watch list to "all" and drops launchd
+  supervision). Open `status -w` panes likewise keep the old renderer
+  until reopened.
+- `update X.Y.Z` also downgrades — the supported rollback path; older
+  binaries keep running on newer state.
+
 ## Resuming an interrupted run
 
 Re-run `./release X.Y.Z` — the version it was cutting (the die message
